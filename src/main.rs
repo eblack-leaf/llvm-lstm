@@ -47,6 +47,10 @@ enum Commands {
         /// Number of benchmark runs for baselines (each run internally does 50 iterations)
         #[arg(long, default_value = "5")]
         baseline_runs: usize,
+
+        /// Number of parallel threads (0 = use all cores)
+        #[arg(long, default_value = "0")]
+        threads: usize,
     },
 
     /// Run exploratory data analysis on collected data
@@ -134,11 +138,34 @@ fn main() -> Result<()> {
             output,
             runs,
             baseline_runs,
+            threads,
         } => {
+            if threads > 0 {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build_global()
+                    .ok();
+            }
+
+            let wall_start = std::time::Instant::now();
+
             let collector =
                 dataset::DataCollector::new(&functions, &output, num_sequences, runs, baseline_runs)?;
+
+            let t0 = std::time::Instant::now();
             collector.collect_baselines()?;
+            let baseline_secs = t0.elapsed().as_secs_f64();
+            eprintln!("Baselines completed in {baseline_secs:.1}s");
+
+            let t1 = std::time::Instant::now();
             collector.collect()?;
+            let collect_secs = t1.elapsed().as_secs_f64();
+
+            let wall_secs = wall_start.elapsed().as_secs_f64();
+            let wall_min = wall_secs / 60.0;
+            let seq_per_min = (num_sequences as f64 * collector.function_count() as f64) / wall_min;
+            eprintln!("Collection completed in {collect_secs:.1}s");
+            eprintln!("Total wall time: {wall_min:.1} min ({seq_per_min:.0} sequences/min)");
         }
 
         Commands::Eda { input, output } => {
