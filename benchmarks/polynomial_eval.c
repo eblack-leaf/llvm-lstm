@@ -18,8 +18,8 @@ static unsigned int lcg_rand(void) {
     return (lcg_state >> 16) & 0x7fff;
 }
 
-#define DEGREE 1000
-#define NPOINTS 10000
+#define DEGREE 100
+#define NPOINTS 500
 
 static double workload(double *coeffs, double *points, double *results) {
     int i, j;

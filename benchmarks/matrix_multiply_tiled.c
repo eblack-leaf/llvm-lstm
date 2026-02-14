@@ -18,8 +18,8 @@ static unsigned int lcg_rand(void) {
     return (lcg_state >> 16) & 0x7fff;
 }
 
-#define N 128
-#define BLOCK 16
+#define N 48
+#define BLOCK 8
 
 static double workload(double *A, double *B, double *C) {
     int i, j, k, ii, jj, kk;

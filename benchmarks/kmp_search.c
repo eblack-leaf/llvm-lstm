@@ -15,7 +15,7 @@ static int cmp_ll(const void *a, const void *b) {
 static unsigned int lcg_state = 12345;
 static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
 
-#define TEXT_SIZE (10 * 1024 * 1024)  /* ~10 MB */
+#define TEXT_SIZE (10 * 1024)  /* ~10 KB */
 #define PAT_LEN 20
 
 static char *text;

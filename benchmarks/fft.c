@@ -19,7 +19,7 @@ static unsigned int lcg_rand(void) {
     return (lcg_state >> 16) & 0x7fff;
 }
 
-#define FFT_N 65536
+#define FFT_N 1024
 
 static unsigned int bit_reverse(unsigned int x, int log2n) {
     unsigned int result = 0;
@@ -32,7 +32,7 @@ static unsigned int bit_reverse(unsigned int x, int log2n) {
 }
 
 static double workload(double *re, double *im, double *re_buf, double *im_buf) {
-    int log2n = 16; /* log2(65536) */
+    int log2n = 10; /* log2(1024) */
     unsigned int i;
     int s, j, k;
 

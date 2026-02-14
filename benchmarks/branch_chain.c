@@ -141,7 +141,7 @@ static long long diamond_merge(const int *arr, int n) {
     return total;
 }
 
-#define N 200000
+#define N 5000
 
 static long long workload(int *arr) {
     long long total = 0;

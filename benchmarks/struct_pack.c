@@ -104,7 +104,7 @@ static int search_helper(const int *arr, int n, int target) {
     return s.found;
 }
 
-#define VEC_N 100000
+#define VEC_N 2000
 #define COMPLEX_ITERS 200
 
 static long long workload(double *data, int *sorted_arr) {

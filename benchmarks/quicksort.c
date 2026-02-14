@@ -18,7 +18,7 @@ static unsigned int lcg_rand(void) {
     return (lcg_state >> 16) & 0x7fff;
 }
 
-#define ARR_N 500000
+#define ARR_N 5000
 
 static void swap(int *a, int *b) {
     int tmp = *a;

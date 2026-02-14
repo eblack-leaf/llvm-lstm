@@ -15,7 +15,7 @@ static int cmp_ll(const void *a, const void *b) {
 static unsigned int lcg_state = 12345;
 static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
 
-#define N 500000
+#define N 5000
 
 static int data[N];
 static int work[N];

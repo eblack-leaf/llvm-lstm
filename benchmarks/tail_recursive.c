@@ -49,7 +49,7 @@ static int fib(int n) {
     return fib(n - 1) + fib(n - 2);
 }
 
-#define ARR_N 100000
+#define ARR_N 2000
 
 static long long workload(int *arr) {
     long long total = 0;

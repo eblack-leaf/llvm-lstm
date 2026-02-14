@@ -109,7 +109,7 @@ static double process_element(double x, double inv_a, double inv_b, double bias)
     return add_bias(invariant_helper(x, inv_a, inv_b), bias);
 }
 
-#define N 100000
+#define N 2000
 #define N_PARAMS 12
 
 static double workload(double *arr, double *params) {

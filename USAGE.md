@@ -26,7 +26,7 @@ cargo run --release -- collect \
 | `--num-sequences` | `200` | Random pass sequences per function |
 | `--output` | `data/exploratory/` | Output dir (writes `exploratory.jsonl` + `baselines.jsonl`) |
 | `--runs` | `3` | Times to launch each compiled binary per sequence (1 is fine — C code already takes median of 50 internally) |
-| `--baseline-runs` | `50` | Times to launch each baseline binary (-O0/-O2/-O3). Higher = more stable reference. |
+| `--baseline-runs` | `5` | Times to launch each baseline binary (-O0/-O2/-O3). Higher = more stable reference. |
 
 Collection is parallelized across functions using rayon. Each function gets its own work directory. Baselines run sequentially for stable timing.
 
@@ -60,7 +60,7 @@ cargo run --release -- baseline \
 |------|---------|-------------|
 | `--functions` | `benchmarks/` | Directory of `.c` benchmark files |
 | `--output` | `data/baselines/` | Output directory |
-| `--baseline-runs` | `50` | Times to launch each baseline binary |
+| `--baseline-runs` | `5` | Times to launch each baseline binary |
 
 Writes `baselines.jsonl` with -O0, -O2, -O3 times for each function.
 
@@ -146,4 +146,4 @@ cargo run --release -- train --config configs/train.toml
 - Close other applications during data collection for cleaner timing
 - Add new benchmarks by dropping `.c` files into `benchmarks/` — all commands auto-discover them
 - Use `--runs 1` for exploratory data collection; `--runs 3` for final evaluation
-- Baselines default to 50 runs for stable reference numbers (each run internally does 50 iterations with warmup)
+- Baselines default to 5 external runs; each run internally does 50 iterations with warmup, so you get median of 5 medians-of-50

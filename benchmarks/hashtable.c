@@ -15,8 +15,8 @@ static int cmp_ll(const void *a, const void *b) {
 static unsigned int lcg_state = 12345;
 static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
 
-#define NUM_OPS    100000
-#define TABLE_SIZE 200003  /* prime, ~2x NUM_OPS for load factor ~0.5 */
+#define NUM_OPS    2000
+#define TABLE_SIZE 4007    /* prime, ~2x NUM_OPS for load factor ~0.5 */
 
 #define SLOT_EMPTY   0
 #define SLOT_OCCUPIED 1

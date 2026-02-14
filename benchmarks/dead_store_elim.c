@@ -25,7 +25,7 @@ static unsigned int lcg_rand(void) {
     return (lcg_state >> 16) & 0x7fff;
 }
 
-#define N 50000
+#define N 2000
 
 /*
  * Simulate a "sloppy" update loop: each element gets written twice,

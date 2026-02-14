@@ -15,7 +15,7 @@ static int cmp_ll(const void *a, const void *b) {
 static unsigned int lcg_state = 12345;
 static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
 
-#define STR_LEN 2000
+#define STR_LEN 200
 
 static void generate_random_string(char *s, int len) {
     for (int i = 0; i < len; i++) {
