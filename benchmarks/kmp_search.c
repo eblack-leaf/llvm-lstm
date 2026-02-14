@@ -15,7 +15,7 @@ static int cmp_ll(const void *a, const void *b) {
 static unsigned int lcg_state = 12345;
 static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
 
-#define TEXT_SIZE (10 * 1024)  /* ~10 KB */
+#define TEXT_SIZE (100 * 1024)  /* ~100 KB */
 #define PAT_LEN 20
 
 static char *text;
@@ -81,8 +81,8 @@ int main(void) {
         do_kmp();
 
     /* Timed runs */
-    long long times[50];
-    for (int t = 0; t < 50; t++) {
+    long long times[201];
+    for (int t = 0; t < 201; t++) {
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
         do_kmp();
@@ -90,8 +90,11 @@ int main(void) {
         times[t] = timespec_diff_ns(&start, &end);
     }
 
-    qsort(times, 50, sizeof(long long), cmp_ll);
-    printf("%lld\n", times[25]);
+    qsort(times, 201, sizeof(long long), cmp_ll);
+    /* Drop bottom/top 10% (20 each), average middle 161 */
+    long long tsum = 0;
+    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
+    printf("%lld\n", tsum / 161);
 
     free(text);
     return 0;

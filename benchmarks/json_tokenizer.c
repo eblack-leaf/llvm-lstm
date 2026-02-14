@@ -149,8 +149,8 @@ int main(void) {
         do_tokenize();
 
     /* Timed runs */
-    long long times[50];
-    for (int t = 0; t < 50; t++) {
+    long long times[201];
+    for (int t = 0; t < 201; t++) {
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
         do_tokenize();
@@ -158,7 +158,10 @@ int main(void) {
         times[t] = timespec_diff_ns(&start, &end);
     }
 
-    qsort(times, 50, sizeof(long long), cmp_ll);
-    printf("%lld\n", times[25]);
+    qsort(times, 201, sizeof(long long), cmp_ll);
+    /* Drop bottom/top 10% (20 each), average middle 161 */
+    long long tsum = 0;
+    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
+    printf("%lld\n", tsum / 161);
     return 0;
 }

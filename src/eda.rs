@@ -509,17 +509,20 @@ impl EdaAnalyzer {
         r.push_str("  help in combination (e.g., gvn after mem2reg+sroa). This is why\n");
         r.push_str("  ordering matters and why we need a sequential model.\n");
 
+        // --- Group records by function for per-benchmark breakdowns ---
+        let mut records_by_func: HashMap<&str, Vec<&DataRecord>> = HashMap::new();
+        for rec in &self.records {
+            records_by_func.entry(&rec.function).or_default().push(rec);
+        }
+        let mut func_names: Vec<&str> = records_by_func.keys().copied().collect();
+        func_names.sort();
+
         // --- Pass ordering ---
         r.push_str("\n\n3. PASS ORDERING EFFECTS (Top 20)\n");
         r.push_str("---------------------------------\n");
         r.push_str("  Comparing A->B vs B->A ordering. Large delta = ordering matters.\n\n");
-        r.push_str(&format!(
-            "  {:<16} {:<16} {:>10} {:>10} {:>9}\n",
-            "First", "Second", "A->B(ms)", "B->A(ms)", "Delta%"
-        ));
-        r.push_str(&format!("  {}\n", "-".repeat(65)));
 
-        for o in ordering.iter().take(20) {
+        for (oi, o) in ordering.iter().take(20).enumerate() {
             let (better_order, _) = if o.avg_time_ab < o.avg_time_ba {
                 ("A->B", "B->A")
             } else {
@@ -527,7 +530,8 @@ impl EdaAnalyzer {
             };
 
             r.push_str(&format!(
-                "  {:<16} {:<16} {:>10.2} {:>10.2} {:>+8.1}%  ({})\n",
+                "  #{:<2} {:<16} {:<16} A->B: {:.2}ms   B->A: {:.2}ms   Delta: {:>+.1}%  ({})\n",
+                oi + 1,
                 o.pass_a,
                 o.pass_b,
                 o.avg_time_ab / 1_000_000.0,
@@ -535,6 +539,46 @@ impl EdaAnalyzer {
                 o.delta_pct,
                 better_order,
             ));
+
+            // Per-function breakdown
+            let mut func_deltas: Vec<(&str, f64, f64, f64, usize, usize)> = Vec::new();
+            for &func in &func_names {
+                let func_records = &records_by_func[func];
+                let mut times_ab: Vec<f64> = Vec::new();
+                let mut times_ba: Vec<f64> = Vec::new();
+                for rec in func_records {
+                    let pos_a = rec.pass_sequence.iter().position(|p| p == &o.pass_a);
+                    let pos_b = rec.pass_sequence.iter().position(|p| p == &o.pass_b);
+                    if let (Some(ia), Some(ib)) = (pos_a, pos_b) {
+                        if ia < ib {
+                            times_ab.push(rec.execution_time_ns as f64);
+                        } else {
+                            times_ba.push(rec.execution_time_ns as f64);
+                        }
+                    }
+                }
+                if times_ab.len() >= 5 && times_ba.len() >= 5 {
+                    let avg_ab = (&times_ab).mean();
+                    let avg_ba = (&times_ba).mean();
+                    let delta = (avg_ab - avg_ba) / avg_ba * 100.0;
+                    func_deltas.push((func, avg_ab, avg_ba, delta, times_ab.len(), times_ba.len()));
+                }
+            }
+            func_deltas.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+
+            r.push_str("      Per-function breakdown:\n");
+            for (func, avg_ab, avg_ba, delta, _nab, _nba) in &func_deltas {
+                let marker = if delta.abs() > 20.0 { " <<<" } else { "" };
+                r.push_str(&format!(
+                    "        {:<25} A->B: {:>8.2}ms  B->A: {:>8.2}ms  Delta: {:>+6.1}%{}\n",
+                    func,
+                    avg_ab / 1_000_000.0,
+                    avg_ba / 1_000_000.0,
+                    delta,
+                    marker,
+                ));
+            }
+            r.push_str("\n");
         }
 
         // --- Triple ordering ---
@@ -562,6 +606,65 @@ impl EdaAnalyzer {
                     p.order,
                     p.avg_time / 1_000_000.0,
                     p.count,
+                ));
+            }
+
+            // Per-function breakdown for this triple
+            let triple = [t.passes[0].as_str(), t.passes[1].as_str(), t.passes[2].as_str()];
+            let perms: [(usize, usize, usize); 6] = [
+                (0, 1, 2), (0, 2, 1), (1, 0, 2),
+                (1, 2, 0), (2, 0, 1), (2, 1, 0),
+            ];
+
+            r.push_str("      Per-function spread:\n");
+            let mut func_spreads: Vec<(&str, f64, String, String)> = Vec::new();
+            for &func in &func_names {
+                let func_records = &records_by_func[func];
+                let mut perm_times: Vec<(String, Vec<f64>)> = perms
+                    .iter()
+                    .map(|&(a, b, c)| {
+                        let label = format!("{}->{}->{}",
+                            triple[a], triple[b], triple[c]);
+                        (label, Vec::new())
+                    })
+                    .collect();
+
+                for rec in func_records {
+                    let positions: Vec<Option<usize>> = triple
+                        .iter()
+                        .map(|&p| rec.pass_sequence.iter().position(|s| s == p))
+                        .collect();
+                    if let [Some(pa), Some(pb), Some(pc)] = positions[..] {
+                        let order = {
+                            let mut indexed = [(pa, 0usize), (pb, 1), (pc, 2)];
+                            indexed.sort_by_key(|x| x.0);
+                            (indexed[0].1, indexed[1].1, indexed[2].1)
+                        };
+                        if let Some(pi) = perms.iter().position(|p| *p == order) {
+                            perm_times[pi].1.push(rec.execution_time_ns as f64);
+                        }
+                    }
+                }
+
+                let avgs: Vec<(String, f64)> = perm_times
+                    .into_iter()
+                    .filter(|(_, times)| times.len() >= 3)
+                    .map(|(order, times)| (order, (&times).mean()))
+                    .collect();
+
+                if avgs.len() >= 2 {
+                    let best = avgs.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+                    let worst = avgs.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+                    let spread = (worst.1 - best.1) / best.1 * 100.0;
+                    func_spreads.push((func, spread, best.0.clone(), worst.0.clone()));
+                }
+            }
+            func_spreads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            for (func, spread, best, worst) in &func_spreads {
+                let marker = if *spread > 50.0 { " <<<" } else { "" };
+                r.push_str(&format!(
+                    "        {:<25} spread: {:>+6.1}%  best: {:<35} worst: {}{}\n",
+                    func, spread, best, worst, marker,
                 ));
             }
             r.push_str("\n");

@@ -59,17 +59,20 @@ int main(void) {
     }
 
     /* Timing */
-    long long times[50];
+    long long times[201];
     struct timespec t0, t1;
-    for (i = 0; i < 50; i++) {
+    for (i = 0; i < 201; i++) {
         clock_gettime(CLOCK_MONOTONIC, &t0);
         sink = workload(coeffs, points, results);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         times[i] = timespec_diff_ns(&t0, &t1);
     }
 
-    qsort(times, 50, sizeof(long long), cmp_ll);
-    printf("%lld\n", times[25]);
+    qsort(times, 201, sizeof(long long), cmp_ll);
+    /* Drop bottom/top 10% (20 each), average middle 161 */
+    long long tsum = 0;
+    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
+    printf("%lld\n", tsum / 161);
 
     free(coeffs);
     free(points);

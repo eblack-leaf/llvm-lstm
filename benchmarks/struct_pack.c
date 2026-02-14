@@ -1,9 +1,9 @@
 /*
  * Targets: sroa, mem2reg, instcombine, inline, gvn, early-cse
  *
- * Uses local structs and passes them by value through helper functions.
- * SROA should decompose these into scalar registers. GVN/early-cse
- * should eliminate redundant field accesses.
+ * Uses local structs passed by value through helper functions.
+ * SROA should decompose these into scalar registers.
+ * Multiple struct types, recursive struct operations, and struct arrays.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,12 +38,31 @@ typedef struct {
     int found;
 } SearchState;
 
-/* Return by value — SROA should decompose the return struct */
+typedef struct {
+    double m[4]; /* 2x2 matrix stored flat */
+} Mat2;
+
+typedef struct {
+    Vec3 position;
+    Vec3 velocity;
+    double mass;
+} Particle;
+
+/* ---- Vec3 operations ---- */
+
 static Vec3 vec3_add(Vec3 a, Vec3 b) {
     Vec3 r;
     r.x = a.x + b.x;
     r.y = a.y + b.y;
     r.z = a.z + b.z;
+    return r;
+}
+
+static Vec3 vec3_sub(Vec3 a, Vec3 b) {
+    Vec3 r;
+    r.x = a.x - b.x;
+    r.y = a.y - b.y;
+    r.z = a.z - b.z;
     return r;
 }
 
@@ -59,22 +78,29 @@ static double vec3_dot(Vec3 a, Vec3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+static Vec3 vec3_cross(Vec3 a, Vec3 b) {
+    Vec3 r;
+    r.x = a.y * b.z - a.z * b.y;
+    r.y = a.z * b.x - a.x * b.z;
+    r.z = a.x * b.y - a.y * b.x;
+    return r;
+}
+
 static double vec3_length_sq(Vec3 a) {
-    /* Redundant field access — early-cse/gvn target: a.x used twice */
     return a.x * a.x + a.y * a.y + a.z * a.z;
 }
 
 static Vec3 vec3_normalize(Vec3 a) {
     double len_sq = vec3_length_sq(a);
     double inv_len = 1.0 / (len_sq + 1e-12);
-    /* sqrt approximation to avoid -lm: Newton iteration */
     double guess = inv_len;
     guess = 0.5 * (guess + inv_len / guess);
     guess = 0.5 * (guess + inv_len / guess);
     return vec3_scale(a, guess);
 }
 
-/* Complex multiply — struct by value */
+/* ---- Complex operations ---- */
+
 static Complex complex_mul(Complex a, Complex b) {
     Complex r;
     r.real = a.real * b.real - a.imag * b.imag;
@@ -89,7 +115,72 @@ static Complex complex_add(Complex a, Complex b) {
     return r;
 }
 
-/* Local struct on stack — mem2reg target */
+static double complex_abs_sq(Complex a) {
+    return a.real * a.real + a.imag * a.imag;
+}
+
+/* Complex power: z^n by repeated squaring */
+static Complex complex_pow(Complex z, int n) {
+    Complex result = {1.0, 0.0};
+    Complex base = z;
+    while (n > 0) {
+        if (n & 1) result = complex_mul(result, base);
+        base = complex_mul(base, base);
+        n >>= 1;
+    }
+    return result;
+}
+
+/* ---- Mat2 operations (2x2 matrix) ---- */
+
+static Mat2 mat2_mul(Mat2 a, Mat2 b) {
+    Mat2 r;
+    r.m[0] = a.m[0] * b.m[0] + a.m[1] * b.m[2];
+    r.m[1] = a.m[0] * b.m[1] + a.m[1] * b.m[3];
+    r.m[2] = a.m[2] * b.m[0] + a.m[3] * b.m[2];
+    r.m[3] = a.m[2] * b.m[1] + a.m[3] * b.m[3];
+    return r;
+}
+
+static double mat2_det(Mat2 a) {
+    return a.m[0] * a.m[3] - a.m[1] * a.m[2];
+}
+
+static double mat2_trace(Mat2 a) {
+    return a.m[0] + a.m[3];
+}
+
+/* Matrix power by repeated squaring — struct by value through recursion-like loop */
+static Mat2 mat2_pow(Mat2 m, int n) {
+    Mat2 result = {{1.0, 0.0, 0.0, 1.0}}; /* identity */
+    Mat2 base = m;
+    while (n > 0) {
+        if (n & 1) result = mat2_mul(result, base);
+        base = mat2_mul(base, base);
+        n >>= 1;
+    }
+    return result;
+}
+
+/* ---- Particle simulation ---- */
+
+static Particle particle_step(Particle p, Vec3 force, double dt) {
+    Vec3 accel = vec3_scale(force, 1.0 / p.mass);
+    p.velocity = vec3_add(p.velocity, vec3_scale(accel, dt));
+    p.position = vec3_add(p.position, vec3_scale(p.velocity, dt));
+    return p;
+}
+
+static Vec3 gravity_force(Particle a, Particle b) {
+    Vec3 diff = vec3_sub(b.position, a.position);
+    double dist_sq = vec3_length_sq(diff) + 0.01; /* softening */
+    double inv_dist = 1.0 / dist_sq;
+    double force_mag = a.mass * b.mass * inv_dist;
+    return vec3_scale(diff, force_mag);
+}
+
+/* ---- Binary search with struct state ---- */
+
 static int search_helper(const int *arr, int n, int target) {
     SearchState s;
     s.lo = 0;
@@ -104,8 +195,10 @@ static int search_helper(const int *arr, int n, int target) {
     return s.found;
 }
 
-#define VEC_N 2000
-#define COMPLEX_ITERS 200
+#define VEC_N 10000
+#define COMPLEX_ITERS 1000
+#define N_PARTICLES 20
+#define SIM_STEPS 50
 
 static long long workload(double *data, int *sorted_arr) {
     long long total = 0;
@@ -119,16 +212,18 @@ static long long workload(double *data, int *sorted_arr) {
         acc = vec3_add(acc, v);
         acc = vec3_add(acc, vec3_scale(w, 0.5));
         total += (long long)(vec3_dot(v, w) * 1000.0);
+        /* Cross product — more struct operations */
+        Vec3 c = vec3_cross(v, w);
+        total += (long long)(c.x * 100.0);
     }
     Vec3 n = vec3_normalize(acc);
     total += (long long)(n.x * 1e6);
 
-    /* Complex number iteration — struct by value */
+    /* Complex number iteration — Mandelbrot-style */
     Complex z = {0.0, 0.0};
     Complex c = {0.3, 0.5};
     for (i = 0; i < COMPLEX_ITERS; i++) {
         z = complex_add(complex_mul(z, z), c);
-        /* Clamp to prevent overflow */
         if (z.real > 1e6) z.real = 1e6;
         if (z.imag > 1e6) z.imag = 1e6;
         if (z.real < -1e6) z.real = -1e6;
@@ -136,7 +231,44 @@ static long long workload(double *data, int *sorted_arr) {
     }
     total += (long long)(z.real * 1000.0);
 
-    /* Search with struct state — mem2reg target */
+    /* Complex power series */
+    Complex base = {0.99, 0.01};
+    for (i = 2; i <= 20; i++) {
+        Complex p = complex_pow(base, i);
+        total += (long long)(complex_abs_sq(p) * 1e6);
+    }
+
+    /* 2x2 matrix powers — Fibonacci-style computation */
+    Mat2 fib = {{1.0, 1.0, 1.0, 0.0}};
+    for (i = 2; i <= 30; i++) {
+        Mat2 fp = mat2_pow(fib, i);
+        total += (long long)(mat2_trace(fp));
+        total += (long long)(mat2_det(fp) * 100.0);
+    }
+
+    /* Particle simulation — structs containing structs */
+    Particle particles[N_PARTICLES];
+    for (i = 0; i < N_PARTICLES; i++) {
+        particles[i].position = (Vec3){data[i * 3 % VEC_N], data[(i * 3 + 1) % VEC_N], data[(i * 3 + 2) % VEC_N]};
+        particles[i].velocity = (Vec3){0.0, 0.0, 0.0};
+        particles[i].mass = 1.0 + data[i % VEC_N];
+    }
+    for (int step = 0; step < SIM_STEPS; step++) {
+        for (i = 0; i < N_PARTICLES; i++) {
+            Vec3 force = {0.0, 0.0, 0.0};
+            for (int j = 0; j < N_PARTICLES; j++) {
+                if (i != j) {
+                    force = vec3_add(force, gravity_force(particles[i], particles[j]));
+                }
+            }
+            particles[i] = particle_step(particles[i], force, 0.01);
+        }
+    }
+    for (i = 0; i < N_PARTICLES; i++) {
+        total += (long long)(vec3_length_sq(particles[i].position) * 100.0);
+    }
+
+    /* Search with struct state */
     for (i = 0; i < 200; i++) {
         int target = sorted_arr[lcg_rand() % VEC_N];
         total += search_helper(sorted_arr, VEC_N, target);
@@ -153,7 +285,7 @@ int main(void) {
     lcg_state = 12345;
     for (i = 0; i < VEC_N; i++) {
         data[i] = (double)lcg_rand() / 32768.0;
-        sorted_arr[i] = i * 3 + 1;  /* Already sorted */
+        sorted_arr[i] = i * 3 + 1;
     }
 
     /* Warmup */
@@ -163,17 +295,19 @@ int main(void) {
     }
 
     /* Timing */
-    long long times[50];
+    long long times[201];
     struct timespec t0, t1;
-    for (i = 0; i < 50; i++) {
+    for (i = 0; i < 201; i++) {
         clock_gettime(CLOCK_MONOTONIC, &t0);
         sink = workload(data, sorted_arr);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         times[i] = timespec_diff_ns(&t0, &t1);
     }
 
-    qsort(times, 50, sizeof(long long), cmp_ll);
-    printf("%lld\n", times[25]);
+    qsort(times, 201, sizeof(long long), cmp_ll);
+    long long tsum = 0;
+    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
+    printf("%lld\n", tsum / 161);
 
     free(data);
     free(sorted_arr);

@@ -89,8 +89,8 @@ static void run_benchmark(void) {
 int main(void) {
     for (int i = 0; i < 5; i++) run_benchmark();
 
-    long long times[50];
-    for (int i = 0; i < 50; i++) {
+    long long times[201];
+    for (int i = 0; i < 201; i++) {
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
         run_benchmark();
@@ -98,7 +98,10 @@ int main(void) {
         times[i] = timespec_diff_ns(&start, &end);
     }
 
-    qsort(times, 50, sizeof(long long), cmp_ll);
-    printf("%lld\n", times[25]);
+    qsort(times, 201, sizeof(long long), cmp_ll);
+    /* Drop bottom/top 10% (20 each), average middle 161 */
+    long long tsum = 0;
+    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
+    printf("%lld\n", tsum / 161);
     return 0;
 }
