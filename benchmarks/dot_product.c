@@ -18,7 +18,7 @@ static unsigned int lcg_rand(void) {
     return (lcg_state >> 16) & 0x7fff;
 }
 
-#define VEC_N 5000
+#define VEC_N 50000
 
 static double workload(double *a, double *b) {
     double sum = 0.0;
