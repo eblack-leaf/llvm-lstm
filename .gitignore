@@ -1,3 +1,14 @@
 /target
 .claude
 .idea
+
+# Generated data and results
+data/
+eda_output/
+results/
+checkpoints/
+
+# Pipeline working directories
+*.o
+*.bin
+*.ll
