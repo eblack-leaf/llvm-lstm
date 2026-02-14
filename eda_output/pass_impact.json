@@ -1,0 +1,137 @@
+[
+  {
+    "pass_name": "mem2reg",
+    "avg_time_with": 14018954.555555554,
+    "avg_time_without": 23326980.795918364,
+    "count_with": 36,
+    "count_without": 49,
+    "delta_ns": -9308026.24036281,
+    "delta_pct": -39.90240452374137
+  },
+  {
+    "pass_name": "loop-rotate",
+    "avg_time_with": 16437495.357142862,
+    "avg_time_without": 20832536.01754386,
+    "count_with": 28,
+    "count_without": 57,
+    "delta_ns": -4395040.660400998,
+    "delta_pct": -21.097002576641504
+  },
+  {
+    "pass_name": "dse",
+    "avg_time_with": 17975588.818181813,
+    "avg_time_without": 20279038.30769231,
+    "count_with": 33,
+    "count_without": 52,
+    "delta_ns": -2303449.489510499,
+    "delta_pct": -11.358770837948203
+  },
+  {
+    "pass_name": "sroa",
+    "avg_time_with": 18121385.7027027,
+    "avg_time_without": 20358607.333333336,
+    "count_with": 37,
+    "count_without": 48,
+    "delta_ns": -2237221.6306306347,
+    "delta_pct": -10.989070096988467
+  },
+  {
+    "pass_name": "simplifycfg",
+    "avg_time_with": 18210006.133333333,
+    "avg_time_without": 20025531.618181817,
+    "count_with": 30,
+    "count_without": 55,
+    "delta_ns": -1815525.4848484844,
+    "delta_pct": -9.066053872947428
+  },
+  {
+    "pass_name": "early-cse",
+    "avg_time_with": 18468338.400000002,
+    "avg_time_without": 20026251.580000002,
+    "count_with": 35,
+    "count_without": 50,
+    "delta_ns": -1557913.1799999997,
+    "delta_pct": -7.779354882148143
+  },
+  {
+    "pass_name": "tailcallelim",
+    "avg_time_with": 19097549.92307692,
+    "avg_time_without": 19628260.34782609,
+    "count_with": 39,
+    "count_without": 46,
+    "delta_ns": -530710.4247491695,
+    "delta_pct": -2.7038077513983447
+  },
+  {
+    "pass_name": "loop-unroll",
+    "avg_time_with": 19465173.61764705,
+    "avg_time_without": 19331147.450980388,
+    "count_with": 34,
+    "count_without": 51,
+    "delta_ns": 134026.16666666418,
+    "delta_pct": 0.6933171815409591
+  },
+  {
+    "pass_name": "jump-threading",
+    "avg_time_with": 19821827.299999997,
+    "avg_time_without": 19146356.43636363,
+    "count_with": 30,
+    "count_without": 55,
+    "delta_ns": 675470.863636367,
+    "delta_pct": 3.5279342358501284
+  },
+  {
+    "pass_name": "instcombine",
+    "avg_time_with": 21527239.229166668,
+    "avg_time_without": 16605322.702702705,
+    "count_with": 48,
+    "count_without": 37,
+    "delta_ns": 4921916.526463963,
+    "delta_pct": 29.640595455955005
+  },
+  {
+    "pass_name": "gvn",
+    "avg_time_with": 23455609.156249996,
+    "avg_time_without": 16926885.471698117,
+    "count_with": 32,
+    "count_without": 53,
+    "delta_ns": 6528723.68455188,
+    "delta_pct": 38.57014153884338
+  },
+  {
+    "pass_name": "adce",
+    "avg_time_with": 22432329.659090906,
+    "avg_time_without": 16114193.12195122,
+    "count_with": 44,
+    "count_without": 41,
+    "delta_ns": 6318136.537139686,
+    "delta_pct": 39.208519404753424
+  },
+  {
+    "pass_name": "reassociate",
+    "avg_time_with": 24560198.586206894,
+    "avg_time_without": 16704618.999999998,
+    "count_with": 29,
+    "count_without": 56,
+    "delta_ns": 7855579.586206896,
+    "delta_pct": 47.026391839328376
+  },
+  {
+    "pass_name": "licm",
+    "avg_time_with": 24374988.59375,
+    "avg_time_without": 16371788.452830188,
+    "count_with": 32,
+    "count_without": 53,
+    "delta_ns": 8003200.140919812,
+    "delta_pct": 48.88409207081039
+  },
+  {
+    "pass_name": "inline",
+    "avg_time_with": 25362621.47222222,
+    "avg_time_without": 14992858.163265308,
+    "count_with": 36,
+    "count_without": 49,
+    "delta_ns": 10369763.308956912,
+    "delta_pct": 69.16468625284769
+  }
+]

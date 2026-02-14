@@ -1,0 +1,92 @@
+# LLVM Optimization Pass Menu (15 passes + STOP action)
+# For LLVM 20 new pass manager
+
+[[passes]]
+name = "instcombine"
+description = "Combine redundant instructions"
+opt_name = "instcombine"
+nesting = "function"
+
+[[passes]]
+name = "inline"
+description = "Inline function calls"
+opt_name = "inline"
+nesting = "cgscc"
+
+[[passes]]
+name = "loop-unroll"
+description = "Unroll loops"
+opt_name = "loop-unroll"
+nesting = "function"
+
+[[passes]]
+name = "licm"
+description = "Loop invariant code motion"
+opt_name = "licm"
+nesting = "loop-mssa"
+
+[[passes]]
+name = "gvn"
+description = "Global value numbering"
+opt_name = "gvn"
+nesting = "function"
+
+[[passes]]
+name = "sroa"
+description = "Scalar replacement of aggregates"
+opt_name = "sroa"
+nesting = "function"
+
+[[passes]]
+name = "mem2reg"
+description = "Promote memory to register"
+opt_name = "mem2reg"
+nesting = "function"
+
+[[passes]]
+name = "simplifycfg"
+description = "Simplify control flow graph"
+opt_name = "simplifycfg"
+nesting = "function"
+
+[[passes]]
+name = "dse"
+description = "Dead store elimination"
+opt_name = "dse"
+nesting = "function"
+
+[[passes]]
+name = "reassociate"
+description = "Reassociate expressions"
+opt_name = "reassociate"
+nesting = "function"
+
+[[passes]]
+name = "jump-threading"
+description = "Jump threading"
+opt_name = "jump-threading"
+nesting = "function"
+
+[[passes]]
+name = "loop-rotate"
+description = "Rotate loops"
+opt_name = "loop-rotate"
+nesting = "function"
+
+[[passes]]
+name = "adce"
+description = "Aggressive dead code elimination"
+opt_name = "adce"
+nesting = "function"
+
+[[passes]]
+name = "early-cse"
+description = "Early common subexpression elimination"
+opt_name = "early-cse"
+nesting = "function"
+
+[[passes]]
+name = "tailcallelim"
+description = "Tail call elimination"
+opt_name = "tailcallelim"
+nesting = "function"
