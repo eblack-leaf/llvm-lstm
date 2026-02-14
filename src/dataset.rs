@@ -1,9 +1,11 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use rand::Rng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::ir_features::IrFeatures;
@@ -28,11 +30,11 @@ pub struct BaselineRecord {
 }
 
 pub struct DataCollector {
-    pipeline: CompilationPipeline,
     functions: Vec<PathBuf>,
     output_dir: PathBuf,
     num_sequences: usize,
     benchmark_runs: usize,
+    baseline_runs: usize,
 }
 
 impl DataCollector {
@@ -41,6 +43,7 @@ impl DataCollector {
         output_dir: &Path,
         num_sequences: usize,
         benchmark_runs: usize,
+        baseline_runs: usize,
     ) -> Result<Self> {
         let mut functions = Vec::new();
         for entry in fs::read_dir(functions_dir)? {
@@ -57,85 +60,131 @@ impl DataCollector {
         }
 
         fs::create_dir_all(output_dir)?;
-        let work_dir = output_dir.join("_work");
-        fs::create_dir_all(&work_dir)?;
 
         Ok(Self {
-            pipeline: CompilationPipeline::new(work_dir),
             functions,
             output_dir: output_dir.to_path_buf(),
             num_sequences,
             benchmark_runs,
+            baseline_runs,
         })
     }
 
-    /// Collect exploratory data: random pass sequences for each function.
+    /// Collect exploratory data in parallel: one thread per function.
     pub fn collect(&self) -> Result<()> {
-        let data_path = self.output_dir.join("exploratory.jsonl");
-        let file = File::create(&data_path)?;
-        let mut writer = BufWriter::new(file);
-        let mut rng = rand::thread_rng();
-
-        let transforms = Pass::all_transforms();
         let total = self.functions.len() * self.num_sequences;
-        let mut count = 0;
+        let progress = AtomicUsize::new(0);
 
-        for func_path in &self.functions {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+        eprintln!(
+            "Collecting {} sequences x {} functions ({} total) using {} threads",
+            self.num_sequences,
+            self.functions.len(),
+            total,
+            rayon::current_num_threads(),
+        );
 
-            eprintln!("Collecting data for {stem}...");
+        // Each function runs in parallel with its own work dir and temp output file.
+        let results: Vec<Result<PathBuf>> = self
+            .functions
+            .par_iter()
+            .map(|func_path| {
+                let stem = func_path
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
 
-            for seq_idx in 0..self.num_sequences {
-                // Generate random pass sequence (length 1-15)
-                let seq_len = rng.gen_range(1..=15);
-                let passes: Vec<Pass> = (0..seq_len)
-                    .map(|_| transforms[rng.gen_range(0..transforms.len())])
-                    .collect();
+                // Per-function work directory so files don't collide
+                let work_dir = self.output_dir.join("_work").join(&stem);
+                fs::create_dir_all(&work_dir)?;
+                let pipeline = CompilationPipeline::new(work_dir);
 
-                match self.pipeline.full_pipeline(func_path, &passes, self.benchmark_runs) {
-                    Ok(result) => {
-                        // Get IR features of optimized code
-                        let opt_ir = self.pipeline.optimize_only(func_path, &passes)?;
-                        let features = IrFeatures::from_ll_file(&opt_ir)?;
+                // Write to per-function temp file
+                let tmp_path = self.output_dir.join(format!("_tmp_{stem}.jsonl"));
+                let file = File::create(&tmp_path)?;
+                let mut writer = BufWriter::new(file);
+                let mut rng = rand::thread_rng();
+                let transforms = Pass::all_transforms();
 
-                        let record = DataRecord {
-                            function: stem.clone(),
-                            pass_sequence: passes.iter().map(|p| p.opt_name().to_string()).collect(),
-                            execution_time_ns: result.benchmark.median_ns,
-                            binary_size_bytes: result.benchmark.binary_size_bytes,
-                            ir_features: features.to_vec(),
-                        };
+                eprintln!("[{stem}] Starting {num} sequences...", num = self.num_sequences);
 
-                        serde_json::to_writer(&mut writer, &record)?;
-                        writeln!(writer)?;
+                let mut func_count = 0usize;
+                for seq_idx in 0..self.num_sequences {
+                    let seq_len = rng.gen_range(1..=15);
+                    let passes: Vec<Pass> = (0..seq_len)
+                        .map(|_| transforms[rng.gen_range(0..transforms.len())])
+                        .collect();
+
+                    match pipeline.full_pipeline(func_path, &passes, self.benchmark_runs) {
+                        Ok(result) => {
+                            let features = IrFeatures::from_ll_file(&result.opt_ir)?;
+
+                            let record = DataRecord {
+                                function: stem.clone(),
+                                pass_sequence: passes
+                                    .iter()
+                                    .map(|p| p.opt_name().to_string())
+                                    .collect(),
+                                execution_time_ns: result.benchmark.median_ns,
+                                binary_size_bytes: result.benchmark.binary_size_bytes,
+                                ir_features: features.to_vec(),
+                            };
+
+                            serde_json::to_writer(&mut writer, &record)?;
+                            writeln!(writer)?;
+                            func_count += 1;
+                        }
+                        Err(e) => {
+                            eprintln!("  [{stem}] Warning: sequence {seq_idx} failed: {e}");
+                            continue;
+                        }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "  Warning: sequence {seq_idx} for {stem} failed: {e}"
-                        );
-                        continue;
+
+                    let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    if done % 50 == 0 {
+                        eprintln!("  Progress: {done}/{total}");
                     }
                 }
 
-                count += 1;
-                if count % 10 == 0 {
-                    eprintln!("  Progress: {count}/{total}");
+                writer.flush()?;
+                eprintln!("[{stem}] Done — {func_count} records");
+                Ok(tmp_path)
+            })
+            .collect();
+
+        // Merge per-function files into single output
+        let data_path = self.output_dir.join("exploratory.jsonl");
+        let mut out = BufWriter::new(File::create(&data_path)?);
+        let mut total_records = 0usize;
+
+        for result in results {
+            let tmp_path = result?;
+            let contents = fs::read_to_string(&tmp_path)?;
+            for line in contents.lines() {
+                if !line.trim().is_empty() {
+                    writeln!(out, "{line}")?;
+                    total_records += 1;
                 }
             }
+            fs::remove_file(&tmp_path)?;
         }
 
-        writer.flush()?;
-        eprintln!("Wrote {count} records to {}", data_path.display());
+        out.flush()?;
+        eprintln!("Wrote {total_records} records to {}", data_path.display());
         Ok(())
     }
 
     /// Collect baselines (-O0, -O2, -O3) for all functions.
     pub fn collect_baselines(&self) -> Result<()> {
         let baseline_path = self.output_dir.join("baselines.jsonl");
+
+        // Baselines are quick — run sequentially to avoid timing interference
+        let work_dir = self.output_dir.join("_work").join("_baselines");
+        fs::create_dir_all(&work_dir)?;
+        let pipeline = CompilationPipeline::new(work_dir);
+
+        eprintln!("Computing baselines ({} runs per binary)...", self.baseline_runs);
+
         let file = File::create(&baseline_path)?;
         let mut writer = BufWriter::new(file);
 
@@ -146,10 +195,10 @@ impl DataCollector {
                 .to_string_lossy()
                 .to_string();
 
-            eprintln!("Computing baselines for {stem}...");
+            eprintln!("  {stem}...");
 
             for opt_level in ["-O0", "-O2", "-O3"] {
-                match self.pipeline.baseline(func_path, opt_level) {
+                match pipeline.baseline(func_path, opt_level, self.baseline_runs) {
                     Ok(result) => {
                         let record = BaselineRecord {
                             function: stem.clone(),

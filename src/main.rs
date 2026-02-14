@@ -43,6 +43,10 @@ enum Commands {
         /// Number of benchmark runs per sequence
         #[arg(long, default_value = "3")]
         runs: usize,
+
+        /// Number of benchmark runs for baselines (more = more stable reference)
+        #[arg(long, default_value = "50")]
+        baseline_runs: usize,
     },
 
     /// Run exploratory data analysis on collected data
@@ -65,6 +69,10 @@ enum Commands {
         /// Output directory for baseline data
         #[arg(long, default_value = "data/baselines")]
         output: PathBuf,
+
+        /// Number of benchmark runs per baseline
+        #[arg(long, default_value = "50")]
+        baseline_runs: usize,
     },
 
     /// Train the LSTM+PPO agent
@@ -125,9 +133,10 @@ fn main() -> Result<()> {
             num_sequences,
             output,
             runs,
+            baseline_runs,
         } => {
             let collector =
-                dataset::DataCollector::new(&functions, &output, num_sequences, runs)?;
+                dataset::DataCollector::new(&functions, &output, num_sequences, runs, baseline_runs)?;
             collector.collect_baselines()?;
             collector.collect()?;
         }
@@ -137,9 +146,9 @@ fn main() -> Result<()> {
             analyzer.write_all(&output)?;
         }
 
-        Commands::Baseline { functions, output } => {
+        Commands::Baseline { functions, output, baseline_runs } => {
             let collector =
-                dataset::DataCollector::new(&functions, &output, 0, 5)?;
+                dataset::DataCollector::new(&functions, &output, 0, 1, baseline_runs)?;
             collector.collect_baselines()?;
         }
 

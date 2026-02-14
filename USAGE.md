@@ -10,12 +10,12 @@ cargo build --release
 
 ### collect — Gather exploratory data
 
-Runs random pass sequences on all benchmarks, records timing + IR features.
+Runs random pass sequences on all benchmarks in parallel (one thread per function), records timing + IR features.
 
 ```bash
 cargo run --release -- collect \
   --functions benchmarks/ \
-  --num-sequences 200 \
+  --num-sequences 800 \
   --output data/exploratory/ \
   --runs 1
 ```
@@ -25,9 +25,10 @@ cargo run --release -- collect \
 | `--functions` | `benchmarks/` | Directory of `.c` benchmark files |
 | `--num-sequences` | `200` | Random pass sequences per function |
 | `--output` | `data/exploratory/` | Output dir (writes `exploratory.jsonl` + `baselines.jsonl`) |
-| `--runs` | `3` | Times to launch each compiled binary (1 is fine — C code already takes median of 50 internally) |
+| `--runs` | `3` | Times to launch each compiled binary per sequence (1 is fine — C code already takes median of 50 internally) |
+| `--baseline-runs` | `50` | Times to launch each baseline binary (-O0/-O2/-O3). Higher = more stable reference. |
 
-Estimated time: ~2.5h for 200 sequences × 17 functions with `--runs 1`.
+Collection is parallelized across functions using rayon. Each function gets its own work directory. Baselines run sequentially for stable timing.
 
 ### eda — Exploratory data analysis
 
@@ -43,7 +44,8 @@ Outputs:
 - `report.txt` — Human-readable summary with tables and findings
 - `function_stats.json` — Per-function descriptive stats + baselines
 - `pass_impact.json` — Per-pass avg time with vs without
-- `pass_ordering.json` — A→B vs B→A ordering effects
+- `pass_ordering.json` — A→B vs B→A pairwise ordering effects (min 10 samples per direction)
+- `pass_ordering_triples.json` — All 6 permutations of 3-pass combinations (min 10 samples per permutation)
 - `ir_features_summary.json` — IR feature vectors per function
 
 ### baseline — Compute baselines only
@@ -53,6 +55,12 @@ cargo run --release -- baseline \
   --functions benchmarks/ \
   --output data/baselines/
 ```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--functions` | `benchmarks/` | Directory of `.c` benchmark files |
+| `--output` | `data/baselines/` | Output directory |
+| `--baseline-runs` | `50` | Times to launch each baseline binary |
 
 Writes `baselines.jsonl` with -O0, -O2, -O3 times for each function.
 
@@ -135,5 +143,7 @@ cargo run --release -- train --config configs/train.toml
   ```bash
   sudo cpupower frequency-set -g performance
   ```
+- Close other applications during data collection for cleaner timing
 - Add new benchmarks by dropping `.c` files into `benchmarks/` — all commands auto-discover them
 - Use `--runs 1` for exploratory data collection; `--runs 3` for final evaluation
+- Baselines default to 50 runs for stable reference numbers (each run internally does 50 iterations with warmup)

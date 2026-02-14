@@ -68,7 +68,7 @@ impl Evaluator {
                 .to_string();
 
             for opt in ["-O0", "-O2", "-O3"] {
-                let bench = self.pipeline.baseline(func_path, opt)?;
+                let bench = self.pipeline.baseline(func_path, opt, self.benchmark_runs)?;
                 results.push(EvalResult {
                     function: stem.clone(),
                     method: opt.to_string(),

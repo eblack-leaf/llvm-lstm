@@ -111,9 +111,9 @@ impl LlvmEnv {
 
             eprintln!("Computing baselines for {stem}...");
 
-            let o0 = self.pipeline.baseline(func_path, "-O0")?;
-            let o2 = self.pipeline.baseline(func_path, "-O2")?;
-            let o3 = self.pipeline.baseline(func_path, "-O3")?;
+            let o0 = self.pipeline.baseline(func_path, "-O0", 5)?;
+            let o2 = self.pipeline.baseline(func_path, "-O2", 5)?;
+            let o3 = self.pipeline.baseline(func_path, "-O3", 5)?;
 
             self.baselines.insert(
                 stem,

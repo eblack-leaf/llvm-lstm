@@ -19,6 +19,7 @@ pub struct PipelineResult {
     pub benchmark: BenchmarkResult,
     pub passes: Vec<String>,
     pub function_name: String,
+    pub opt_ir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -208,7 +209,11 @@ impl CompilationPipeline {
         }
 
         times.sort();
-        let median_ns = times[times.len() / 2];
+        let median_ns = if times.len() % 2 == 1 {
+            times[times.len() / 2]
+        } else {
+            (times[times.len() / 2 - 1] + times[times.len() / 2]) / 2
+        };
 
         Ok(BenchmarkResult {
             median_ns,
@@ -240,6 +245,7 @@ impl CompilationPipeline {
             benchmark,
             passes: passes.iter().map(|p| p.opt_name().to_string()).collect(),
             function_name: stem,
+            opt_ir,
         })
     }
 
@@ -262,7 +268,7 @@ impl CompilationPipeline {
     }
 
     /// Run baseline at a standard optimization level (-O0, -O2, -O3).
-    pub fn baseline(&self, c_source: &Path, opt_level: &str) -> Result<BenchmarkResult> {
+    pub fn baseline(&self, c_source: &Path, opt_level: &str, runs: usize) -> Result<BenchmarkResult> {
         let stem = c_source
             .file_stem()
             .context("no file stem")?
@@ -286,6 +292,6 @@ impl CompilationPipeline {
             );
         }
 
-        self.benchmark(&bin_path, 5)
+        self.benchmark(&bin_path, runs)
     }
 }

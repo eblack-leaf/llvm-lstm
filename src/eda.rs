@@ -47,6 +47,27 @@ pub struct PassOrderResult {
     pub delta_pct: f64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TripleOrderResult {
+    pub passes: [String; 3],
+    /// Average times for each of the 6 permutations (abc, acb, bac, bca, cab, cba).
+    /// None if fewer than 3 samples for that permutation.
+    pub permutations: Vec<TriplePermutation>,
+    /// Best permutation ordering
+    pub best_order: String,
+    /// Worst permutation ordering
+    pub worst_order: String,
+    /// (worst - best) / best * 100
+    pub spread_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TriplePermutation {
+    pub order: String,
+    pub avg_time: f64,
+    pub count: usize,
+}
+
 pub struct EdaAnalyzer {
     records: Vec<DataRecord>,
     baselines: HashMap<String, HashMap<String, f64>>,
@@ -208,7 +229,7 @@ impl EdaAnalyzer {
                     }
                 }
 
-                if times_ab.len() >= 3 && times_ba.len() >= 3 {
+                if times_ab.len() >= 10 && times_ba.len() >= 10 {
                     let avg_ab = (&times_ab).mean();
                     let avg_ba = (&times_ba).mean();
                     results.push(PassOrderResult {
@@ -233,6 +254,109 @@ impl EdaAnalyzer {
         results
     }
 
+    /// Pass ordering analysis depth-3: for pass triples, compare all 6 permutations.
+    pub fn pass_ordering_triples(&self) -> Vec<TripleOrderResult> {
+        let all_passes: Vec<&str> = crate::pass_menu::Pass::all_transforms()
+            .iter()
+            .map(|p| p.opt_name())
+            .collect();
+
+        let mut results = Vec::new();
+
+        for i in 0..all_passes.len() {
+            for j in (i + 1)..all_passes.len() {
+                for k in (j + 1)..all_passes.len() {
+                    let triple = [all_passes[i], all_passes[j], all_passes[k]];
+
+                    // All 6 permutations of 3 elements
+                    let perms: [(usize, usize, usize); 6] = [
+                        (0, 1, 2), (0, 2, 1), (1, 0, 2),
+                        (1, 2, 0), (2, 0, 1), (2, 1, 0),
+                    ];
+
+                    let mut perm_times: Vec<(String, Vec<f64>)> = perms
+                        .iter()
+                        .map(|&(a, b, c)| {
+                            let label = format!(
+                                "{}->{}->{}",
+                                triple[a], triple[b], triple[c]
+                            );
+                            (label, Vec::new())
+                        })
+                        .collect();
+
+                    for r in &self.records {
+                        // Find positions of all three passes
+                        let positions: Vec<Option<usize>> = triple
+                            .iter()
+                            .map(|&p| r.pass_sequence.iter().position(|s| s == p))
+                            .collect();
+
+                        if let [Some(pa), Some(pb), Some(pc)] = positions[..] {
+                            // Determine which permutation this matches
+                            let order = {
+                                let mut indexed = [(pa, 0usize), (pb, 1), (pc, 2)];
+                                indexed.sort_by_key(|x| x.0);
+                                (indexed[0].1, indexed[1].1, indexed[2].1)
+                            };
+
+                            let perm_idx = perms.iter().position(|p| *p == order);
+                            if let Some(idx) = perm_idx {
+                                perm_times[idx].1.push(r.execution_time_ns as f64);
+                            }
+                        }
+                    }
+
+                    // Keep only permutations with enough samples
+                    let permutations: Vec<TriplePermutation> = perm_times
+                        .into_iter()
+                        .filter(|(_, times)| times.len() >= 10)
+                        .map(|(order, times)| {
+                            let avg_time = (&times).mean();
+                            TriplePermutation {
+                                order,
+                                avg_time,
+                                count: times.len(),
+                            }
+                        })
+                        .collect();
+
+                    if permutations.len() >= 2 {
+                        let best = permutations
+                            .iter()
+                            .min_by(|a, b| a.avg_time.partial_cmp(&b.avg_time).unwrap())
+                            .unwrap();
+                        let worst = permutations
+                            .iter()
+                            .max_by(|a, b| a.avg_time.partial_cmp(&b.avg_time).unwrap())
+                            .unwrap();
+                        let spread_pct =
+                            (worst.avg_time - best.avg_time) / best.avg_time * 100.0;
+
+                        results.push(TripleOrderResult {
+                            passes: [
+                                triple[0].to_string(),
+                                triple[1].to_string(),
+                                triple[2].to_string(),
+                            ],
+                            best_order: best.order.clone(),
+                            worst_order: worst.order.clone(),
+                            spread_pct,
+                            permutations,
+                        });
+                    }
+                }
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.spread_pct
+                .partial_cmp(&a.spread_pct)
+                .unwrap()
+        });
+        results
+    }
+
     /// Write all analysis results to output directory.
     pub fn write_all(&self, output_dir: &Path) -> Result<()> {
         fs::create_dir_all(output_dir)?;
@@ -249,11 +373,17 @@ impl EdaAnalyzer {
         serde_json::to_writer_pretty(file, &impact)?;
         eprintln!("Wrote pass_impact.json ({} passes)", impact.len());
 
-        // Pass ordering
+        // Pass ordering (pairs)
         let ordering = self.pass_ordering();
         let file = File::create(output_dir.join("pass_ordering.json"))?;
         serde_json::to_writer_pretty(file, &ordering)?;
         eprintln!("Wrote pass_ordering.json ({} pairs)", ordering.len());
+
+        // Pass ordering (triples)
+        let triples = self.pass_ordering_triples();
+        let file = File::create(output_dir.join("pass_ordering_triples.json"))?;
+        serde_json::to_writer_pretty(file, &triples)?;
+        eprintln!("Wrote pass_ordering_triples.json ({} triples)", triples.len());
 
         // IR features summary
         let mut ir_summary: Vec<serde_json::Value> = Vec::new();
@@ -271,7 +401,7 @@ impl EdaAnalyzer {
         eprintln!("Wrote ir_features_summary.json");
 
         // Human-readable report
-        let report = self.generate_report(&stats, &impact, &ordering);
+        let report = self.generate_report(&stats, &impact, &ordering, &triples);
         let mut file = File::create(output_dir.join("report.txt"))?;
         use std::io::Write;
         file.write_all(report.as_bytes())?;
@@ -285,6 +415,7 @@ impl EdaAnalyzer {
         stats: &[FunctionStats],
         impact: &[PassImpact],
         ordering: &[PassOrderResult],
+        triples: &[TripleOrderResult],
     ) -> String {
         let mut r = String::new();
 
@@ -406,8 +537,38 @@ impl EdaAnalyzer {
             ));
         }
 
+        // --- Triple ordering ---
+        r.push_str("\n\n4. TRIPLE ORDERING EFFECTS (Top 20)\n");
+        r.push_str("------------------------------------\n");
+        r.push_str("  Comparing all permutations of 3-pass combinations.\n");
+        r.push_str("  Spread = (worst - best) / best. Large spread = combined ordering matters.\n\n");
+
+        for (idx, t) in triples.iter().take(20).enumerate() {
+            r.push_str(&format!(
+                "  #{:<2} {{{}, {}, {}}}  spread={:>+.1}%\n",
+                idx + 1,
+                t.passes[0],
+                t.passes[1],
+                t.passes[2],
+                t.spread_pct,
+            ));
+            r.push_str(&format!(
+                "      best:  {:<45} worst: {}\n",
+                t.best_order, t.worst_order,
+            ));
+            for p in &t.permutations {
+                r.push_str(&format!(
+                    "        {:<45} {:>10.2}ms  (n={})\n",
+                    p.order,
+                    p.avg_time / 1_000_000.0,
+                    p.count,
+                ));
+            }
+            r.push_str("\n");
+        }
+
         // --- Key findings ---
-        r.push_str("\n\n4. KEY FINDINGS\n");
+        r.push_str("\n\n5. KEY FINDINGS\n");
         r.push_str("--------------\n");
 
         // Best passes
