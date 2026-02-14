@@ -70,6 +70,10 @@ impl DataCollector {
         })
     }
 
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+
     /// Collect exploratory data in parallel: one thread per function.
     pub fn collect(&self) -> Result<()> {
         let total = self.functions.len() * self.num_sequences;
