@@ -1,28 +1,10 @@
 /*
  * Targets: tailcallelim, inline, instcombine, simplifycfg
  *
- * Tail-recursive tree traversal + recursive summation.
- * Replaces the redundant naive matrix multiply benchmark.
+ * Multiple tail-recursive patterns: summation, search, GCD, tree walk,
+ * and a recursive filter. All convertible to loops by tailcallelim.
  */
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 /* Tail-recursive sum of array elements with accumulator */
 static long long tail_sum(const int *arr, int n, long long acc) {
@@ -43,13 +25,28 @@ static long long tail_gcd(long long a, long long b) {
     return tail_gcd(b, a % b);
 }
 
-/* Recursive Fibonacci (non-tail) for contrast — shows what tailcallelim can't fix */
-static int fib(int n) {
-    if (n <= 1) return n;
-    return fib(n - 1) + fib(n - 2);
+/* Tail-recursive partition — counts elements above/below pivot */
+static int tail_partition(const int *arr, int n, int pivot, int count) {
+    if (n <= 0) return count;
+    int next = (arr[0] > pivot) ? count + 1 : count;
+    return tail_partition(arr + 1, n - 1, pivot, next);
 }
 
-#define ARR_N 2000
+/* Tail-recursive max — finds maximum element */
+static int tail_max(const int *arr, int n, int best) {
+    if (n <= 0) return best;
+    int next = (arr[0] > best) ? arr[0] : best;
+    return tail_max(arr + 1, n - 1, next);
+}
+
+/* Tail-recursive run-length counter — counts consecutive equal pairs */
+static int tail_runs(const int *arr, int n, int prev, int count) {
+    if (n <= 0) return count;
+    int next = (arr[0] == prev) ? count + 1 : count;
+    return tail_runs(arr + 1, n - 1, arr[0], next);
+}
+
+#define ARR_N 5000
 
 static long long workload(int *arr) {
     long long total = 0;
@@ -58,9 +55,9 @@ static long long workload(int *arr) {
     /* Tail-recursive sum — tailcallelim converts this to a loop */
     total += tail_sum(arr, ARR_N, 0);
 
-    /* Tail-recursive search for 50 targets */
-    for (i = 0; i < 50; i++) {
-        int target = arr[lcg_rand() % ARR_N];
+    /* Tail-recursive search for 100 targets */
+    for (i = 0; i < 100; i++) {
+        int target = arr[bench_lcg_rand() % ARR_N];
         total += tail_search(arr, ARR_N, target, 0);
     }
 
@@ -71,42 +68,35 @@ static long long workload(int *arr) {
         if (a > 0 && b > 0) total += tail_gcd(a, b);
     }
 
-    /* Small Fibonacci (non-tail) for contrast */
-    total += fib(30);
+    /* Tail-recursive partition with multiple pivots */
+    for (i = 0; i < 10; i++) {
+        int pivot = (int)(bench_lcg_rand() % 10000);
+        total += tail_partition(arr, ARR_N, pivot, 0);
+    }
+
+    /* Tail-recursive max over subarrays */
+    for (i = 0; i < ARR_N; i += ARR_N / 20) {
+        total += tail_max(arr + i, ARR_N / 20, 0);
+    }
+
+    /* Tail-recursive run-length counting */
+    total += tail_runs(arr, ARR_N, -1, 0);
 
     return total;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
     int *arr = (int *)malloc(ARR_N * sizeof(int));
     int i;
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     for (i = 0; i < ARR_N; i++) {
-        arr[i] = (int)(lcg_rand() % 10000) + 1;
+        arr[i] = (int)(bench_lcg_rand() % 10000) + 1;
     }
 
-    /* Warmup */
     volatile long long sink;
-    for (i = 0; i < 5; i++) {
-        sink = workload(arr);
-    }
-
-    /* Timing */
-    long long times[201];
-    struct timespec t0, t1;
-    for (i = 0; i < 201; i++) {
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        sink = workload(arr);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        times[i] = timespec_diff_ns(&t0, &t1);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    /* Drop bottom/top 10% (20 each), average middle 161 */
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { sink = workload(arr); });
 
     free(arr);
     return 0;

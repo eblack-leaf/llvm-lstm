@@ -1,22 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 /* Karatsuba multiplication of big integers stored as arrays of digits (base 10000) */
 #define BASE 10000
@@ -103,38 +85,20 @@ static void workload(int *a, int *b, int *c) {
     karatsuba(a, b, c, DIGITS);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
     int *a = (int *)calloc(DIGITS, sizeof(int));
     int *b = (int *)calloc(DIGITS, sizeof(int));
     int *c = (int *)calloc(2 * DIGITS, sizeof(int));
     int i;
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     for (i = 0; i < DIGITS; i++) {
-        a[i] = lcg_rand() % BASE;
-        b[i] = lcg_rand() % BASE;
+        a[i] = bench_lcg_rand() % BASE;
+        b[i] = bench_lcg_rand() % BASE;
     }
 
-    /* Warmup */
-    for (i = 0; i < 3; i++) {
-        workload(a, b, c);
-    }
-
-    /* Timing */
-    long long times[201];
-    struct timespec t0, t1;
-    for (i = 0; i < 201; i++) {
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        workload(a, b, c);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        times[i] = timespec_diff_ns(&t0, &t1);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    /* Drop bottom/top 10% (20 each), average middle 161 */
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { workload(a, b, c); });
 
     free(a); free(b); free(c);
     return 0;

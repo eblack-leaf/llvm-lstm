@@ -1,22 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 #define NUM_OPS    3000
 #define TABLE_SIZE 6007    /* prime, ~2x NUM_OPS */
@@ -141,15 +123,13 @@ static unsigned int quad_lookup(unsigned int key) {
 static unsigned int keys[NUM_OPS];
 static unsigned int values[NUM_OPS];
 
-static volatile unsigned long long sink;
-
 static void run_benchmark(void) {
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     int i;
 
     for (i = 0; i < NUM_OPS; i++) {
-        keys[i] = hash_murmur_mix((lcg_rand() << 15) | lcg_rand());
-        values[i] = (lcg_rand() << 15) | lcg_rand();
+        keys[i] = hash_murmur_mix((bench_lcg_rand() << 15) | bench_lcg_rand());
+        values[i] = (bench_lcg_rand() << 15) | bench_lcg_rand();
     }
 
     unsigned long long sum = 0;
@@ -168,25 +148,14 @@ static void run_benchmark(void) {
     for (i = 0; i < NUM_OPS; i++) quad_insert(keys[i], values[i]);
     for (i = 0; i < NUM_OPS; i++) sum += quad_lookup(keys[i]);
 
-    sink = sum;
+    (void)sum;
 }
 
-int main(void) {
-    int i;
-    for (i = 0; i < 5; i++) run_benchmark();
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
 
-    long long times[201];
-    for (i = 0; i < 201; i++) {
-        struct timespec start, end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        run_benchmark();
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        times[i] = timespec_diff_ns(&start, &end);
-    }
+    volatile unsigned long long sink;
+    BENCH_TIME(niters, { run_benchmark(); sink = 1; });
 
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
     return 0;
 }

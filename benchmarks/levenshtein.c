@@ -1,25 +1,10 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
+#include "bench_timing.h"
 
 #define STR_LEN 200
 
 static void generate_random_string(char *s, int len) {
     for (int i = 0; i < len; i++) {
-        s[i] = 'a' + (lcg_rand() % 26);
+        s[i] = 'a' + (bench_lcg_rand() % 26);
     }
     s[len] = '\0';
 }
@@ -54,7 +39,7 @@ static int levenshtein(const char *s, int slen, const char *t, int tlen) {
 static volatile int sink;
 
 static void run_benchmark(void) {
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     char *s = (char *)malloc(STR_LEN + 1);
     char *t = (char *)malloc(STR_LEN + 1);
     generate_random_string(s, STR_LEN);
@@ -64,23 +49,9 @@ static void run_benchmark(void) {
     free(t);
 }
 
-int main(void) {
-    /* Warmup */
-    for (int i = 0; i < 5; i++) run_benchmark();
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
 
-    long long times[201];
-    for (int i = 0; i < 201; i++) {
-        struct timespec start, end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        run_benchmark();
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        times[i] = timespec_diff_ns(&start, &end);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    /* Drop bottom/top 10% (20 each), average middle 161 */
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { run_benchmark(); });
     return 0;
 }

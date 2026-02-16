@@ -29,6 +29,9 @@ pub struct CompilationPipeline {
     llc: String,
     work_dir: PathBuf,
     timeout_secs: u64,
+    /// Number of internal timing iterations each benchmark binary runs.
+    /// Passed as argv[1] to the compiled C benchmark.
+    pub bench_iters: usize,
 }
 
 impl CompilationPipeline {
@@ -40,11 +43,17 @@ impl CompilationPipeline {
             llc: "llc-20".to_string(),
             work_dir,
             timeout_secs: 60,
+            bench_iters: 201,
         }
     }
 
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    pub fn with_bench_iters(mut self, iters: usize) -> Self {
+        self.bench_iters = iters;
         self
     }
 
@@ -164,6 +173,7 @@ impl CompilationPipeline {
 
         for _ in 0..runs {
             let mut child = Command::new(binary)
+                .arg(self.bench_iters.to_string())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()

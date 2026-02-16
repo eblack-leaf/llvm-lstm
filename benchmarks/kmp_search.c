@@ -1,19 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) { lcg_state = lcg_state * 1103515245 + 12345; return (lcg_state >> 16) & 0x7fff; }
+#include "bench_timing.h"
 
 #define TEXT_SIZE (100 * 1024)  /* ~100 KB */
 #define PAT_LEN 20
@@ -55,14 +40,16 @@ static void do_kmp(void) {
     match_count = kmp_count(text, TEXT_SIZE, pattern, PAT_LEN, fail_table);
 }
 
-int main(void) {
-    /* Generate ~10MB random lowercase text */
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
+
+    /* Generate ~100KB random lowercase text */
     text = (char *)malloc(TEXT_SIZE + 1);
     if (!text) { fprintf(stderr, "malloc failed\n"); return 1; }
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     for (int i = 0; i < TEXT_SIZE; i++)
-        text[i] = 'a' + (char)(lcg_rand() % 26);
+        text[i] = 'a' + (char)(bench_lcg_rand() % 26);
     text[TEXT_SIZE] = '\0';
 
     /* Extract a pattern from a fixed position so it appears in the text */
@@ -76,25 +63,7 @@ int main(void) {
     /* Build KMP failure table */
     build_fail(pattern, PAT_LEN, fail_table);
 
-    /* Warmup */
-    for (int w = 0; w < 5; w++)
-        do_kmp();
-
-    /* Timed runs */
-    long long times[201];
-    for (int t = 0; t < 201; t++) {
-        struct timespec start, end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        do_kmp();
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        times[t] = timespec_diff_ns(&start, &end);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    /* Drop bottom/top 10% (20 each), average middle 161 */
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { do_kmp(); });
 
     free(text);
     return 0;

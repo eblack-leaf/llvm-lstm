@@ -4,25 +4,7 @@
  * Graph algorithms: BFS, DFS, connected components, topological-ish ordering,
  * degree histogram. CSR representation with multiple traversal patterns.
  */
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 #define NUM_NODES 2000
 #define NUM_EDGES 10000
@@ -51,9 +33,9 @@ static void build_graph(void) {
     int *dst = (int *)malloc(NUM_EDGES * sizeof(int));
 
     for (int i = 0; i < NUM_EDGES; i++) {
-        src[i] = lcg_rand() % NUM_NODES;
-        dst[i] = lcg_rand() % NUM_NODES;
-        edge_weight[i] = 1 + lcg_rand() % 20;
+        src[i] = bench_lcg_rand() % NUM_NODES;
+        dst[i] = bench_lcg_rand() % NUM_NODES;
+        edge_weight[i] = 1 + bench_lcg_rand() % 20;
         out_degree[src[i]]++;
     }
 
@@ -235,12 +217,10 @@ static int two_hop_count(int start) {
     return count;
 }
 
-static volatile long long sink;
-
 static long long run_benchmark(void) {
     long long total = 0;
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     build_graph();
 
     /* Multiple BFS from different start nodes */
@@ -274,21 +254,11 @@ static long long run_benchmark(void) {
     return total;
 }
 
-int main(void) {
-    for (int i = 0; i < 5; i++) sink = run_benchmark();
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
 
-    long long times[201];
-    for (int i = 0; i < 201; i++) {
-        struct timespec start, end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        sink = run_benchmark();
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        times[i] = timespec_diff_ns(&start, &end);
-    }
+    volatile long long sink;
+    BENCH_TIME(niters, { sink = run_benchmark(); });
 
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
     return 0;
 }

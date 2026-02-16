@@ -1,22 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 #define N 48
 #define BLOCK 8
@@ -142,7 +124,8 @@ static double workload(double *A, double *B, double *C, double *D, double *Bt, d
     return total;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
     double *A = (double *)malloc(N * N * sizeof(double));
     double *B = (double *)malloc(N * N * sizeof(double));
     double *C = (double *)malloc(N * N * sizeof(double));
@@ -152,31 +135,13 @@ int main(void) {
     double *vout = (double *)malloc(N * sizeof(double));
     int i;
 
-    lcg_state = 12345;
-    for (i = 0; i < N * N; i++) A[i] = (double)lcg_rand() / 32768.0;
-    for (i = 0; i < N * N; i++) B[i] = (double)lcg_rand() / 32768.0;
-    for (i = 0; i < N; i++) vec[i] = (double)lcg_rand() / 32768.0;
+    bench_lcg_seed(12345);
+    for (i = 0; i < N * N; i++) A[i] = (double)bench_lcg_rand() / 32768.0;
+    for (i = 0; i < N * N; i++) B[i] = (double)bench_lcg_rand() / 32768.0;
+    for (i = 0; i < N; i++) vec[i] = (double)bench_lcg_rand() / 32768.0;
 
-    /* Warmup */
     volatile double sink;
-    for (i = 0; i < 5; i++) {
-        sink = workload(A, B, C, D, Bt, vec, vout);
-    }
-
-    /* Timing: 201 runs, 10% trimmed mean */
-    long long times[201];
-    struct timespec t0, t1;
-    for (i = 0; i < 201; i++) {
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        sink = workload(A, B, C, D, Bt, vec, vout);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        times[i] = timespec_diff_ns(&t0, &t1);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { sink = workload(A, B, C, D, Bt, vec, vout); });
 
     free(A); free(B); free(C); free(D); free(Bt); free(vec); free(vout);
     return 0;

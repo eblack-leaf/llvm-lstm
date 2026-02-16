@@ -1,23 +1,5 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
+#include "bench_timing.h"
 #include <math.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
 
 #define FFT_N 1024
 #define LOG2N 10
@@ -153,7 +135,8 @@ static double workload(double *re, double *im,
     return total;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
     double *re = (double *)malloc(FFT_N * sizeof(double));
     double *im = (double *)malloc(FFT_N * sizeof(double));
     double *buf1_re = (double *)malloc(FFT_N * sizeof(double));
@@ -163,32 +146,14 @@ int main(void) {
     double *power = (double *)malloc(FFT_N * sizeof(double));
     int i;
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     for (i = 0; i < FFT_N; i++) {
-        re[i] = (double)lcg_rand() / 32768.0 - 0.5;
+        re[i] = (double)bench_lcg_rand() / 32768.0 - 0.5;
         im[i] = 0.0;
     }
 
-    /* Warmup */
     volatile double sink;
-    for (i = 0; i < 5; i++) {
-        sink = workload(re, im, buf1_re, buf1_im, buf2_re, buf2_im, power);
-    }
-
-    /* Timing: 201 runs, 10% trimmed mean */
-    long long times[201];
-    struct timespec t0, t1;
-    for (i = 0; i < 201; i++) {
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        sink = workload(re, im, buf1_re, buf1_im, buf2_re, buf2_im, power);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        times[i] = timespec_diff_ns(&t0, &t1);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { sink = workload(re, im, buf1_re, buf1_im, buf2_re, buf2_im, power); });
 
     free(re); free(im);
     free(buf1_re); free(buf1_im);

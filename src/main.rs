@@ -44,7 +44,7 @@ enum Commands {
         #[arg(long, default_value = "3")]
         runs: usize,
 
-        /// Number of benchmark runs for baselines (each run internally does 50 iterations)
+        /// Number of benchmark runs for baselines (each run internally does 201 trimmed-mean iterations)
         #[arg(long, default_value = "5")]
         baseline_runs: usize,
 
@@ -74,7 +74,7 @@ enum Commands {
         #[arg(long, default_value = "data/baselines")]
         output: PathBuf,
 
-        /// Number of benchmark runs per baseline (each run internally does 50 iterations)
+        /// Number of benchmark runs per baseline (each run internally does 201 trimmed-mean iterations)
         #[arg(long, default_value = "5")]
         baseline_runs: usize,
     },

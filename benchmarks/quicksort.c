@@ -1,22 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <string.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 #define ARR_N 5000
 
@@ -66,37 +48,20 @@ static long long workload(int *arr, int *src) {
     return sum;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
+
     int *src = (int *)malloc(ARR_N * sizeof(int));
     int *arr = (int *)malloc(ARR_N * sizeof(int));
     int i;
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     for (i = 0; i < ARR_N; i++) {
-        src[i] = (int)(lcg_rand() << 16) | (int)lcg_rand();
+        src[i] = (int)(bench_lcg_rand() << 16) | (int)bench_lcg_rand();
     }
 
-    /* Warmup */
     volatile long long sink;
-    for (i = 0; i < 5; i++) {
-        sink = workload(arr, src);
-    }
-
-    /* Timing */
-    long long times[201];
-    struct timespec t0, t1;
-    for (i = 0; i < 201; i++) {
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        sink = workload(arr, src);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        times[i] = timespec_diff_ns(&t0, &t1);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    /* Drop bottom/top 10% (20 each), average middle 161 */
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { sink = workload(arr, src); });
 
     free(src);
     free(arr);

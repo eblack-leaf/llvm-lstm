@@ -1,21 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-
-static long long timespec_diff_ns(struct timespec *a, struct timespec *b) {
-    return (long long)(b->tv_sec - a->tv_sec) * 1000000000LL + (b->tv_nsec - a->tv_nsec);
-}
-
-static int cmp_ll(const void *a, const void *b) {
-    long long x = *(const long long *)a, y = *(const long long *)b;
-    return (x > y) - (x < y);
-}
-
-static unsigned int lcg_state = 12345;
-static unsigned int lcg_rand(void) {
-    lcg_state = lcg_state * 1103515245 + 12345;
-    return (lcg_state >> 16) & 0x7fff;
-}
+#include "bench_timing.h"
 
 #define IMG_W 64
 #define IMG_H 64
@@ -119,7 +102,8 @@ static float workload(float *img, float *tmp, float *out,
     return total;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    int niters = bench_parse_iters(argc, argv);
     int pixels = IMG_W * IMG_H;
     float *img = (float *)malloc(pixels * sizeof(float));
     float *tmp = (float *)malloc(pixels * sizeof(float));
@@ -127,9 +111,9 @@ int main(void) {
     float kern5[25], kern3[9], kern1d[5];
     int i;
 
-    lcg_state = 12345;
+    bench_lcg_seed(12345);
     for (i = 0; i < pixels; i++) {
-        img[i] = (float)lcg_rand() / 32768.0f;
+        img[i] = (float)bench_lcg_rand() / 32768.0f;
     }
 
     /* Build kernels */
@@ -153,26 +137,8 @@ int main(void) {
     float weights[] = {0.1f, 0.2f, 0.4f, 0.2f, 0.1f};
     for (i = 0; i < 5; i++) kern1d[i] = weights[i];
 
-    /* Warmup */
     volatile float sink;
-    for (i = 0; i < 3; i++) {
-        sink = workload(img, tmp, out, kern5, kern3, kern1d);
-    }
-
-    /* Timing: 201 runs, 10% trimmed mean */
-    long long times[201];
-    struct timespec t0, t1;
-    for (i = 0; i < 201; i++) {
-        clock_gettime(CLOCK_MONOTONIC, &t0);
-        sink = workload(img, tmp, out, kern5, kern3, kern1d);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        times[i] = timespec_diff_ns(&t0, &t1);
-    }
-
-    qsort(times, 201, sizeof(long long), cmp_ll);
-    long long tsum = 0;
-    for (int ti = 20; ti < 181; ti++) tsum += times[ti];
-    printf("%lld\n", tsum / 161);
+    BENCH_TIME(niters, { sink = workload(img, tmp, out, kern5, kern3, kern1d); });
 
     free(img); free(tmp); free(out);
     return 0;
