@@ -34,10 +34,86 @@ static int kmp_count(const char *txt, int n, const char *pat, int m, const int *
     return count;
 }
 
+/* --- Variant 1: Naive brute-force string search --- */
+
+static int naive_count(const char *txt, int n, const char *pat, int m) {
+    int count = 0;
+    int i, j;
+    for (i = 0; i <= n - m; i++) {
+        j = 0;
+        while (j < m && txt[i + j] == pat[j])
+            j++;
+        if (j == m)
+            count++;
+    }
+    return count;
+}
+
+/* --- Variant 2: Rabin-Karp rolling hash --- */
+
+static int rabin_karp_count(const char *txt, int n, const char *pat, int m) {
+    if (m > n) return 0;
+    unsigned long long base = 256ULL, mod = 1000000007ULL;
+    unsigned long long h = 1;
+    int i;
+    for (i = 0; i < m - 1; i++) h = (h * base) % mod;
+
+    unsigned long long pat_hash = 0, txt_hash = 0;
+    for (i = 0; i < m; i++) {
+        pat_hash = (pat_hash * base + (unsigned char)pat[i]) % mod;
+        txt_hash = (txt_hash * base + (unsigned char)txt[i]) % mod;
+    }
+
+    int count = 0;
+    for (i = 0; i <= n - m; i++) {
+        if (txt_hash == pat_hash) {
+            /* Verify on hash collision */
+            int j = 0;
+            while (j < m && txt[i + j] == pat[j]) j++;
+            if (j == m) count++;
+        }
+        if (i < n - m) {
+            txt_hash = (txt_hash + mod - (unsigned char)txt[i] * h % mod) % mod;
+            txt_hash = (txt_hash * base + (unsigned char)txt[i + m]) % mod;
+        }
+    }
+    return count;
+}
+
+/* --- Variant 3: Boyer-Moore-Horspool --- */
+
+static int bmh_count(const char *txt, int n, const char *pat, int m) {
+    if (m > n) return 0;
+    int skip[256];
+    int i;
+    for (i = 0; i < 256; i++) skip[i] = m;
+    for (i = 0; i < m - 1; i++) skip[(unsigned char)pat[i]] = m - 1 - i;
+
+    int count = 0;
+    int pos = 0;
+    while (pos <= n - m) {
+        int j = m - 1;
+        while (j >= 0 && txt[pos + j] == pat[j])
+            j--;
+        if (j < 0) {
+            count++;
+            pos += skip[(unsigned char)txt[pos + m - 1]];
+        } else {
+            pos += skip[(unsigned char)txt[pos + m - 1]];
+        }
+    }
+    return count;
+}
+
 static volatile int match_count;
 
-static void do_kmp(void) {
-    match_count = kmp_count(text, TEXT_SIZE, pattern, PAT_LEN, fail_table);
+static void do_search(void) {
+    int total = 0;
+    total += kmp_count(text, TEXT_SIZE, pattern, PAT_LEN, fail_table);
+    total += naive_count(text, TEXT_SIZE, pattern, PAT_LEN);
+    total += rabin_karp_count(text, TEXT_SIZE, pattern, PAT_LEN);
+    total += bmh_count(text, TEXT_SIZE, pattern, PAT_LEN);
+    match_count = total;
 }
 
 int main(int argc, char **argv) {
@@ -63,7 +139,7 @@ int main(int argc, char **argv) {
     /* Build KMP failure table */
     build_fail(pattern, PAT_LEN, fail_table);
 
-    BENCH_TIME(niters, { do_kmp(); });
+    BENCH_TIME(niters, { do_search(); });
 
     free(text);
     return 0;
