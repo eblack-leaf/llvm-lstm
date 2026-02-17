@@ -68,6 +68,104 @@ pub struct TriplePermutation {
     pub count: usize,
 }
 
+// ---- New controlled analysis structs ----
+
+#[derive(Debug, Serialize)]
+pub struct NormalizedPassImpact {
+    pub pass_name: String,
+    pub median_speedup_with: f64,
+    pub median_speedup_without: f64,
+    pub count_with: usize,
+    pub count_without: usize,
+    /// (without - with) / with * 100 — positive means pass helps
+    pub relative_improvement: f64,
+    pub per_function: Vec<FunctionPassBreakdown>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FunctionPassBreakdown {
+    pub function: String,
+    pub median_speedup_with: f64,
+    pub median_speedup_without: f64,
+    pub count_with: usize,
+    pub count_without: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LengthStratifiedImpact {
+    pub pass_name: String,
+    pub by_length: Vec<LengthBucket>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LengthBucket {
+    pub length_range: String,
+    pub median_speedup_with: f64,
+    pub median_speedup_without: f64,
+    pub count_with: usize,
+    pub count_without: usize,
+    pub relative_improvement: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ControlledOrderResult {
+    pub pass_a: String,
+    pub pass_b: String,
+    pub matched_pairs: usize,
+    pub median_speedup_ab: f64,
+    pub median_speedup_ba: f64,
+    pub delta_pct: f64,
+    pub per_function: Vec<ControlledFunctionResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ControlledFunctionResult {
+    pub function: String,
+    pub matched_pairs: usize,
+    pub median_speedup_ab: f64,
+    pub median_speedup_ba: f64,
+    pub delta_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpeedupDistribution {
+    pub function: String,
+    pub o0_ns: f64,
+    pub o3_ns: f64,
+    pub min_speedup: f64,
+    pub p10_speedup: f64,
+    pub p25_speedup: f64,
+    pub median_speedup: f64,
+    pub p75_speedup: f64,
+    pub p90_speedup: f64,
+    pub max_speedup: f64,
+    pub speedup_o3: f64,
+    pub pct_beating_o3: f64,
+}
+
+// ---- Helpers ----
+
+fn median_f64(v: &mut Vec<f64>) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 0 {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    } else {
+        v[n / 2]
+    }
+}
+
+fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 pub struct EdaAnalyzer {
     records: Vec<DataRecord>,
     baselines: HashMap<String, HashMap<String, f64>>,
@@ -357,6 +455,357 @@ impl EdaAnalyzer {
         results
     }
 
+    // ---- New controlled analysis methods ----
+
+    /// Speedup ratio: execution_time_ns / O0_baseline_ns (lower = better optimized)
+    fn speedup_ratio(&self, record: &DataRecord) -> Option<f64> {
+        self.baselines
+            .get(&record.function)
+            .and_then(|b| b.get("-O0"))
+            .map(|&o0| record.execution_time_ns as f64 / o0)
+    }
+
+    /// Normalized pass impact using per-function speedup ratios vs O0 baseline.
+    pub fn normalized_pass_impact(&self) -> Vec<NormalizedPassImpact> {
+        let all_passes: Vec<&str> = crate::pass_menu::Pass::all_transforms()
+            .iter()
+            .map(|p| p.opt_name())
+            .collect();
+
+        let mut results = Vec::new();
+
+        for pass_name in all_passes {
+            // Per-function: collect speedup ratios with/without this pass
+            let mut func_with: HashMap<&str, Vec<f64>> = HashMap::new();
+            let mut func_without: HashMap<&str, Vec<f64>> = HashMap::new();
+
+            for r in &self.records {
+                if let Some(sr) = self.speedup_ratio(r) {
+                    if r.pass_sequence.iter().any(|p| p == pass_name) {
+                        func_with.entry(&r.function).or_default().push(sr);
+                    } else {
+                        func_without.entry(&r.function).or_default().push(sr);
+                    }
+                }
+            }
+
+            let mut per_func_with_medians: Vec<f64> = Vec::new();
+            let mut per_func_without_medians: Vec<f64> = Vec::new();
+            let mut per_function = Vec::new();
+            let mut total_with = 0usize;
+            let mut total_without = 0usize;
+
+            // Get all function names that appear in both groups
+            let all_funcs: Vec<&str> = {
+                let mut s: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                s.extend(func_with.keys());
+                s.extend(func_without.keys());
+                let mut v: Vec<&str> = s.into_iter().collect();
+                v.sort();
+                v
+            };
+
+            for func in all_funcs {
+                let w = func_with.get(func);
+                let wo = func_without.get(func);
+                if let (Some(with_vals), Some(without_vals)) = (w, wo) {
+                    if with_vals.len() >= 5 && without_vals.len() >= 5 {
+                        let mut wv = with_vals.clone();
+                        let mut wov = without_vals.clone();
+                        let med_w = median_f64(&mut wv);
+                        let med_wo = median_f64(&mut wov);
+                        per_func_with_medians.push(med_w);
+                        per_func_without_medians.push(med_wo);
+                        total_with += with_vals.len();
+                        total_without += without_vals.len();
+                        per_function.push(FunctionPassBreakdown {
+                            function: func.to_string(),
+                            median_speedup_with: med_w,
+                            median_speedup_without: med_wo,
+                            count_with: with_vals.len(),
+                            count_without: without_vals.len(),
+                        });
+                    }
+                }
+            }
+
+            if !per_func_with_medians.is_empty() {
+                let overall_with = median_f64(&mut per_func_with_medians);
+                let overall_without = median_f64(&mut per_func_without_medians);
+                let improvement = if overall_with > 0.0 {
+                    (overall_without - overall_with) / overall_with * 100.0
+                } else {
+                    0.0
+                };
+
+                results.push(NormalizedPassImpact {
+                    pass_name: pass_name.to_string(),
+                    median_speedup_with: overall_with,
+                    median_speedup_without: overall_without,
+                    count_with: total_with,
+                    count_without: total_without,
+                    relative_improvement: improvement,
+                    per_function,
+                });
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.relative_improvement
+                .partial_cmp(&a.relative_improvement)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results
+    }
+
+    /// Length-stratified pass impact: breaks analysis into sequence length buckets.
+    pub fn length_stratified_impact(&self) -> Vec<LengthStratifiedImpact> {
+        let all_passes: Vec<&str> = crate::pass_menu::Pass::all_transforms()
+            .iter()
+            .map(|p| p.opt_name())
+            .collect();
+
+        let buckets: &[(usize, usize, &str)] = &[(1, 5, "1-5"), (6, 10, "6-10"), (11, 15, "11-15")];
+
+        let mut results = Vec::new();
+
+        for pass_name in all_passes {
+            let mut by_length = Vec::new();
+
+            for &(lo, hi, label) in buckets {
+                // Per function within this length bucket
+                let mut func_with: HashMap<&str, Vec<f64>> = HashMap::new();
+                let mut func_without: HashMap<&str, Vec<f64>> = HashMap::new();
+
+                for r in &self.records {
+                    let seq_len = r.pass_sequence.len();
+                    if seq_len < lo || seq_len > hi {
+                        continue;
+                    }
+                    if let Some(sr) = self.speedup_ratio(r) {
+                        if r.pass_sequence.iter().any(|p| p == pass_name) {
+                            func_with.entry(&r.function).or_default().push(sr);
+                        } else {
+                            func_without.entry(&r.function).or_default().push(sr);
+                        }
+                    }
+                }
+
+                let mut per_func_with: Vec<f64> = Vec::new();
+                let mut per_func_without: Vec<f64> = Vec::new();
+                let mut total_w = 0usize;
+                let mut total_wo = 0usize;
+
+                for func in func_with.keys() {
+                    if let (Some(wv), Some(wov)) = (func_with.get(func), func_without.get(func)) {
+                        if wv.len() >= 3 && wov.len() >= 3 {
+                            per_func_with.push(median_f64(&mut wv.clone()));
+                            per_func_without.push(median_f64(&mut wov.clone()));
+                            total_w += wv.len();
+                            total_wo += wov.len();
+                        }
+                    }
+                }
+
+                if !per_func_with.is_empty() {
+                    let med_w = median_f64(&mut per_func_with);
+                    let med_wo = median_f64(&mut per_func_without);
+                    let improvement = if med_w > 0.0 {
+                        (med_wo - med_w) / med_w * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    by_length.push(LengthBucket {
+                        length_range: label.to_string(),
+                        median_speedup_with: med_w,
+                        median_speedup_without: med_wo,
+                        count_with: total_w,
+                        count_without: total_wo,
+                        relative_improvement: improvement,
+                    });
+                }
+            }
+
+            if !by_length.is_empty() {
+                results.push(LengthStratifiedImpact {
+                    pass_name: pass_name.to_string(),
+                    by_length,
+                });
+            }
+        }
+
+        results
+    }
+
+    /// Controlled ordering: within each (function, length_bucket), compare
+    /// records where both A and B appear with A before B vs B before A.
+    pub fn controlled_ordering(&self) -> Vec<ControlledOrderResult> {
+        let all_passes: Vec<&str> = crate::pass_menu::Pass::all_transforms()
+            .iter()
+            .map(|p| p.opt_name())
+            .collect();
+
+        let buckets: &[(usize, usize)] = &[(1, 5), (6, 10), (11, 15)];
+
+        // Group records by function
+        let mut by_func: HashMap<&str, Vec<&DataRecord>> = HashMap::new();
+        for r in &self.records {
+            by_func.entry(&r.function).or_default().push(r);
+        }
+
+        let mut results = Vec::new();
+
+        for (i, &pa) in all_passes.iter().enumerate() {
+            for &pb in &all_passes[i + 1..] {
+                let mut all_ab_medians: Vec<f64> = Vec::new();
+                let mut all_ba_medians: Vec<f64> = Vec::new();
+                let mut per_function = Vec::new();
+                let mut total_matched = 0usize;
+
+                for (&func, records) in &by_func {
+                    let mut func_ab_medians: Vec<f64> = Vec::new();
+                    let mut func_ba_medians: Vec<f64> = Vec::new();
+
+                    for &(lo, hi) in buckets {
+                        let mut ab_speedups: Vec<f64> = Vec::new();
+                        let mut ba_speedups: Vec<f64> = Vec::new();
+
+                        for r in records {
+                            let seq_len = r.pass_sequence.len();
+                            if seq_len < lo || seq_len > hi {
+                                continue;
+                            }
+                            let pos_a = r.pass_sequence.iter().position(|p| p == pa);
+                            let pos_b = r.pass_sequence.iter().position(|p| p == pb);
+                            if let (Some(ia), Some(ib)) = (pos_a, pos_b) {
+                                if let Some(sr) = self.speedup_ratio(r) {
+                                    if ia < ib {
+                                        ab_speedups.push(sr);
+                                    } else {
+                                        ba_speedups.push(sr);
+                                    }
+                                }
+                            }
+                        }
+
+                        if ab_speedups.len() >= 3 && ba_speedups.len() >= 3 {
+                            func_ab_medians.push(median_f64(&mut ab_speedups));
+                            func_ba_medians.push(median_f64(&mut ba_speedups));
+                        }
+                    }
+
+                    if !func_ab_medians.is_empty() {
+                        let med_ab = median_f64(&mut func_ab_medians);
+                        let med_ba = median_f64(&mut func_ba_medians);
+                        all_ab_medians.push(med_ab);
+                        all_ba_medians.push(med_ba);
+                        total_matched += func_ab_medians.len();
+
+                        let delta = if med_ba > 0.0 {
+                            (med_ab - med_ba) / med_ba * 100.0
+                        } else {
+                            0.0
+                        };
+
+                        per_function.push(ControlledFunctionResult {
+                            function: func.to_string(),
+                            matched_pairs: func_ab_medians.len(),
+                            median_speedup_ab: med_ab,
+                            median_speedup_ba: med_ba,
+                            delta_pct: delta,
+                        });
+                    }
+                }
+
+                if all_ab_medians.len() >= 3 {
+                    let overall_ab = median_f64(&mut all_ab_medians);
+                    let overall_ba = median_f64(&mut all_ba_medians);
+                    let delta = if overall_ba > 0.0 {
+                        (overall_ab - overall_ba) / overall_ba * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    per_function.sort_by(|a, b| {
+                        a.function.cmp(&b.function)
+                    });
+
+                    results.push(ControlledOrderResult {
+                        pass_a: pa.to_string(),
+                        pass_b: pb.to_string(),
+                        matched_pairs: total_matched,
+                        median_speedup_ab: overall_ab,
+                        median_speedup_ba: overall_ba,
+                        delta_pct: delta,
+                        per_function,
+                    });
+                }
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.delta_pct
+                .abs()
+                .partial_cmp(&a.delta_pct.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results
+    }
+
+    /// Per-function speedup distribution: percentile summary of how well
+    /// random pass sequences optimize each function.
+    pub fn speedup_distribution(&self) -> Vec<SpeedupDistribution> {
+        let mut by_func: HashMap<&str, Vec<f64>> = HashMap::new();
+        for r in &self.records {
+            if let Some(sr) = self.speedup_ratio(r) {
+                by_func.entry(&r.function).or_default().push(sr);
+            }
+        }
+
+        let mut results: Vec<SpeedupDistribution> = by_func
+            .into_iter()
+            .map(|(func, mut speedups)| {
+                speedups.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                let o0 = self
+                    .baselines
+                    .get(func)
+                    .and_then(|b| b.get("-O0").copied())
+                    .unwrap_or(1.0);
+                let o3 = self
+                    .baselines
+                    .get(func)
+                    .and_then(|b| b.get("-O3").copied())
+                    .unwrap_or(1.0);
+                let speedup_o3 = o3 / o0;
+
+                let pct_beating = speedups.iter().filter(|&&s| s < speedup_o3).count() as f64
+                    / speedups.len() as f64
+                    * 100.0;
+
+                let n = speedups.len();
+                SpeedupDistribution {
+                    function: func.to_string(),
+                    o0_ns: o0,
+                    o3_ns: o3,
+                    min_speedup: speedups[0],
+                    p10_speedup: percentile_f64(&speedups, 10.0),
+                    p25_speedup: percentile_f64(&speedups, 25.0),
+                    median_speedup: percentile_f64(&speedups, 50.0),
+                    p75_speedup: percentile_f64(&speedups, 75.0),
+                    p90_speedup: percentile_f64(&speedups, 90.0),
+                    max_speedup: speedups[n - 1],
+                    speedup_o3: speedup_o3,
+                    pct_beating_o3: pct_beating,
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| a.function.cmp(&b.function));
+        results
+    }
+
     /// Write all analysis results to output directory.
     pub fn write_all(&self, output_dir: &Path) -> Result<()> {
         fs::create_dir_all(output_dir)?;
@@ -384,6 +833,30 @@ impl EdaAnalyzer {
         let file = File::create(output_dir.join("pass_ordering_triples.json"))?;
         serde_json::to_writer_pretty(file, &triples)?;
         eprintln!("Wrote pass_ordering_triples.json ({} triples)", triples.len());
+
+        // Normalized pass impact
+        let norm_impact = self.normalized_pass_impact();
+        let file = File::create(output_dir.join("normalized_pass_impact.json"))?;
+        serde_json::to_writer_pretty(file, &norm_impact)?;
+        eprintln!("Wrote normalized_pass_impact.json ({} passes)", norm_impact.len());
+
+        // Length-stratified impact
+        let strat_impact = self.length_stratified_impact();
+        let file = File::create(output_dir.join("length_stratified_impact.json"))?;
+        serde_json::to_writer_pretty(file, &strat_impact)?;
+        eprintln!("Wrote length_stratified_impact.json ({} passes)", strat_impact.len());
+
+        // Controlled ordering
+        let ctrl_ordering = self.controlled_ordering();
+        let file = File::create(output_dir.join("controlled_ordering.json"))?;
+        serde_json::to_writer_pretty(file, &ctrl_ordering)?;
+        eprintln!("Wrote controlled_ordering.json ({} pairs)", ctrl_ordering.len());
+
+        // Speedup distribution
+        let speedup_dist = self.speedup_distribution();
+        let file = File::create(output_dir.join("speedup_distribution.json"))?;
+        serde_json::to_writer_pretty(file, &speedup_dist)?;
+        eprintln!("Wrote speedup_distribution.json ({} functions)", speedup_dist.len());
 
         // IR features summary
         let mut ir_summary: Vec<serde_json::Value> = Vec::new();

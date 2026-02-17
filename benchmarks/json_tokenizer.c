@@ -87,6 +87,22 @@ static void generate_json(void) {
 #undef EMITS
 }
 
+/* --- Extracted helpers --- */
+
+static int skip_string(const char *buf, int i, int len) {
+    while (i < len && buf[i] != '"') {
+        if (buf[i] == '\\') i++;
+        i++;
+    }
+    return i + 1; /* past closing quote */
+}
+
+static int skip_number(const char *buf, int i, int len) {
+    while (i < len && ((buf[i] >= '0' && buf[i] <= '9') || buf[i] == '.'))
+        i++;
+    return i;
+}
+
 /* Simple tokenizer: counts {, }, [, ], strings, numbers, true/false/null, colons, commas */
 static volatile int token_count;
 
@@ -102,17 +118,12 @@ static void do_tokenize(void) {
             /* String token */
             count++;
             i++;
-            while (i < json_len && json_buf[i] != '"') {
-                if (json_buf[i] == '\\') i++;  /* skip escaped char */
-                i++;
-            }
-            i++;  /* closing quote */
+            i = skip_string(json_buf, i, json_len);
         } else if ((c >= '0' && c <= '9') || c == '-') {
             /* Number token */
             count++;
             i++;
-            while (i < json_len && ((json_buf[i] >= '0' && json_buf[i] <= '9') || json_buf[i] == '.'))
-                i++;
+            i = skip_number(json_buf, i, json_len);
         } else if (c == 't') {
             count++; i += 4;  /* true */
         } else if (c == 'f') {
@@ -126,10 +137,217 @@ static void do_tokenize(void) {
     token_count = count;
 }
 
+/* Tokenizer with 8 separate counters */
+static void tokenize_with_counts(const char *buf, int len, int *counts) {
+    for (int j = 0; j < 8; j++) counts[j] = 0;
+    int i = 0;
+    while (i < len) {
+        char c = buf[i];
+        if (c == '{' || c == '}') {
+            counts[0]++;
+            i++;
+        } else if (c == '[' || c == ']') {
+            counts[1]++;
+            i++;
+        } else if (c == '"') {
+            counts[2]++;
+            i++;
+            i = skip_string(buf, i, len);
+        } else if ((c >= '0' && c <= '9') || c == '-') {
+            counts[3]++;
+            i++;
+            i = skip_number(buf, i, len);
+        } else if (c == 't') {
+            counts[4]++;
+            i += 4;
+        } else if (c == 'f') {
+            counts[4]++;
+            i += 5;
+        } else if (c == 'n') {
+            counts[5]++;
+            i += 4;
+        } else if (c == ':') {
+            counts[6]++;
+            i++;
+        } else if (c == ',') {
+            counts[7]++;
+            i++;
+        } else {
+            i++;
+        }
+    }
+}
+
+/* Validate JSON structure: track depth, return -1 if invalid */
+static int tokenize_validate(const char *buf, int len) {
+    int depth = 0;
+    int i = 0;
+    while (i < len) {
+        char c = buf[i];
+        if (c == '{' || c == '[') {
+            depth++;
+            i++;
+        } else if (c == '}' || c == ']') {
+            depth--;
+            if (depth < 0) return -1;
+            i++;
+        } else if (c == '"') {
+            i++;
+            i = skip_string(buf, i, len);
+        } else if ((c >= '0' && c <= '9') || c == '-') {
+            i++;
+            i = skip_number(buf, i, len);
+        } else if (c == 't') {
+            i += 4;
+        } else if (c == 'f') {
+            i += 5;
+        } else if (c == 'n') {
+            i += 4;
+        } else {
+            i++;
+        }
+    }
+    return depth;
+}
+
+/* Scan for a specific key string, return count of matches */
+static int tokenize_find_key(const char *buf, int len, const char *key, int keylen) {
+    int found = 0;
+    int i = 0;
+    while (i < len) {
+        char c = buf[i];
+        if (c == '"') {
+            i++;
+            int start = i;
+            i = skip_string(buf, i, len);
+            int slen = i - start - 1; /* length without closing quote */
+            if (slen == keylen) {
+                int match = 1;
+                for (int j = 0; j < keylen; j++) {
+                    if (buf[start + j] != key[j]) {
+                        match = 0;
+                        break;
+                    }
+                }
+                if (match) found++;
+            }
+        } else if ((c >= '0' && c <= '9') || c == '-') {
+            i++;
+            i = skip_number(buf, i, len);
+        } else if (c == 't') {
+            i += 4;
+        } else if (c == 'f') {
+            i += 5;
+        } else if (c == 'n') {
+            i += 4;
+        } else {
+            i++;
+        }
+    }
+    return found;
+}
+
+/* Extract numeric token values into output array */
+static int tokenize_extract_numbers(const char *buf, int len, int *out, int max_out) {
+    int count = 0;
+    int i = 0;
+    while (i < len) {
+        char c = buf[i];
+        if ((c >= '0' && c <= '9') || c == '-') {
+            int neg = 0;
+            if (c == '-') { neg = 1; i++; }
+            int val = 0;
+            while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+                val = val * 10 + (buf[i] - '0');
+                i++;
+            }
+            /* skip fractional part */
+            if (i < len && buf[i] == '.') {
+                i++;
+                while (i < len && buf[i] >= '0' && buf[i] <= '9') i++;
+            }
+            if (neg) val = -val;
+            if (count < max_out) {
+                out[count] = val;
+                count++;
+            }
+        } else if (c == '"') {
+            i++;
+            i = skip_string(buf, i, len);
+        } else if (c == 't') {
+            i += 4;
+        } else if (c == 'f') {
+            i += 5;
+        } else if (c == 'n') {
+            i += 4;
+        } else {
+            i++;
+        }
+    }
+    return count;
+}
+
+/* Sum the lengths of all string tokens */
+static int tokenize_sum_string_lengths(const char *buf, int len) {
+    int total = 0;
+    int i = 0;
+    while (i < len) {
+        char c = buf[i];
+        if (c == '"') {
+            i++;
+            int start = i;
+            while (i < len && buf[i] != '"') {
+                if (buf[i] == '\\') i++;
+                i++;
+            }
+            total += (i - start);
+            i++; /* past closing quote */
+        } else if ((c >= '0' && c <= '9') || c == '-') {
+            i++;
+            i = skip_number(buf, i, len);
+        } else if (c == 't') {
+            i += 4;
+        } else if (c == 'f') {
+            i += 5;
+        } else if (c == 'n') {
+            i += 4;
+        } else {
+            i++;
+        }
+    }
+    return total;
+}
+
+/* Combined workload calling all tokenizer variants */
+static long long workload(void) {
+    long long result = 0;
+
+    do_tokenize();
+    result += token_count;
+
+    int counts[8];
+    tokenize_with_counts(json_buf, json_len, counts);
+    for (int j = 0; j < 8; j++) result += counts[j];
+
+    result += tokenize_validate(json_buf, json_len);
+
+    result += tokenize_find_key(json_buf, json_len, "abc", 3);
+
+    int num_buf[1000];
+    int ncount = tokenize_extract_numbers(json_buf, json_len, num_buf, 1000);
+    result += ncount;
+
+    result += tokenize_sum_string_lengths(json_buf, json_len);
+
+    return result;
+}
+
 int main(int argc, char **argv) {
     int niters = bench_parse_iters(argc, argv);
     generate_json();
 
-    BENCH_TIME(niters, { do_tokenize(); });
+    volatile long long sink;
+    BENCH_TIME(niters, { sink = workload(); });
+    (void)sink;
     return 0;
 }

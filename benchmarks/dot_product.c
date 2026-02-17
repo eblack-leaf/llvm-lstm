@@ -64,6 +64,80 @@ static void matvec(const double *mat, const double *vec, double *out, int rows, 
 #define MAT_ROWS 50
 #define MAT_COLS VEC_N
 
+/* Kahan-compensated dot product — extra branches and arithmetic */
+static double dot_kahan(const double *a, const double *b, int n) {
+    double sum = 0.0;
+    double compensation = 0.0;
+    int i;
+    for (i = 0; i < n; i++) {
+        double y = a[i] * b[i] - compensation;
+        double t = sum + y;
+        compensation = (t - sum) - y;
+        sum = t;
+    }
+    return sum;
+}
+
+/* Block-accumulate dot product — outer+inner loop structure */
+static double dot_blocked(const double *a, const double *b, int n, int block_size) {
+    double total = 0.0;
+    int i, j;
+    for (i = 0; i < n; i += block_size) {
+        double block_sum = 0.0;
+        int end = i + block_size;
+        if (end > n) end = n;
+        for (j = i; j < end; j++) {
+            block_sum += a[j] * b[j];
+        }
+        total += block_sum;
+    }
+    return total;
+}
+
+/* Sparse dot product — skip near-zero elements, branch per iteration */
+static double dot_sparse(const double *a, const double *b, int n) {
+    double sum = 0.0;
+    int i;
+    for (i = 0; i < n; i++) {
+        if (a[i] > 0.01 || a[i] < -0.01) {
+            sum += a[i] * b[i];
+        }
+    }
+    return sum;
+}
+
+/* Reverse dot product — iterate backwards */
+static double dot_reverse(const double *a, const double *b, int n) {
+    double sum = 0.0;
+    int i;
+    for (i = n - 1; i >= 0; i--) {
+        sum += a[i] * b[i];
+    }
+    return sum;
+}
+
+/* Bilinear form: a^T * M * b — nested loop with both vectors */
+static double bilinear_form(const double *a, const double *M, const double *b, int rows, int cols) {
+    double sum = 0.0;
+    int r, c;
+    for (r = 0; r < rows; r++) {
+        for (c = 0; c < cols; c++) {
+            sum += a[r] * M[r * cols + c] * b[c];
+        }
+    }
+    return sum;
+}
+
+/* L1 distance (sum of absolute differences) — branch per iteration */
+static double dot_abs_diff(const double *a, const double *b, int n) {
+    double sum = 0.0;
+    int i;
+    for (i = 0; i < n; i++) {
+        sum += (a[i] > b[i]) ? (a[i] - b[i]) : (b[i] - a[i]);
+    }
+    return sum;
+}
+
 static double workload(double *a, double *b, double *w, double *mat, double *mvout) {
     double total = 0.0;
 
@@ -75,6 +149,13 @@ static double workload(double *a, double *b, double *w, double *mat, double *mvo
     matvec(mat, b, mvout, MAT_ROWS, MAT_COLS);
     int i;
     for (i = 0; i < MAT_ROWS; i++) total += mvout[i];
+
+    total += dot_kahan(a, b, VEC_N);
+    total += dot_blocked(a, b, VEC_N, 64);
+    total += dot_sparse(a, b, VEC_N);
+    total += dot_reverse(a, b, VEC_N);
+    total += bilinear_form(a, mat, b, MAT_ROWS, MAT_COLS);
+    total += dot_abs_diff(a, b, VEC_N);
 
     return total;
 }

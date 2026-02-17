@@ -75,6 +75,66 @@ static void histogram(const float *arr, int n, int *bins) {
     }
 }
 
+/* Sliding window maximum — nested loops + comparison branch */
+static float reduce_windowed_max(const float *arr, int n, int window) {
+    float total = 0.0f;
+    for (int i = 0; i <= n - window; i++) {
+        float mx = arr[i];
+        for (int j = 1; j < window; j++) {
+            if (arr[i + j] > mx) mx = arr[i + j];
+        }
+        total += mx;
+    }
+    return total;
+}
+
+/* Exponential weighted moving average — serial dependency chain */
+static float reduce_ewma(const float *arr, int n, float alpha) {
+    float running = arr[0];
+    float one_minus_alpha = 1.0f - alpha;
+    for (int i = 1; i < n; i++) {
+        running = alpha * arr[i] + one_minus_alpha * running;
+    }
+    return running;
+}
+
+/* L1 norm with sign branch */
+static float reduce_l1_norm(const float *arr, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        sum += (arr[i] >= 0.0f) ? arr[i] : -arr[i];
+    }
+    return sum;
+}
+
+/* Two-pass variance: mean then sum of squared deviations */
+static float reduce_variance(const float *arr, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        sum += arr[i];
+    }
+    float mean = sum / n;
+    float var_sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float d = arr[i] - mean;
+        var_sum += d * d;
+    }
+    return var_sum / n;
+}
+
+/* 2D histogram of adjacent pairs */
+static void histogram_2d(const float *arr, int n, int *bins, int nbins) {
+    for (int i = 0; i < n - 1; i++) {
+        int row = (int)((arr[i] + 0.5f) * nbins);
+        int col = (int)((arr[i + 1] + 0.5f) * nbins);
+        if (row < 0) row = 0;
+        if (row >= nbins) row = nbins - 1;
+        if (col < 0) col = 0;
+        if (col >= nbins) col = nbins - 1;
+        bins[row * nbins + col]++;
+    }
+}
+
 static float workload(float *arr, float *scratch) {
     float total = 0.0f;
     float s, mn, mx, sos;
@@ -95,6 +155,21 @@ static float workload(float *arr, float *scratch) {
     histogram(arr, ARR_N, bins);
     int i;
     for (i = 0; i < NUM_BINS; i++) total += bins[i];
+
+    total += reduce_windowed_max(arr, ARR_N, 8);
+    total += reduce_ewma(arr, ARR_N, 0.1f);
+    total += reduce_l1_norm(arr, ARR_N);
+    total += reduce_variance(arr, ARR_N);
+
+    total += reduce_conditional(arr, ARR_N, 0.1f);
+    total += reduce_conditional(arr, ARR_N, 0.3f);
+    total += reduce_conditional(arr, ARR_N, -0.1f);
+    total += reduce_conditional(arr, ARR_N, 0.4f);
+
+    int bins2d[16 * 16];
+    memset(bins2d, 0, sizeof(bins2d));
+    histogram_2d(arr, ARR_N, bins2d, 16);
+    for (i = 0; i < 16 * 16; i++) total += bins2d[i];
 
     return total;
 }
