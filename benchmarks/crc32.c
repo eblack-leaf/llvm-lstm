@@ -18,7 +18,6 @@ static void crc32_init_table(void) {
     }
 }
 
-/* Standard table-driven CRC32 */
 static unsigned int crc32_table_driven(const unsigned char *data, int len) {
     unsigned int crc = 0xFFFFFFFFu;
     int i;
@@ -28,7 +27,6 @@ static unsigned int crc32_table_driven(const unsigned char *data, int len) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-/* Bit-by-bit CRC32 (no table) — more branch-heavy */
 static unsigned int crc32_bitwise(const unsigned char *data, int len) {
     unsigned int crc = 0xFFFFFFFFu;
     int i, j;
@@ -44,26 +42,22 @@ static unsigned int crc32_bitwise(const unsigned char *data, int len) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-/* XOR checksum with bit rotation — tests instcombine on bitwise ops */
 static unsigned int xor_rotate_checksum(const unsigned char *data, int len) {
     unsigned int hash = 0x12345678u;
     int i;
     for (i = 0; i < len; i++) {
         hash ^= (unsigned int)data[i];
-        /* Rotate left by 5 */
         hash = (hash << 5) | (hash >> 27);
-        hash += data[i] * 0x01000193u;  /* FNV-like multiply */
+        hash += data[i] * 0x01000193u;
     }
     return hash;
 }
 
-/* Popcount-style reduction — bitwise heavy */
 static unsigned int popcount_sum(const unsigned char *data, int len) {
     unsigned int total = 0;
     int i;
     for (i = 0; i < len; i++) {
         unsigned int v = data[i];
-        /* Brian Kernighan's popcount */
         while (v) {
             v &= v - 1;
             total++;
@@ -72,13 +66,11 @@ static unsigned int popcount_sum(const unsigned char *data, int len) {
     return total;
 }
 
-/* Byte-level bit reversal + accumulate */
 static unsigned int bit_reverse_accum(const unsigned char *data, int len) {
     unsigned int accum = 0;
     int i;
     for (i = 0; i < len; i++) {
         unsigned int b = data[i];
-        /* Reverse bits of byte */
         b = ((b & 0xF0) >> 4) | ((b & 0x0F) << 4);
         b = ((b & 0xCC) >> 2) | ((b & 0x33) << 2);
         b = ((b & 0xAA) >> 1) | ((b & 0x55) << 1);
@@ -88,6 +80,63 @@ static unsigned int bit_reverse_accum(const unsigned char *data, int len) {
     return accum;
 }
 
+/* --- Variant 1: Adler-32 checksum --- */
+
+static unsigned int adler32_checksum(const unsigned char *data, int len) {
+    unsigned int a = 1, b = 0;
+    int i;
+    int block;
+    for (i = 0; i < len; ) {
+        block = len - i;
+        if (block > 5552) block = 5552;
+        int end = i + block;
+        for (; i < end; i++) {
+            a += data[i];
+            b += a;
+        }
+        a %= 65521u;
+        b %= 65521u;
+    }
+    return (b << 16) | a;
+}
+
+/* --- Variant 2: Fletcher-16 checksum --- */
+
+static unsigned int fletcher16_checksum(const unsigned char *data, int len) {
+    unsigned int sum1 = 0xff, sum2 = 0xff;
+    int i;
+    while (len) {
+        int tlen = len > 20 ? 20 : len;
+        len -= tlen;
+        for (i = 0; i < tlen; i++) {
+            sum1 += *data++;
+            sum2 += sum1;
+        }
+        sum1 = (sum1 & 0xff) + (sum1 >> 8);
+        sum2 = (sum2 & 0xff) + (sum2 >> 8);
+    }
+    sum1 = (sum1 & 0xff) + (sum1 >> 8);
+    sum2 = (sum2 & 0xff) + (sum2 >> 8);
+    return (sum2 << 8) | sum1;
+}
+
+/* --- Variant 3: CRC-32C (Castagnoli) bitwise --- */
+
+static unsigned int crc32c_bitwise(const unsigned char *data, int len) {
+    unsigned int crc = 0xFFFFFFFFu;
+    int i, j;
+    for (i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (j = 0; j < 8; j++) {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0x82F63B78u;
+            else
+                crc = crc >> 1;
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
 static unsigned int workload(const unsigned char *data, int len) {
     unsigned int result = 0;
     result ^= crc32_table_driven(data, len);
@@ -95,6 +144,9 @@ static unsigned int workload(const unsigned char *data, int len) {
     result ^= xor_rotate_checksum(data, len);
     result ^= popcount_sum(data, len);
     result ^= bit_reverse_accum(data, len);
+    result ^= adler32_checksum(data, len);
+    result ^= fletcher16_checksum(data, len);
+    result ^= crc32c_bitwise(data, len);
     return result;
 }
 

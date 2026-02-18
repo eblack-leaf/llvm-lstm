@@ -1164,15 +1164,31 @@ impl EdaAnalyzer {
             }
         }
 
-        // Ordering significance
-        let significant_orders = ordering.iter().filter(|o| o.delta_pct.abs() > 50.0).count();
-        r.push_str(&format!(
-            "\n  Pass ordering significance:\n    {}/{} pairs show >50% difference based on ordering.\n",
-            significant_orders,
-            ordering.len()
-        ));
-        r.push_str("    This strongly supports using a sequential model (LSTM) over\n");
-        r.push_str("    a set-based approach for pass selection.\n");
+        // Ordering significance — use multiple thresholds for a nuanced picture
+        let total_pairs = ordering.len();
+        let sig_50 = ordering.iter().filter(|o| o.delta_pct.abs() > 50.0).count();
+        let sig_20 = ordering.iter().filter(|o| o.delta_pct.abs() > 20.0).count();
+        let sig_10 = ordering.iter().filter(|o| o.delta_pct.abs() > 10.0).count();
+        let sig_5 = ordering.iter().filter(|o| o.delta_pct.abs() > 5.0).count();
+        let max_delta = ordering.iter().map(|o| o.delta_pct.abs()).fold(0.0f64, f64::max);
+
+        r.push_str("\n  Pass ordering significance:\n");
+        r.push_str(&format!("    {}/{} pairs show >50% delta\n", sig_50, total_pairs));
+        r.push_str(&format!("    {}/{} pairs show >20% delta\n", sig_20, total_pairs));
+        r.push_str(&format!("    {}/{} pairs show >10% delta\n", sig_10, total_pairs));
+        r.push_str(&format!("    {}/{} pairs show >5% delta\n", sig_5, total_pairs));
+        r.push_str(&format!("    Max ordering delta: {:.1}%\n", max_delta));
+
+        if sig_20 > total_pairs / 4 {
+            r.push_str("    --> Strong ordering effects. A sequential model (LSTM) should\n");
+            r.push_str("        capture meaningful ordering dependencies.\n");
+        } else if sig_5 > total_pairs / 4 {
+            r.push_str("    --> Moderate ordering effects. A sequential model may help,\n");
+            r.push_str("        but ordering signal is weaker than pass selection itself.\n");
+        } else {
+            r.push_str("    --> Weak ordering effects in aggregate. Per-function analysis\n");
+            r.push_str("        may reveal ordering matters for specific benchmarks.\n");
+        };
 
         // Functions that beat O3
         let beats_o3: Vec<&FunctionStats> = stats
@@ -1200,6 +1216,30 @@ impl EdaAnalyzer {
         } else {
             r.push_str("\n  No random sequences beat -O3 in this dataset.\n");
             r.push_str("  (Try collecting more sequences to find better combinations.)\n");
+        }
+
+        // Unreachable benchmarks — functions where our pass menu can't help
+        let unreachable: Vec<&FunctionStats> = stats
+            .iter()
+            .filter(|s| {
+                s.baseline_o0_ns
+                    .is_some_and(|o0| s.min_ns > o0 * 0.95)
+            })
+            .collect();
+        if !unreachable.is_empty() {
+            r.push_str("\n  WARNING — Unreachable benchmarks (best sequence >= 95% of O0):\n");
+            r.push_str("  These functions get negligible benefit from our pass menu.\n");
+            r.push_str("  Consider removing them or expanding the pass menu.\n");
+            for s in &unreachable {
+                let o0 = s.baseline_o0_ns.unwrap();
+                let o3 = s.baseline_o3_ns.unwrap_or(o0);
+                let best_ratio = s.min_ns / o0;
+                let o3_ratio = o3 / o0;
+                r.push_str(&format!(
+                    "    - {:<25} best/O0={:.3}  O3/O0={:.3}  (O3 achieves {:.1}x but we can't)\n",
+                    s.function, best_ratio, o3_ratio, o0 / o3,
+                ));
+            }
         }
 
         // Reward scaling recommendation
