@@ -19,12 +19,13 @@ pub enum Pass {
     Adce,
     EarlyCse,
     Tailcallelim,
-    // New passes
     Sccp,
     Bdce,
     Memcpyopt,
     LoopDeletion,
     Argpromotion,
+    GlobalOpt,
+    IndVars,
     Stop,
 }
 
@@ -51,6 +52,8 @@ impl Pass {
             Pass::Memcpyopt => "memcpyopt",
             Pass::LoopDeletion => "loop-deletion",
             Pass::Argpromotion => "argpromotion",
+            Pass::GlobalOpt => "globalopt",
+            Pass::IndVars   => "indvars",
             Pass::Stop => "stop",
         }
     }
@@ -64,53 +67,71 @@ impl Pass {
     /// - When cgscc passes are present, function passes need `function(...)` wrapping
     /// - Other function passes go directly
     pub fn to_opt_pipeline(passes: &[Pass]) -> String {
-        let transforms: Vec<&Pass> = passes
-            .iter()
-            .filter(|p| **p != Pass::Stop)
-            .collect();
-
+        let transforms: Vec<&Pass> = passes.iter().filter(|p| **p != Pass::Stop).collect();
         if transforms.is_empty() {
             return String::new();
         }
 
+        // Classify passes by their required pass manager level
+        let is_module = |p: &Pass| matches!(p, Pass::GlobalOpt);
         let is_cgscc = |p: &Pass| matches!(p, Pass::Inline | Pass::Argpromotion);
-        let has_cgscc = transforms.iter().any(|p| is_cgscc(p));
+        let is_loop  = |p: &Pass| matches!(p, Pass::LoopRotate | Pass::LoopDeletion | Pass::IndVars | Pass::Licm);
 
-        // Collect cgscc passes in order
+        // Collect passes for each level, preserving order
+        let module_passes: Vec<String> = transforms
+            .iter()
+            .filter(|p| is_module(p))
+            .map(|p| p.opt_name().to_string())
+            .collect();
+
         let cgscc_passes: Vec<String> = transforms
             .iter()
             .filter(|p| is_cgscc(p))
             .map(|p| p.opt_name().to_string())
             .collect();
 
-        // Build function-level pass list
-        let func_passes: Vec<String> = transforms
+        // For function‑level passes (everything else except loop passes that will be nested)
+        let function_passes: Vec<String> = transforms
             .iter()
-            .filter(|p| !is_cgscc(p))
+            .filter(|p| !is_module(p) && !is_cgscc(p))
             .map(|p| {
-                match **p {
-                    Pass::Licm => "loop-mssa(licm)".to_string(),
-                    Pass::LoopRotate => "loop(loop-rotate)".to_string(),
-                    Pass::LoopDeletion => "loop(loop-deletion)".to_string(),
-                    Pass::Instcombine => "instcombine<no-verify-fixpoint>".to_string(),
-                    _ => p.opt_name().to_string(),
+                if is_loop(p) {
+                    // Wrap loop passes appropriately
+                    match **p {
+                        Pass::Licm => "loop-mssa(licm)".to_string(),
+                        Pass::LoopRotate => "loop(loop-rotate)".to_string(),
+                        Pass::LoopDeletion => "loop(loop-deletion)".to_string(),
+                        Pass::IndVars => "loop(indvars)".to_string(),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    // Ordinary function passes
+                    if **p == Pass::Instcombine {
+                        "instcombine<no-verify-fixpoint>".to_string()
+                    } else {
+                        p.opt_name().to_string()
+                    }
                 }
             })
             .collect();
 
-        let mut pipeline_parts: Vec<String> = Vec::new();
+        let mut pipeline_parts = Vec::new();
 
-        if has_cgscc {
+        if !module_passes.is_empty() {
+            pipeline_parts.push(format!("module({})", module_passes.join(",")));
+        }
+
+        if !cgscc_passes.is_empty() {
             pipeline_parts.push(format!("cgscc({})", cgscc_passes.join(",")));
         }
 
-        if !func_passes.is_empty() {
-            if has_cgscc {
-                // When cgscc passes are present, function passes need explicit wrapping
-                pipeline_parts.push(format!("function({})", func_passes.join(",")));
+        if !function_passes.is_empty() {
+            if !cgscc_passes.is_empty() || !module_passes.is_empty() {
+                // If we have module or CGSCC passes, function passes need explicit wrapping
+                pipeline_parts.push(format!("function({})", function_passes.join(",")));
             } else {
-                // No cgscc passes, function passes can go at top level
-                pipeline_parts.push(func_passes.join(","));
+                // No higher‑level passes: function passes can be top‑level
+                pipeline_parts.push(function_passes.join(","));
             }
         }
 
@@ -139,7 +160,9 @@ impl Pass {
             17 => Pass::Memcpyopt,
             18 => Pass::LoopDeletion,
             19 => Pass::Argpromotion,
-            20 => Pass::Stop,
+            20 => Pass::GlobalOpt,
+            21 => Pass::IndVars,
+            22 => Pass::Stop,
             _ => panic!("Invalid pass index: {i}"),
         }
     }
@@ -166,12 +189,14 @@ impl Pass {
             Pass::Memcpyopt => 17,
             Pass::LoopDeletion => 18,
             Pass::Argpromotion => 19,
-            Pass::Stop => 20,
+            Pass::GlobalOpt => 20,
+            Pass::IndVars   => 21,
+            Pass::Stop => 22,
         }
     }
 
     pub fn count() -> usize {
-        21
+        23
     }
 
     pub fn all_transforms() -> &'static [Pass] {
@@ -196,6 +221,8 @@ impl Pass {
             Pass::Memcpyopt,
             Pass::LoopDeletion,
             Pass::Argpromotion,
+            Pass::GlobalOpt,
+            Pass::IndVars,
         ]
     }
 }
@@ -267,5 +294,30 @@ mod tests {
         for i in 0..Pass::count() {
             assert_eq!(Pass::from_index(i).to_index(), i);
         }
+    }
+    #[test]
+    fn test_pipeline_with_globalopt() {
+        let passes = vec![Pass::GlobalOpt, Pass::Instcombine];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        // module passes appear first
+        assert_eq!(pipeline, "module(globalopt),instcombine<no-verify-fixpoint>");
+    }
+
+    #[test]
+    fn test_pipeline_with_indvars() {
+        let passes = vec![Pass::IndVars, Pass::Instcombine];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        // indvars is a loop pass → wrapped inside function(...)
+        assert_eq!(pipeline, "loop(indvars),instcombine<no-verify-fixpoint>");
+    }
+
+    #[test]
+    fn test_pipeline_mixed_levels() {
+        let passes = vec![Pass::GlobalOpt, Pass::Inline, Pass::IndVars, Pass::Instcombine];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(
+            pipeline,
+            "module(globalopt),cgscc(inline),function(loop(indvars),instcombine<no-verify-fixpoint>)"
+        );
     }
 }
