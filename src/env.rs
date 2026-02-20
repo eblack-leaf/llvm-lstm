@@ -30,7 +30,7 @@ impl Default for EnvConfig {
         Self {
             functions_dir: PathBuf::from("benchmarks"),
             work_dir: PathBuf::from("/tmp/llvm-lstm-env"),
-            max_seq_length: 15,
+            max_seq_length: 20,
             reward_mode: RewardMode::Sparse,
             benchmark_runs: 3,
         }

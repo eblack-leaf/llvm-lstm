@@ -26,6 +26,16 @@ pub enum Pass {
     Argpromotion,
     GlobalOpt,
     IndVars,
+    LoopVectorize,
+    SlpVectorizer,
+    LoadStoreVectorizer,
+    CorrelatedPropagation,
+    AggressiveInstcombine,
+    ConstraintElimination,
+    VectorCombine,
+    Float2int,
+    LoopIdiom,
+    SimpleLoopUnswitch,
     Stop,
 }
 
@@ -54,6 +64,16 @@ impl Pass {
             Pass::Argpromotion => "argpromotion",
             Pass::GlobalOpt => "globalopt",
             Pass::IndVars   => "indvars",
+            Pass::LoopVectorize => "loop-vectorize",
+            Pass::SlpVectorizer => "slp-vectorizer",
+            Pass::LoadStoreVectorizer => "load-store-vectorizer",
+            Pass::CorrelatedPropagation => "correlated-propagation",
+            Pass::AggressiveInstcombine => "aggressive-instcombine",
+            Pass::ConstraintElimination => "constraint-elimination",
+            Pass::VectorCombine => "vector-combine",
+            Pass::Float2int => "float2int",
+            Pass::LoopIdiom => "loop-idiom",
+            Pass::SimpleLoopUnswitch => "simple-loop-unswitch",
             Pass::Stop => "stop",
         }
     }
@@ -75,7 +95,7 @@ impl Pass {
         // Classify passes by their required pass manager level
         let is_module = |p: &Pass| matches!(p, Pass::GlobalOpt);
         let is_cgscc = |p: &Pass| matches!(p, Pass::Inline | Pass::Argpromotion);
-        let is_loop  = |p: &Pass| matches!(p, Pass::LoopRotate | Pass::LoopDeletion | Pass::IndVars | Pass::Licm);
+        let is_loop  = |p: &Pass| matches!(p, Pass::LoopRotate | Pass::LoopDeletion | Pass::IndVars | Pass::Licm | Pass::LoopIdiom | Pass::SimpleLoopUnswitch);
 
         // Collect passes for each level, preserving order
         let module_passes: Vec<String> = transforms
@@ -102,6 +122,8 @@ impl Pass {
                         Pass::LoopRotate => "loop(loop-rotate)".to_string(),
                         Pass::LoopDeletion => "loop(loop-deletion)".to_string(),
                         Pass::IndVars => "loop(indvars)".to_string(),
+                        Pass::LoopIdiom => "loop(loop-idiom)".to_string(),
+                        Pass::SimpleLoopUnswitch => "loop(simple-loop-unswitch)".to_string(),
                         _ => unreachable!(),
                     }
                 } else {
@@ -162,7 +184,17 @@ impl Pass {
             19 => Pass::Argpromotion,
             20 => Pass::GlobalOpt,
             21 => Pass::IndVars,
-            22 => Pass::Stop,
+            22 => Pass::LoopVectorize,
+            23 => Pass::SlpVectorizer,
+            24 => Pass::LoadStoreVectorizer,
+            25 => Pass::CorrelatedPropagation,
+            26 => Pass::AggressiveInstcombine,
+            27 => Pass::ConstraintElimination,
+            28 => Pass::VectorCombine,
+            29 => Pass::Float2int,
+            30 => Pass::LoopIdiom,
+            31 => Pass::SimpleLoopUnswitch,
+            32 => Pass::Stop,
             _ => panic!("Invalid pass index: {i}"),
         }
     }
@@ -191,12 +223,22 @@ impl Pass {
             Pass::Argpromotion => 19,
             Pass::GlobalOpt => 20,
             Pass::IndVars   => 21,
-            Pass::Stop => 22,
+            Pass::LoopVectorize => 22,
+            Pass::SlpVectorizer => 23,
+            Pass::LoadStoreVectorizer => 24,
+            Pass::CorrelatedPropagation => 25,
+            Pass::AggressiveInstcombine => 26,
+            Pass::ConstraintElimination => 27,
+            Pass::VectorCombine => 28,
+            Pass::Float2int => 29,
+            Pass::LoopIdiom => 30,
+            Pass::SimpleLoopUnswitch => 31,
+            Pass::Stop => 32,
         }
     }
 
     pub fn count() -> usize {
-        23
+        33
     }
 
     pub fn all_transforms() -> &'static [Pass] {
@@ -223,6 +265,16 @@ impl Pass {
             Pass::Argpromotion,
             Pass::GlobalOpt,
             Pass::IndVars,
+            Pass::LoopVectorize,
+            Pass::SlpVectorizer,
+            Pass::LoadStoreVectorizer,
+            Pass::CorrelatedPropagation,
+            Pass::AggressiveInstcombine,
+            Pass::ConstraintElimination,
+            Pass::VectorCombine,
+            Pass::Float2int,
+            Pass::LoopIdiom,
+            Pass::SimpleLoopUnswitch,
         ]
     }
 }
@@ -300,7 +352,7 @@ mod tests {
         let passes = vec![Pass::GlobalOpt, Pass::Instcombine];
         let pipeline = Pass::to_opt_pipeline(&passes);
         // module passes appear first
-        assert_eq!(pipeline, "module(globalopt),instcombine<no-verify-fixpoint>");
+        assert_eq!(pipeline, "module(globalopt),function(instcombine<no-verify-fixpoint>)");
     }
 
     #[test]
@@ -318,6 +370,23 @@ mod tests {
         assert_eq!(
             pipeline,
             "module(globalopt),cgscc(inline),function(loop(indvars),instcombine<no-verify-fixpoint>)"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_with_vectorize() {
+        let passes = vec![Pass::LoopVectorize, Pass::SlpVectorizer, Pass::Sroa];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(pipeline, "loop-vectorize,slp-vectorizer,sroa");
+    }
+
+    #[test]
+    fn test_pipeline_vectorize_with_inline() {
+        let passes = vec![Pass::Inline, Pass::LoopVectorize, Pass::LoadStoreVectorizer];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(
+            pipeline,
+            "cgscc(inline),function(loop-vectorize,load-store-vectorizer)"
         );
     }
 }

@@ -102,7 +102,7 @@ impl Evaluator {
             let mut best_size = 0u64;
 
             for _ in 0..num_trials {
-                let seq_len = rng.gen_range(1..=15);
+                let seq_len = rng.gen_range(1..=20);
                 let passes: Vec<Pass> = (0..seq_len)
                     .map(|_| transforms[rng.gen_range(0..transforms.len())])
                     .collect();

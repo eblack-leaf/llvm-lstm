@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use rand::Rng;
 use serde::Serialize;
 use statrs::statistics::Statistics;
 
@@ -79,10 +80,13 @@ pub struct NormalizedPassImpact {
     pub count_without: usize,
     /// (without - with) / with * 100 — positive means pass helps
     pub relative_improvement: f64,
+    /// 95% bootstrap CI on relative_improvement
+    pub ci_lower: f64,
+    pub ci_upper: f64,
     pub per_function: Vec<FunctionPassBreakdown>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FunctionPassBreakdown {
     pub function: String,
     pub median_speedup_with: f64,
@@ -115,10 +119,13 @@ pub struct ControlledOrderResult {
     pub median_speedup_ab: f64,
     pub median_speedup_ba: f64,
     pub delta_pct: f64,
+    /// 95% bootstrap CI on delta_pct
+    pub ci_lower: f64,
+    pub ci_upper: f64,
     pub per_function: Vec<ControlledFunctionResult>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ControlledFunctionResult {
     pub function: String,
     pub matched_pairs: usize,
@@ -164,6 +171,83 @@ fn percentile_f64(sorted: &[f64], p: f64) -> f64 {
     }
     let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
+}
+
+/// Bootstrap 95% CI for a statistic computed from paired (with, without) medians.
+/// Returns (ci_lower, ci_upper) of the improvement% statistic.
+fn bootstrap_improvement_ci(
+    with_medians: &[f64],
+    without_medians: &[f64],
+    n_boot: usize,
+) -> (f64, f64) {
+    assert_eq!(with_medians.len(), without_medians.len());
+    let n = with_medians.len();
+    if n < 3 {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let mut rng = rand::thread_rng();
+    let mut boot_stats: Vec<f64> = Vec::with_capacity(n_boot);
+
+    for _ in 0..n_boot {
+        let mut sampled_w: Vec<f64> = Vec::with_capacity(n);
+        let mut sampled_wo: Vec<f64> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let idx = rng.gen_range(0..n);
+            sampled_w.push(with_medians[idx]);
+            sampled_wo.push(without_medians[idx]);
+        }
+        let med_w = median_f64(&mut sampled_w);
+        let med_wo = median_f64(&mut sampled_wo);
+        let improvement = if med_w > 0.0 {
+            (med_wo - med_w) / med_w * 100.0
+        } else {
+            0.0
+        };
+        boot_stats.push(improvement);
+    }
+
+    boot_stats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lo = percentile_f64(&boot_stats, 2.5);
+    let hi = percentile_f64(&boot_stats, 97.5);
+    (lo, hi)
+}
+
+/// Bootstrap 95% CI for ordering delta% from paired (ab, ba) medians per function.
+fn bootstrap_delta_ci(
+    ab_medians: &[f64],
+    ba_medians: &[f64],
+    n_boot: usize,
+) -> (f64, f64) {
+    assert_eq!(ab_medians.len(), ba_medians.len());
+    let n = ab_medians.len();
+    if n < 3 {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let mut rng = rand::thread_rng();
+    let mut boot_stats: Vec<f64> = Vec::with_capacity(n_boot);
+
+    for _ in 0..n_boot {
+        let mut sampled_ab: Vec<f64> = Vec::with_capacity(n);
+        let mut sampled_ba: Vec<f64> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let idx = rng.gen_range(0..n);
+            sampled_ab.push(ab_medians[idx]);
+            sampled_ba.push(ba_medians[idx]);
+        }
+        let med_ab = median_f64(&mut sampled_ab);
+        let med_ba = median_f64(&mut sampled_ba);
+        let delta = if med_ba > 0.0 {
+            (med_ab - med_ba) / med_ba * 100.0
+        } else {
+            0.0
+        };
+        boot_stats.push(delta);
+    }
+
+    boot_stats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lo = percentile_f64(&boot_stats, 2.5);
+    let hi = percentile_f64(&boot_stats, 97.5);
+    (lo, hi)
 }
 
 pub struct EdaAnalyzer {
@@ -530,13 +614,19 @@ impl EdaAnalyzer {
             }
 
             if !per_func_with_medians.is_empty() {
-                let overall_with = median_f64(&mut per_func_with_medians);
-                let overall_without = median_f64(&mut per_func_without_medians);
+                let overall_with = median_f64(&mut per_func_with_medians.clone());
+                let overall_without = median_f64(&mut per_func_without_medians.clone());
                 let improvement = if overall_with > 0.0 {
                     (overall_without - overall_with) / overall_with * 100.0
                 } else {
                     0.0
                 };
+
+                let (ci_lower, ci_upper) = bootstrap_improvement_ci(
+                    &per_func_with_medians,
+                    &per_func_without_medians,
+                    1000,
+                );
 
                 results.push(NormalizedPassImpact {
                     pass_name: pass_name.to_string(),
@@ -545,6 +635,8 @@ impl EdaAnalyzer {
                     count_with: total_with,
                     count_without: total_without,
                     relative_improvement: improvement,
+                    ci_lower,
+                    ci_upper,
                     per_function,
                 });
             }
@@ -565,7 +657,7 @@ impl EdaAnalyzer {
             .map(|p| p.opt_name())
             .collect();
 
-        let buckets: &[(usize, usize, &str)] = &[(1, 5, "1-5"), (6, 10, "6-10"), (11, 15, "11-15")];
+        let buckets: &[(usize, usize, &str)] = &[(1, 5, "1-5"), (6, 10, "6-10"), (11, 15, "11-15"), (16, 20, "16-20")];
 
         let mut results = Vec::new();
 
@@ -646,7 +738,7 @@ impl EdaAnalyzer {
             .map(|p| p.opt_name())
             .collect();
 
-        let buckets: &[(usize, usize)] = &[(1, 5), (6, 10), (11, 15)];
+        let buckets: &[(usize, usize)] = &[(1, 5), (6, 10), (11, 15), (16, 20)];
 
         // Group records by function
         let mut by_func: HashMap<&str, Vec<&DataRecord>> = HashMap::new();
@@ -719,13 +811,19 @@ impl EdaAnalyzer {
                 }
 
                 if all_ab_medians.len() >= 3 {
-                    let overall_ab = median_f64(&mut all_ab_medians);
-                    let overall_ba = median_f64(&mut all_ba_medians);
+                    let overall_ab = median_f64(&mut all_ab_medians.clone());
+                    let overall_ba = median_f64(&mut all_ba_medians.clone());
                     let delta = if overall_ba > 0.0 {
                         (overall_ab - overall_ba) / overall_ba * 100.0
                     } else {
                         0.0
                     };
+
+                    let (ci_lower, ci_upper) = bootstrap_delta_ci(
+                        &all_ab_medians,
+                        &all_ba_medians,
+                        1000,
+                    );
 
                     per_function.sort_by(|a, b| {
                         a.function.cmp(&b.function)
@@ -738,6 +836,8 @@ impl EdaAnalyzer {
                         median_speedup_ab: overall_ab,
                         median_speedup_ba: overall_ba,
                         delta_pct: delta,
+                        ci_lower,
+                        ci_upper,
                         per_function,
                     });
                 }
@@ -874,7 +974,15 @@ impl EdaAnalyzer {
         eprintln!("Wrote ir_features_summary.json");
 
         // Human-readable report
-        let report = self.generate_report(&stats, &impact, &ordering, &triples);
+        let report = self.generate_report(
+            &stats,
+            &impact,
+            &norm_impact,
+            &ctrl_ordering,
+            &speedup_dist,
+            &ordering,
+            &triples,
+        );
         let mut file = File::create(output_dir.join("report.txt"))?;
         use std::io::Write;
         file.write_all(report.as_bytes())?;
@@ -887,6 +995,9 @@ impl EdaAnalyzer {
         &self,
         stats: &[FunctionStats],
         impact: &[PassImpact],
+        norm_impact: &[NormalizedPassImpact],
+        ctrl_ordering: &[ControlledOrderResult],
+        speedup_dist: &[SpeedupDistribution],
         ordering: &[PassOrderResult],
         triples: &[TripleOrderResult],
     ) -> String {
@@ -944,278 +1055,300 @@ impl EdaAnalyzer {
             r.push_str(&format!("    {:<25} CV={:>5.1}%{}\n", func, cv, flag));
         }
 
-        // --- Pass impact ---
-        r.push_str("\n\n2. PASS IMPACT ANALYSIS\n");
-        r.push_str("----------------------\n");
-        r.push_str("  Avg execution time when pass is present vs absent.\n");
-        r.push_str("  Negative delta = pass helps, positive = pass hurts (on average).\n\n");
+        // --- Pass impact (normalized) ---
+        r.push_str("\n\n2. PASS IMPACT ANALYSIS (Normalized)\n");
+        r.push_str("------------------------------------\n");
+        r.push_str("  Per-function speedup ratio (time/O0) with vs without each pass.\n");
+        r.push_str("  Computed per-function then aggregated via median-of-medians.\n");
+        r.push_str("  Lower ratio = better optimized. Positive improvement% = pass helps.\n\n");
         r.push_str(&format!(
-            "  {:<20} {:>10} {:>10} {:>9} {:>8}\n",
-            "Pass", "With(ms)", "W/o(ms)", "Delta%", "Effect"
+            "  {:<20} {:>10} {:>10} {:>10} {:>18} {:>8}\n",
+            "Pass", "With", "Without", "Improv%", "95% CI", "Signif?"
         ));
-        r.push_str(&format!("  {}\n", "-".repeat(62)));
+        r.push_str(&format!("  {}\n", "-".repeat(82)));
 
-        for p in impact {
-            let effect = if p.delta_pct < -15.0 {
+        for p in norm_impact {
+            let ci_spans_zero = p.ci_lower <= 0.0 && p.ci_upper >= 0.0;
+            let effect = if ci_spans_zero {
+                "no"
+            } else if p.relative_improvement > 5.0 {
                 "HELPS"
-            } else if p.delta_pct < -5.0 {
-                "helps"
-            } else if p.delta_pct > 15.0 {
+            } else if p.relative_improvement < -5.0 {
                 "HURTS"
-            } else if p.delta_pct > 5.0 {
-                "hurts"
             } else {
-                "~neutral"
+                "weak"
             };
 
             r.push_str(&format!(
-                "  {:<20} {:>10.2} {:>10.2} {:>+8.1}% {:>8}\n",
+                "  {:<20} {:>10.4} {:>10.4} {:>+9.1}% [{:>+6.1}, {:>+6.1}] {:>8}\n",
                 p.pass_name,
-                p.avg_time_with / 1_000_000.0,
-                p.avg_time_without / 1_000_000.0,
-                p.delta_pct,
+                p.median_speedup_with,
+                p.median_speedup_without,
+                p.relative_improvement,
+                p.ci_lower,
+                p.ci_upper,
                 effect,
             ));
         }
 
-        r.push_str("\n  NOTE: Impact measured in isolation. A pass that 'hurts' alone may\n");
-        r.push_str("  help in combination (e.g., gvn after mem2reg+sroa). This is why\n");
-        r.push_str("  ordering matters and why we need a sequential model.\n");
-
-        // --- Group records by function for per-benchmark breakdowns ---
-        let mut records_by_func: HashMap<&str, Vec<&DataRecord>> = HashMap::new();
-        for rec in &self.records {
-            records_by_func.entry(&rec.function).or_default().push(rec);
+        // Per-function breakdown for top passes
+        r.push_str("\n  Per-function breakdown (top 5 passes):\n");
+        for p in norm_impact.iter().take(5) {
+            r.push_str(&format!("\n    {}  (overall {:>+.1}%):\n", p.pass_name, p.relative_improvement));
+            let mut sorted_funcs = p.per_function.clone();
+            sorted_funcs.sort_by(|a, b| {
+                let da = a.median_speedup_without - a.median_speedup_with;
+                let db = b.median_speedup_without - b.median_speedup_with;
+                db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for f in &sorted_funcs {
+                let delta = if f.median_speedup_with > 0.0 {
+                    (f.median_speedup_without - f.median_speedup_with) / f.median_speedup_with * 100.0
+                } else {
+                    0.0
+                };
+                let marker = if delta.abs() > 20.0 { " <<<" } else { "" };
+                r.push_str(&format!(
+                    "      {:<25} with={:.4}  w/o={:.4}  {:>+6.1}%{}\n",
+                    f.function, f.median_speedup_with, f.median_speedup_without, delta, marker,
+                ));
+            }
         }
-        let mut func_names: Vec<&str> = records_by_func.keys().copied().collect();
-        func_names.sort();
 
-        // --- Pass ordering ---
-        r.push_str("\n\n3. PASS ORDERING EFFECTS (Top 20)\n");
-        r.push_str("---------------------------------\n");
-        r.push_str("  Comparing A->B vs B->A ordering. Large delta = ordering matters.\n\n");
-
-        for (oi, o) in ordering.iter().take(20).enumerate() {
-            let (better_order, _) = if o.avg_time_ab < o.avg_time_ba {
-                ("A->B", "B->A")
+        r.push_str("\n  Comparison with naive (raw avg) analysis:\n");
+        r.push_str(&format!(
+            "    {:<20} {:>10} {:>10}\n",
+            "Pass", "Naive%", "Normalized%"
+        ));
+        r.push_str(&format!("    {}\n", "-".repeat(44)));
+        for np in norm_impact {
+            let naive_pct = impact.iter()
+                .find(|p| p.pass_name == np.pass_name)
+                .map(|p| p.delta_pct)
+                .unwrap_or(0.0);
+            let diverges = if (naive_pct.abs() - np.relative_improvement.abs()).abs() > 10.0 {
+                " <-- diverges"
             } else {
-                ("B->A", "A->B")
+                ""
+            };
+            // naive: negative = helps; normalized: positive = helps. Flip naive sign for comparison.
+            r.push_str(&format!(
+                "    {:<20} {:>+9.1}% {:>+9.1}%{}\n",
+                np.pass_name, naive_pct, np.relative_improvement, diverges,
+            ));
+        }
+
+        r.push_str("\n  NOTE: A pass that appears neutral or harmful alone may help in\n");
+        r.push_str("  combination (e.g., gvn after mem2reg+sroa). Ordering analysis below.\n");
+
+        // --- Controlled pass ordering ---
+        r.push_str("\n\n3. PASS ORDERING EFFECTS (Controlled, Top 20)\n");
+        r.push_str("----------------------------------------------\n");
+        r.push_str("  Comparing A->B vs B->A using normalized speedup ratios,\n");
+        r.push_str("  stratified by (function, sequence-length bucket).\n");
+        r.push_str("  Positive delta% = A->B is slower (B->A preferred).\n\n");
+
+        r.push_str(&format!(
+            "  {:<3} {:<16} {:<16} {:>8} {:>8} {:>9} {:>18} {:>8}\n",
+            "#", "Pass A", "Pass B", "A->B", "B->A", "Delta%", "95% CI", "Signif?"
+        ));
+        r.push_str(&format!("  {}\n", "-".repeat(96)));
+
+        for (oi, o) in ctrl_ordering.iter().take(20).enumerate() {
+            let ci_spans_zero = o.ci_lower <= 0.0 && o.ci_upper >= 0.0;
+            let signif = if ci_spans_zero {
+                "no"
+            } else if o.delta_pct < -1.0 {
+                "A->B"
+            } else if o.delta_pct > 1.0 {
+                "B->A"
+            } else {
+                "weak"
             };
 
             r.push_str(&format!(
-                "  #{:<2} {:<16} {:<16} A->B: {:.2}ms   B->A: {:.2}ms   Delta: {:>+.1}%  ({})\n",
+                "  {:<3} {:<16} {:<16} {:>8.4} {:>8.4} {:>+8.1}% [{:>+6.1}, {:>+6.1}] {:>8}\n",
                 oi + 1,
                 o.pass_a,
                 o.pass_b,
-                o.avg_time_ab / 1_000_000.0,
-                o.avg_time_ba / 1_000_000.0,
+                o.median_speedup_ab,
+                o.median_speedup_ba,
                 o.delta_pct,
-                better_order,
+                o.ci_lower,
+                o.ci_upper,
+                signif,
             ));
 
             // Per-function breakdown
-            let mut func_deltas: Vec<(&str, f64, f64, f64, usize, usize)> = Vec::new();
-            for &func in &func_names {
-                let func_records = &records_by_func[func];
-                let mut times_ab: Vec<f64> = Vec::new();
-                let mut times_ba: Vec<f64> = Vec::new();
-                for rec in func_records {
-                    let pos_a = rec.pass_sequence.iter().position(|p| p == &o.pass_a);
-                    let pos_b = rec.pass_sequence.iter().position(|p| p == &o.pass_b);
-                    if let (Some(ia), Some(ib)) = (pos_a, pos_b) {
-                        if ia < ib {
-                            times_ab.push(rec.execution_time_ns as f64);
-                        } else {
-                            times_ba.push(rec.execution_time_ns as f64);
-                        }
-                    }
-                }
-                if times_ab.len() >= 5 && times_ba.len() >= 5 {
-                    let avg_ab = (&times_ab).mean();
-                    let avg_ba = (&times_ba).mean();
-                    let delta = (avg_ab - avg_ba) / avg_ba * 100.0;
-                    func_deltas.push((func, avg_ab, avg_ba, delta, times_ab.len(), times_ba.len()));
-                }
-            }
-            func_deltas.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
-
-            r.push_str("      Per-function breakdown:\n");
-            for (func, avg_ab, avg_ba, delta, _nab, _nba) in &func_deltas {
-                let marker = if delta.abs() > 20.0 { " <<<" } else { "" };
+            r.push_str("      Per-function:\n");
+            let mut sorted_funcs = o.per_function.clone();
+            sorted_funcs.sort_by(|a, b| {
+                a.delta_pct.partial_cmp(&b.delta_pct).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for f in &sorted_funcs {
+                let marker = if f.delta_pct.abs() > 10.0 { " <<<" } else { "" };
                 r.push_str(&format!(
-                    "        {:<25} A->B: {:>8.2}ms  B->A: {:>8.2}ms  Delta: {:>+6.1}%{}\n",
-                    func,
-                    avg_ab / 1_000_000.0,
-                    avg_ba / 1_000_000.0,
-                    delta,
-                    marker,
+                    "        {:<25} A->B={:.4}  B->A={:.4}  {:>+6.1}%  (n={}){}\n",
+                    f.function, f.median_speedup_ab, f.median_speedup_ba,
+                    f.delta_pct, f.matched_pairs, marker,
                 ));
             }
             r.push_str("\n");
         }
 
-        // --- Triple ordering ---
-        r.push_str("\n\n4. TRIPLE ORDERING EFFECTS (Top 20)\n");
-        r.push_str("------------------------------------\n");
-        r.push_str("  Comparing all permutations of 3-pass combinations.\n");
-        r.push_str("  Spread = (worst - best) / best. Large spread = combined ordering matters.\n\n");
+        // --- Speedup distribution ---
+        r.push_str("\n\n4. SPEEDUP DISTRIBUTION PER FUNCTION\n");
+        r.push_str("-------------------------------------\n");
+        r.push_str("  Speedup ratio = time / O0_baseline (lower = better).\n");
+        r.push_str("  O3 ratio shown for reference. %<O3 = fraction of sequences beating O3.\n\n");
 
-        for (idx, t) in triples.iter().take(20).enumerate() {
+        r.push_str(&format!(
+            "  {:<25} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5}\n",
+            "Function", "p10", "p25", "Med", "p75", "p90", "O3", "Best", "%<O3"
+        ));
+        r.push_str(&format!("  {}\n", "-".repeat(85)));
+
+        for sd in speedup_dist {
             r.push_str(&format!(
-                "  #{:<2} {{{}, {}, {}}}  spread={:>+.1}%\n",
-                idx + 1,
-                t.passes[0],
-                t.passes[1],
-                t.passes[2],
-                t.spread_pct,
+                "  {:<25} {:>6.3} {:>6.3} {:>6.3} {:>6.3} {:>6.3} {:>6.3} {:>6.3} {:>4.0}%\n",
+                sd.function,
+                sd.p10_speedup,
+                sd.p25_speedup,
+                sd.median_speedup,
+                sd.p75_speedup,
+                sd.p90_speedup,
+                sd.speedup_o3,
+                sd.min_speedup,
+                sd.pct_beating_o3,
+            ));
+        }
+
+        // --- Naive ordering (reference) ---
+        r.push_str("\n\n5. NAIVE PASS ORDERING (Reference, Top 10)\n");
+        r.push_str("-------------------------------------------\n");
+        r.push_str("  Raw avg times pooled across all functions (NOT controlled for function).\n");
+        r.push_str("  Included for comparison — use section 3 for decisions.\n\n");
+
+        for (oi, o) in ordering.iter().take(10).enumerate() {
+            let prefer = if o.avg_time_ab < o.avg_time_ba { "A->B" } else { "B->A" };
+            r.push_str(&format!(
+                "  #{:<2} {:<16} {:<16} A->B: {:.2}ms  B->A: {:.2}ms  Delta: {:>+.1}%  ({})\n",
+                oi + 1, o.pass_a, o.pass_b,
+                o.avg_time_ab / 1_000_000.0, o.avg_time_ba / 1_000_000.0,
+                o.delta_pct, prefer,
+            ));
+        }
+
+        // --- Triple ordering (reference) ---
+        r.push_str("\n\n6. TRIPLE ORDERING (Reference, Top 10)\n");
+        r.push_str("---------------------------------------\n");
+        r.push_str("  Raw avg times pooled across all functions (NOT controlled).\n\n");
+
+        for (idx, t) in triples.iter().take(10).enumerate() {
+            r.push_str(&format!(
+                "  #{:<2} {{{}, {}, {}}}  spread={:.1}%\n",
+                idx + 1, t.passes[0], t.passes[1], t.passes[2], t.spread_pct,
             ));
             r.push_str(&format!(
-                "      best:  {:<45} worst: {}\n",
+                "      best: {}   worst: {}\n",
                 t.best_order, t.worst_order,
             ));
-            for p in &t.permutations {
-                r.push_str(&format!(
-                    "        {:<45} {:>10.2}ms  (n={})\n",
-                    p.order,
-                    p.avg_time / 1_000_000.0,
-                    p.count,
-                ));
-            }
-
-            // Per-function breakdown for this triple
-            let triple = [t.passes[0].as_str(), t.passes[1].as_str(), t.passes[2].as_str()];
-            let perms: [(usize, usize, usize); 6] = [
-                (0, 1, 2), (0, 2, 1), (1, 0, 2),
-                (1, 2, 0), (2, 0, 1), (2, 1, 0),
-            ];
-
-            r.push_str("      Per-function spread:\n");
-            let mut func_spreads: Vec<(&str, f64, String, String)> = Vec::new();
-            for &func in &func_names {
-                let func_records = &records_by_func[func];
-                let mut perm_times: Vec<(String, Vec<f64>)> = perms
-                    .iter()
-                    .map(|&(a, b, c)| {
-                        let label = format!("{}->{}->{}",
-                            triple[a], triple[b], triple[c]);
-                        (label, Vec::new())
-                    })
-                    .collect();
-
-                for rec in func_records {
-                    let positions: Vec<Option<usize>> = triple
-                        .iter()
-                        .map(|&p| rec.pass_sequence.iter().position(|s| s == p))
-                        .collect();
-                    if let [Some(pa), Some(pb), Some(pc)] = positions[..] {
-                        let order = {
-                            let mut indexed = [(pa, 0usize), (pb, 1), (pc, 2)];
-                            indexed.sort_by_key(|x| x.0);
-                            (indexed[0].1, indexed[1].1, indexed[2].1)
-                        };
-                        if let Some(pi) = perms.iter().position(|p| *p == order) {
-                            perm_times[pi].1.push(rec.execution_time_ns as f64);
-                        }
-                    }
-                }
-
-                let avgs: Vec<(String, f64)> = perm_times
-                    .into_iter()
-                    .filter(|(_, times)| times.len() >= 3)
-                    .map(|(order, times)| (order, (&times).mean()))
-                    .collect();
-
-                if avgs.len() >= 2 {
-                    let best = avgs.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-                    let worst = avgs.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
-                    let spread = (worst.1 - best.1) / best.1 * 100.0;
-                    func_spreads.push((func, spread, best.0.clone(), worst.0.clone()));
-                }
-            }
-            func_spreads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            for (func, spread, best, worst) in &func_spreads {
-                let marker = if *spread > 50.0 { " <<<" } else { "" };
-                r.push_str(&format!(
-                    "        {:<25} spread: {:>+6.1}%  best: {:<35} worst: {}{}\n",
-                    func, spread, best, worst, marker,
-                ));
-            }
-            r.push_str("\n");
         }
 
         // --- Key findings ---
-        r.push_str("\n\n5. KEY FINDINGS\n");
+        r.push_str("\n\n7. KEY FINDINGS\n");
         r.push_str("--------------\n");
 
-        // Best passes
-        let helpful: Vec<&PassImpact> = impact.iter().filter(|p| p.delta_pct < -5.0).collect();
-        if !helpful.is_empty() {
-            r.push_str("  Generally helpful passes (agent should favor these):\n");
-            for p in &helpful {
-                r.push_str(&format!("    - {:<20} {:>+.1}%\n", p.pass_name, p.delta_pct));
-            }
-        }
-
-        let harmful: Vec<&PassImpact> = impact.iter().filter(|p| p.delta_pct > 15.0).rev().collect();
-        if !harmful.is_empty() {
-            r.push_str("\n  Context-dependent passes (hurt in isolation, may help in combination):\n");
-            for p in &harmful {
-                r.push_str(&format!("    - {:<20} {:>+.1}%\n", p.pass_name, p.delta_pct));
-            }
-        }
-
-        // Ordering significance — use multiple thresholds for a nuanced picture
-        let total_pairs = ordering.len();
-        let sig_50 = ordering.iter().filter(|o| o.delta_pct.abs() > 50.0).count();
-        let sig_20 = ordering.iter().filter(|o| o.delta_pct.abs() > 20.0).count();
-        let sig_10 = ordering.iter().filter(|o| o.delta_pct.abs() > 10.0).count();
-        let sig_5 = ordering.iter().filter(|o| o.delta_pct.abs() > 5.0).count();
-        let max_delta = ordering.iter().map(|o| o.delta_pct.abs()).fold(0.0f64, f64::max);
-
-        r.push_str("\n  Pass ordering significance:\n");
-        r.push_str(&format!("    {}/{} pairs show >50% delta\n", sig_50, total_pairs));
-        r.push_str(&format!("    {}/{} pairs show >20% delta\n", sig_20, total_pairs));
-        r.push_str(&format!("    {}/{} pairs show >10% delta\n", sig_10, total_pairs));
-        r.push_str(&format!("    {}/{} pairs show >5% delta\n", sig_5, total_pairs));
-        r.push_str(&format!("    Max ordering delta: {:.1}%\n", max_delta));
-
-        if sig_20 > total_pairs / 4 {
-            r.push_str("    --> Strong ordering effects. A sequential model (LSTM) should\n");
-            r.push_str("        capture meaningful ordering dependencies.\n");
-        } else if sig_5 > total_pairs / 4 {
-            r.push_str("    --> Moderate ordering effects. A sequential model may help,\n");
-            r.push_str("        but ordering signal is weaker than pass selection itself.\n");
-        } else {
-            r.push_str("    --> Weak ordering effects in aggregate. Per-function analysis\n");
-            r.push_str("        may reveal ordering matters for specific benchmarks.\n");
-        };
-
-        // Functions that beat O3
-        let beats_o3: Vec<&FunctionStats> = stats
-            .iter()
-            .filter(|s| {
-                s.baseline_o3_ns
-                    .is_some_and(|o3| s.min_ns < o3)
-            })
+        // Best passes (from normalized analysis, CI excludes zero)
+        let helpful: Vec<&NormalizedPassImpact> = norm_impact.iter()
+            .filter(|p| p.relative_improvement > 5.0 && p.ci_lower > 0.0)
             .collect();
-        if !beats_o3.is_empty() {
-            r.push_str(&format!(
-                "\n  Functions where random search found sequences beating -O3:\n"
-            ));
-            for s in &beats_o3 {
-                let o3 = s.baseline_o3_ns.unwrap();
-                let speedup = o3 / s.min_ns;
+        if !helpful.is_empty() {
+            r.push_str("  Significantly helpful passes (CI excludes zero):\n");
+            for p in &helpful {
                 r.push_str(&format!(
-                    "    - {:<25} best={:.2}ms vs O3={:.2}ms ({:.2}x faster)\n",
-                    s.function,
-                    s.min_ns / 1_000_000.0,
-                    o3 / 1_000_000.0,
-                    speedup,
+                    "    - {:<20} {:>+.1}%  [{:>+.1}, {:>+.1}]\n",
+                    p.pass_name, p.relative_improvement, p.ci_lower, p.ci_upper,
                 ));
             }
+        }
+
+        let harmful: Vec<&NormalizedPassImpact> = norm_impact.iter()
+            .filter(|p| p.relative_improvement < -5.0 && p.ci_upper < 0.0)
+            .collect();
+        if !harmful.is_empty() {
+            r.push_str("\n  Significantly harmful passes (CI excludes zero):\n");
+            for p in &harmful {
+                r.push_str(&format!(
+                    "    - {:<20} {:>+.1}%  [{:>+.1}, {:>+.1}]\n",
+                    p.pass_name, p.relative_improvement, p.ci_lower, p.ci_upper,
+                ));
+            }
+        }
+
+        let inconclusive: Vec<&NormalizedPassImpact> = norm_impact.iter()
+            .filter(|p| p.ci_lower <= 0.0 && p.ci_upper >= 0.0)
+            .collect();
+        if !inconclusive.is_empty() {
+            r.push_str("\n  Inconclusive passes (CI spans zero — may help in combination):\n");
+            for p in &inconclusive {
+                r.push_str(&format!(
+                    "    - {:<20} {:>+.1}%  [{:>+.1}, {:>+.1}]\n",
+                    p.pass_name, p.relative_improvement, p.ci_lower, p.ci_upper,
+                ));
+            }
+        }
+
+        // Ordering significance — from controlled analysis with CIs
+        let ctrl_total = ctrl_ordering.len();
+        let ctrl_sig = ctrl_ordering.iter()
+            .filter(|o| !(o.ci_lower <= 0.0 && o.ci_upper >= 0.0))
+            .count();
+        let ctrl_max = ctrl_ordering.iter().map(|o| o.delta_pct.abs()).fold(0.0f64, f64::max);
+
+        r.push_str("\n  Pass ordering significance (controlled, bootstrap 95% CI):\n");
+        r.push_str(&format!("    {}/{} pairs have CIs excluding zero (significant)\n", ctrl_sig, ctrl_total));
+        r.push_str(&format!("    Max controlled ordering delta: {:.1}%\n", ctrl_max));
+
+        if ctrl_sig > ctrl_total / 4 {
+            r.push_str("    --> Many ordering effects survive bootstrap CI test.\n");
+            r.push_str("        LSTM should capture these.\n");
+        } else if ctrl_sig > ctrl_total / 10 {
+            r.push_str("    --> Some ordering effects are significant. LSTM may\n");
+            r.push_str("        capture some, but pass selection matters more.\n");
         } else {
-            r.push_str("\n  No random sequences beat -O3 in this dataset.\n");
-            r.push_str("  (Try collecting more sequences to find better combinations.)\n");
+            r.push_str("    --> Few ordering effects survive CI test. Pass selection\n");
+            r.push_str("        is the primary lever; ordering is secondary.\n");
+        }
+
+        // Speedup distribution summary
+        let total_funcs = speedup_dist.len();
+        let funcs_beating_o3: Vec<&SpeedupDistribution> = speedup_dist.iter()
+            .filter(|s| s.pct_beating_o3 > 0.0)
+            .collect();
+        r.push_str(&format!(
+            "\n  Speedup potential: {}/{} functions have sequences beating O3\n",
+            funcs_beating_o3.len(), total_funcs,
+        ));
+        for sd in &funcs_beating_o3 {
+            r.push_str(&format!(
+                "    - {:<25} {:.0}% of sequences beat O3  (best={:.3} vs O3={:.3})\n",
+                sd.function, sd.pct_beating_o3, sd.min_speedup, sd.speedup_o3,
+            ));
+        }
+
+        let never_beat: Vec<&SpeedupDistribution> = speedup_dist.iter()
+            .filter(|s| s.pct_beating_o3 == 0.0 && s.median_speedup > s.speedup_o3 * 2.0)
+            .collect();
+        if !never_beat.is_empty() {
+            r.push_str("\n  Hard-to-optimize functions (median > 2x worse than O3, never beat):\n");
+            for sd in &never_beat {
+                r.push_str(&format!(
+                    "    - {:<25} median={:.3}  O3={:.3}  ({:.1}x gap)\n",
+                    sd.function, sd.median_speedup, sd.speedup_o3,
+                    sd.median_speedup / sd.speedup_o3,
+                ));
+            }
         }
 
         // Unreachable benchmarks — functions where our pass menu can't help
@@ -1256,8 +1389,8 @@ impl EdaAnalyzer {
             range_ratio,
         ));
         if range_ratio > 100.0 {
-            r.push_str("  --> Large range. Consider log-transformed rewards to prevent\n");
-            r.push_str("      slow functions from dominating the gradient signal.\n");
+            r.push_str("  --> Large range. Use speedup ratios (time/O0) as rewards, not raw ns.\n");
+            r.push_str("      This is already what the normalized analysis uses.\n");
         } else if range_ratio > 20.0 {
             r.push_str("  --> Moderate range. Z-score normalization per function should suffice.\n");
         } else {

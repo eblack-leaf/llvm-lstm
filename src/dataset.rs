@@ -35,6 +35,7 @@ pub struct DataCollector {
     num_sequences: usize,
     benchmark_runs: usize,
     baseline_runs: usize,
+    bench_iters: usize,
 }
 
 impl DataCollector {
@@ -44,6 +45,7 @@ impl DataCollector {
         num_sequences: usize,
         benchmark_runs: usize,
         baseline_runs: usize,
+        bench_iters: usize,
     ) -> Result<Self> {
         let mut functions = Vec::new();
         for entry in fs::read_dir(functions_dir)? {
@@ -67,6 +69,7 @@ impl DataCollector {
             num_sequences,
             benchmark_runs,
             baseline_runs,
+            bench_iters,
         })
     }
 
@@ -101,7 +104,8 @@ impl DataCollector {
                 // Per-function work directory so files don't collide
                 let work_dir = self.output_dir.join("_work").join(&stem);
                 fs::create_dir_all(&work_dir)?;
-                let pipeline = CompilationPipeline::new(work_dir);
+                let pipeline = CompilationPipeline::new(work_dir)
+                    .with_bench_iters(self.bench_iters);
 
                 // Write to per-function temp file
                 let tmp_path = self.output_dir.join(format!("_tmp_{stem}.jsonl"));
@@ -114,7 +118,7 @@ impl DataCollector {
 
                 let mut func_count = 0usize;
                 for seq_idx in 0..self.num_sequences {
-                    let seq_len = rng.gen_range(1..=15);
+                    let seq_len = rng.gen_range(1..=20);
                     let passes: Vec<Pass> = (0..seq_len)
                         .map(|_| transforms[rng.gen_range(0..transforms.len())])
                         .collect();
@@ -185,9 +189,10 @@ impl DataCollector {
         // Baselines are quick — run sequentially to avoid timing interference
         let work_dir = self.output_dir.join("_work").join("_baselines");
         fs::create_dir_all(&work_dir)?;
-        let pipeline = CompilationPipeline::new(work_dir);
+        let pipeline = CompilationPipeline::new(work_dir)
+            .with_bench_iters(self.bench_iters);
 
-        eprintln!("Computing baselines ({} runs per binary)...", self.baseline_runs);
+        eprintln!("Computing baselines ({} runs per binary, {} iters each)...", self.baseline_runs, self.bench_iters);
 
         let file = File::create(&baseline_path)?;
         let mut writer = BufWriter::new(file);

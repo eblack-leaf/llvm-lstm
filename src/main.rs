@@ -44,9 +44,13 @@ enum Commands {
         #[arg(long, default_value = "3")]
         runs: usize,
 
-        /// Number of benchmark runs for baselines (each run internally does 201 trimmed-mean iterations)
+        /// Number of benchmark runs for baselines (each run internally does bench-iters trimmed-mean iterations)
         #[arg(long, default_value = "5")]
         baseline_runs: usize,
+
+        /// Number of internal timing iterations per benchmark run (passed as argv[1] to C binary)
+        #[arg(long, default_value = "201")]
+        bench_iters: usize,
 
         /// Number of parallel threads (0 = use all cores)
         #[arg(long, default_value = "0")]
@@ -74,9 +78,13 @@ enum Commands {
         #[arg(long, default_value = "data/baselines")]
         output: PathBuf,
 
-        /// Number of benchmark runs per baseline (each run internally does 201 trimmed-mean iterations)
+        /// Number of benchmark runs per baseline
         #[arg(long, default_value = "5")]
         baseline_runs: usize,
+
+        /// Number of internal timing iterations per benchmark run
+        #[arg(long, default_value = "201")]
+        bench_iters: usize,
     },
 
     /// Train the LSTM+PPO agent
@@ -138,6 +146,7 @@ fn main() -> Result<()> {
             output,
             runs,
             baseline_runs,
+            bench_iters,
             threads,
         } => {
             if threads > 0 {
@@ -150,7 +159,7 @@ fn main() -> Result<()> {
             let wall_start = std::time::Instant::now();
 
             let collector =
-                dataset::DataCollector::new(&functions, &output, num_sequences, runs, baseline_runs)?;
+                dataset::DataCollector::new(&functions, &output, num_sequences, runs, baseline_runs, bench_iters)?;
 
             let t0 = std::time::Instant::now();
             collector.collect_baselines()?;
@@ -173,9 +182,9 @@ fn main() -> Result<()> {
             analyzer.write_all(&output)?;
         }
 
-        Commands::Baseline { functions, output, baseline_runs } => {
+        Commands::Baseline { functions, output, baseline_runs, bench_iters } => {
             let collector =
-                dataset::DataCollector::new(&functions, &output, 0, 1, baseline_runs)?;
+                dataset::DataCollector::new(&functions, &output, 0, 1, baseline_runs, bench_iters)?;
             collector.collect_baselines()?;
         }
 
