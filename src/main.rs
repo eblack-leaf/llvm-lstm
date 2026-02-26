@@ -4,6 +4,7 @@ mod env;
 mod evaluation;
 mod ir_features;
 mod model;
+mod ordering_study;
 mod pass_menu;
 mod pipeline;
 mod ppo;
@@ -134,6 +135,29 @@ enum Commands {
         #[arg(long)]
         file: PathBuf,
     },
+
+    /// Run pass ordering study (3 targeted experiments)
+    OrderingStudy {
+        /// Directory containing benchmark .c files
+        #[arg(long, default_value = "benchmarks")]
+        functions: PathBuf,
+
+        /// Output directory for study results
+        #[arg(long, default_value = "eda_output/ordering")]
+        output: PathBuf,
+
+        /// Which experiments to run: all, 1, 2, or 3
+        #[arg(long, default_value = "all")]
+        experiments: String,
+
+        /// Number of benchmark runs per pipeline
+        #[arg(long, default_value = "3")]
+        runs: usize,
+
+        /// Number of parallel threads (0 = use all cores)
+        #[arg(long, default_value = "0")]
+        threads: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -257,6 +281,16 @@ fn main() -> Result<()> {
             eprintln!("  Median: {} ns", result.median_ns);
             eprintln!("  All times: {:?}", result.all_times_ns);
             eprintln!("  Binary size: {} bytes", result.binary_size_bytes);
+        }
+
+        Commands::OrderingStudy {
+            functions,
+            output,
+            experiments,
+            runs,
+            threads,
+        } => {
+            ordering_study::run(&functions, &output, &experiments, runs, threads)?;
         }
 
         Commands::Features { file } => {

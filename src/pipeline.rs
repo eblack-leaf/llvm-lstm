@@ -57,6 +57,10 @@ impl CompilationPipeline {
         self
     }
 
+    pub fn work_dir(&self) -> &Path {
+        &self.work_dir
+    }
+
     /// Emit unoptimized LLVM IR from C source.
     pub fn emit_ir(&self, c_source: &Path) -> Result<PathBuf> {
         let stem = c_source
@@ -94,6 +98,16 @@ impl CompilationPipeline {
         let pipeline = Pass::to_opt_pipeline(passes);
         if pipeline.is_empty() {
             // No passes to apply; just copy
+            std::fs::copy(ir, out).context("failed to copy IR")?;
+            return Ok(());
+        }
+        self.apply_passes_raw(ir, &pipeline, out)
+    }
+
+    /// Apply a raw pipeline string to an IR file using opt.
+    /// Use this when you have a pre-built pipeline string (e.g., from `opt -O3 --print-pipeline-passes`).
+    pub fn apply_passes_raw(&self, ir: &Path, pipeline: &str, out: &Path) -> Result<()> {
+        if pipeline.is_empty() {
             std::fs::copy(ir, out).context("failed to copy IR")?;
             return Ok(());
         }
