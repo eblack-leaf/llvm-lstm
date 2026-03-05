@@ -50,7 +50,7 @@ enum Commands {
         baseline_runs: usize,
 
         /// Number of internal timing iterations per benchmark run (passed as argv[1] to C binary)
-        #[arg(long, default_value = "201")]
+        #[arg(long, default_value = "51")]
         bench_iters: usize,
 
         /// Number of parallel threads (0 = use all cores)
