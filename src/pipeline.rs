@@ -26,7 +26,6 @@ pub struct PipelineResult {
 pub struct CompilationPipeline {
     clang: String,
     opt: String,
-    llc: String,
     work_dir: PathBuf,
     timeout_secs: u64,
     /// Number of internal timing iterations each benchmark binary runs.
@@ -40,7 +39,6 @@ impl CompilationPipeline {
         Self {
             clang: "clang-20".to_string(),
             opt: "opt-20".to_string(),
-            llc: "llc-20".to_string(),
             work_dir,
             timeout_secs: 60,
             bench_iters: 201,
@@ -61,7 +59,9 @@ impl CompilationPipeline {
         &self.work_dir
     }
 
-    /// Emit unoptimized LLVM IR from C source.
+    /// Emit metadata-rich, unoptimized LLVM IR from C source.
+    /// Uses -O3 frontend enrichment (TBAA, lifetime markers, etc.) with
+    /// -disable-llvm-optzns to skip all LLVM optimization passes.
     pub fn emit_ir(&self, c_source: &Path) -> Result<PathBuf> {
         let stem = c_source
             .file_stem()
@@ -71,11 +71,11 @@ impl CompilationPipeline {
 
         let output = Command::new(&self.clang)
             .args([
+                "-O3",
+                "-Xclang",
+                "-disable-llvm-optzns",
                 "-emit-llvm",
                 "-S",
-                "-O0",
-                "-Xclang",
-                "-disable-O0-optnone",
             ])
             .arg(c_source)
             .arg("-o")
@@ -131,44 +131,27 @@ impl CompilationPipeline {
         Ok(())
     }
 
-    /// Compile optimized IR to a native binary.
+    /// Compile optimized IR to a native binary using O3 backend code generation.
+    /// -disable-llvm-passes prevents clang from re-running IR passes on the already-optimized IR.
     pub fn compile_ir(&self, ir: &Path) -> Result<PathBuf> {
         let stem = ir
             .file_stem()
             .context("no file stem")?
             .to_string_lossy();
-        let obj_path = self.work_dir.join(format!("{stem}.o"));
         let bin_path = self.work_dir.join(format!("{stem}.bin"));
 
-        // llc: IR -> object file
-        let output = Command::new(&self.llc)
-            .arg(ir)
-            .arg("-filetype=obj")
-            .arg("-relocation-model=pic")
-            .arg("-o")
-            .arg(&obj_path)
-            .output()
-            .context("failed to run llc")?;
-
-        if !output.status.success() {
-            bail!(
-                "llc failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // clang: link object file
         let output = Command::new(&self.clang)
-            .arg(&obj_path)
+            .args(["-O3", "-Xclang", "-disable-llvm-passes"])
+            .arg(ir)
             .arg("-o")
             .arg(&bin_path)
             .arg("-lm")
             .output()
-            .context("failed to link")?;
+            .context("failed to compile IR")?;
 
         if !output.status.success() {
             bail!(
-                "link failed:\n{}",
+                "compile IR failed:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
