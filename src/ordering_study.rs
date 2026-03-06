@@ -104,9 +104,11 @@ struct Exp3FunctionResult {
     native_o3_ns: u64,
     full_o3_via_opt_ns: u64,
     our_passes_o3_order_ns: u64,
+    our_passes_o3_rep_ns: u64,
     shuffled_results: Vec<ShuffledResult>,
     subsequence_results: Vec<SubsequenceResult>,
     our_passes_in_o3: Vec<String>,
+    our_passes_in_o3_with_rep: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -774,15 +776,19 @@ fn experiment3(benchmarks_dir: &Path, output_dir: &Path, runs: usize) -> Result<
     let top_level_passes = split_top_level(&o3_pipeline);
     eprintln!("  O3 top-level passes: {}", top_level_passes.len());
 
-    // Extract passes from O3 that match our 32-pass menu
+    // Extract passes from O3 that match our menu (first occurrence, true O3 order)
     let our_passes_in_o3 = extract_our_passes(&o3_pipeline);
     eprintln!(
-        "  Our passes found in O3: {} ({:?})",
+        "  Our passes found in O3 (unique, O3 order): {}",
         our_passes_in_o3.len(),
-        our_passes_in_o3
-            .iter()
-            .map(|p| p.opt_name())
-            .collect::<Vec<_>>()
+    );
+
+    // Extract ALL occurrences (with repetition) in pipeline order
+    let our_passes_in_o3_with_rep = extract_our_passes_with_repetition(&o3_pipeline);
+    eprintln!(
+        "  Our passes with repetition: {} total invocations ({} unique)",
+        our_passes_in_o3_with_rep.len(),
+        our_passes_in_o3.len(),
     );
 
     // Build subsequences
@@ -801,6 +807,7 @@ fn experiment3(benchmarks_dir: &Path, output_dir: &Path, runs: usize) -> Result<
 
     let o3_pipeline_clone = o3_pipeline.clone();
     let our_passes_clone = our_passes_in_o3.clone();
+    let our_passes_rep_clone = our_passes_in_o3_with_rep.clone();
     let subsequences_clone = subsequences.clone();
 
     let results: Vec<Result<Exp3FunctionResult>> = func_paths
@@ -823,12 +830,19 @@ fn experiment3(benchmarks_dir: &Path, output_dir: &Path, runs: usize) -> Result<
             let full_o3_bench = pipeline.benchmark(&binary_o3, runs)?;
             eprintln!("  [{stem}] full O3 via opt = {} ns", full_o3_bench.median_ns);
 
-            // Our passes in O3 order
+            // Our passes in O3 order (unique, one application each)
             let our_o3_order_ir = pipeline.work_dir().join(format!("{stem}_our_o3.ll"));
             pipeline.apply_passes(&ir, &our_passes_clone, &our_o3_order_ir)?;
             let binary_our = pipeline.compile_ir(&our_o3_order_ir)?;
             let our_o3_bench = pipeline.benchmark(&binary_our, runs)?;
-            eprintln!("  [{stem}] our passes (O3 order) = {} ns", our_o3_bench.median_ns);
+            eprintln!("  [{stem}] our passes (O3 order, unique) = {} ns", our_o3_bench.median_ns);
+
+            // Our passes with O3 repetition (all occurrences, in pipeline order)
+            let our_rep_ir = pipeline.work_dir().join(format!("{stem}_our_o3_rep.ll"));
+            pipeline.apply_passes(&ir, &our_passes_rep_clone, &our_rep_ir)?;
+            let binary_rep = pipeline.compile_ir(&our_rep_ir)?;
+            let our_rep_bench = pipeline.benchmark(&binary_rep, runs)?;
+            eprintln!("  [{stem}] our passes (O3 order, +rep) = {} ns", our_rep_bench.median_ns);
 
             // Shuffle our passes 20x
             let mut shuffled_results: Vec<ShuffledResult> = Vec::new();
@@ -891,9 +905,14 @@ fn experiment3(benchmarks_dir: &Path, output_dir: &Path, runs: usize) -> Result<
                 native_o3_ns: native_o3.median_ns,
                 full_o3_via_opt_ns: full_o3_bench.median_ns,
                 our_passes_o3_order_ns: our_o3_bench.median_ns,
+                our_passes_o3_rep_ns: our_rep_bench.median_ns,
                 shuffled_results,
                 subsequence_results,
                 our_passes_in_o3: our_passes_clone
+                    .iter()
+                    .map(|p| p.opt_name().to_string())
+                    .collect(),
+                our_passes_in_o3_with_rep: our_passes_rep_clone
                     .iter()
                     .map(|p| p.opt_name().to_string())
                     .collect(),
@@ -959,37 +978,63 @@ fn split_top_level(pipeline: &str) -> Vec<String> {
     result
 }
 
-/// Extract passes from the O3 pipeline that match our 32-pass menu.
-fn extract_our_passes(pipeline: &str) -> Vec<Pass> {
-    let all_transforms = Pass::all_transforms();
-    let mut found = Vec::new();
+/// Returns true if the byte at `pos` in `pipeline` is a valid pass-name boundary.
+fn is_pass_boundary(pipeline: &[u8], pos: usize) -> bool {
+    let b = pipeline[pos];
+    !b.is_ascii_alphanumeric() && b != b'-'
+}
 
-    // Search for each of our pass names in the pipeline
-    // We look for the opt_name as a substring, being careful about boundaries
+/// Extract the first occurrence of each of our passes from the O3 pipeline,
+/// returned in the order they first appear in the pipeline string (true O3 order).
+fn extract_our_passes(pipeline: &str) -> Vec<Pass> {
+    let bytes = pipeline.as_bytes();
+    let all_transforms = Pass::all_transforms();
+    let mut found: Vec<(usize, Pass)> = Vec::new();
+
     for &pass in all_transforms {
         let name = pass.opt_name();
-        // Check if this pass name appears in the pipeline
-        // Use word boundary-like matching
         let mut search_from = 0;
-        while let Some(pos) = pipeline[search_from..].find(name) {
-            let abs_pos = search_from + pos;
-            let before_ok = abs_pos == 0
-                || !pipeline.as_bytes()[abs_pos - 1].is_ascii_alphanumeric()
-                    && pipeline.as_bytes()[abs_pos - 1] != b'-';
-            let after_pos = abs_pos + name.len();
-            let after_ok = after_pos >= pipeline.len()
-                || (!pipeline.as_bytes()[after_pos].is_ascii_alphanumeric()
-                    && pipeline.as_bytes()[after_pos] != b'-');
-
+        while let Some(rel) = pipeline[search_from..].find(name) {
+            let abs = search_from + rel;
+            let before_ok = abs == 0 || is_pass_boundary(bytes, abs - 1);
+            let after = abs + name.len();
+            let after_ok = after >= bytes.len() || is_pass_boundary(bytes, after);
             if before_ok && after_ok {
-                found.push(pass);
-                break;
+                found.push((abs, pass));
+                break; // first occurrence only
             }
-            search_from = abs_pos + 1;
+            search_from = abs + 1;
         }
     }
 
-    found
+    found.sort_by_key(|(pos, _)| *pos);
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Extract ALL occurrences of our passes from the O3 pipeline in pipeline order,
+/// preserving repetition exactly as -O3 applies them.
+fn extract_our_passes_with_repetition(pipeline: &str) -> Vec<Pass> {
+    let bytes = pipeline.as_bytes();
+    let all_transforms = Pass::all_transforms();
+    let mut occurrences: Vec<(usize, Pass)> = Vec::new();
+
+    for &pass in all_transforms {
+        let name = pass.opt_name();
+        let mut search_from = 0;
+        while let Some(rel) = pipeline[search_from..].find(name) {
+            let abs = search_from + rel;
+            let before_ok = abs == 0 || is_pass_boundary(bytes, abs - 1);
+            let after = abs + name.len();
+            let after_ok = after >= bytes.len() || is_pass_boundary(bytes, after);
+            if before_ok && after_ok {
+                occurrences.push((abs, pass));
+            }
+            search_from = abs + 1;
+        }
+    }
+
+    occurrences.sort_by_key(|(pos, _)| *pos);
+    occurrences.into_iter().map(|(_, p)| p).collect()
 }
 
 /// Build subsequence pipelines from the top-level O3 passes.
@@ -1072,10 +1117,10 @@ fn exp3_report(results: &Exp3Results) -> String {
     // Main comparison table
     r.push_str("Main Comparison:\n");
     r.push_str(&format!(
-        "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12}\n",
-        "Function", "native -O3", "O3 via opt", "Our(O3ord)", "Shuf best", "Shuf worst"
+        "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}\n",
+        "Function", "native -O3", "O3 via opt", "Our(O3ord)", "Our(+rep)", "Shuf best", "Shuf worst"
     ));
-    r.push_str(&format!("{}\n", "-".repeat(84)));
+    r.push_str(&format!("{}\n", "-".repeat(97)));
 
     for f in &results.per_function {
         let shuf_best = f
@@ -1092,11 +1137,12 @@ fn exp3_report(results: &Exp3Results) -> String {
             .unwrap_or(0);
 
         r.push_str(&format!(
-            "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12}\n",
+            "{:<20} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}\n",
             f.function,
             f.native_o3_ns,
             f.full_o3_via_opt_ns,
             f.our_passes_o3_order_ns,
+            f.our_passes_o3_rep_ns,
             shuf_best,
             shuf_worst,
         ));
@@ -1172,8 +1218,13 @@ fn exp3_report(results: &Exp3Results) -> String {
     // Our passes found in O3
     if let Some(first) = results.per_function.first() {
         r.push_str(&format!(
-            "\nOur passes extracted from O3 (in O3 order): {:?}\n",
+            "\nOur passes extracted from O3 (true O3 order, unique): {:?}\n",
             first.our_passes_in_o3,
+        ));
+        r.push_str(&format!(
+            "\nOur passes with repetition ({} invocations): {:?}\n",
+            first.our_passes_in_o3_with_rep.len(),
+            first.our_passes_in_o3_with_rep,
         ));
     }
 
@@ -1208,6 +1259,22 @@ fn exp3_report(results: &Exp3Results) -> String {
     r.push_str(&format!(
         "  Avg gap native O3 vs our-passes-in-O3-order: {:+.1}%\n",
         avg_our_gap
+    ));
+
+    let avg_rep_gap: f64 = results
+        .per_function
+        .iter()
+        .filter(|f| f.native_o3_ns > 0)
+        .map(|f| {
+            (f.our_passes_o3_rep_ns as f64 - f.native_o3_ns as f64)
+                / f.native_o3_ns as f64
+                * 100.0
+        })
+        .sum::<f64>()
+        / results.per_function.len().max(1) as f64;
+    r.push_str(&format!(
+        "  Avg gap native O3 vs our-passes-with-repetition: {:+.1}%\n",
+        avg_rep_gap
     ));
 
     let avg_shuffle_spread: f64 = results

@@ -3,6 +3,11 @@ name = "llvm-lstm"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Enable all passes present in opt's -O3 pipeline for reproducibility testing.
+# When enabled, the action space expands from 33 to 73 (32 base transforms + 39 extended + Stop).
+full_o3_passes = []
+
 [dependencies]
 burn = { version = "0.20.1", features = ["ndarray"] }
 serde = { version = "1", features = ["derive"] }
