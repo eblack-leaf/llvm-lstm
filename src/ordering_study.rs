@@ -984,6 +984,24 @@ fn is_pass_boundary(pipeline: &[u8], pos: usize) -> bool {
     !b.is_ascii_alphanumeric() && b != b'-'
 }
 
+/// Returns true if the match of `name` ending at `after` (exclusive) is a
+/// valid right-side boundary in `pipeline`.
+///
+/// The key case: plain `"sroa"` must NOT match inside `"sroa<modify-cfg>"`.
+/// A `<` immediately after the match indicates the pipeline has a parameterised
+/// form of this pass.  It is only a valid boundary when the search pattern
+/// itself ends with `>` (i.e. we already matched the full parameterised name).
+fn is_valid_right_boundary(pipeline: &[u8], after: usize, name: &str) -> bool {
+    if after >= pipeline.len() {
+        return true;
+    }
+    let next = pipeline[after];
+    if next == b'<' && !name.ends_with('>') {
+        return false; // plain name matching into a parameterised form — reject
+    }
+    is_pass_boundary(pipeline, after)
+}
+
 /// Extract the first occurrence of each of our passes from the O3 pipeline,
 /// returned in the order they first appear in the pipeline string (true O3 order).
 fn extract_our_passes(pipeline: &str) -> Vec<Pass> {
@@ -998,7 +1016,7 @@ fn extract_our_passes(pipeline: &str) -> Vec<Pass> {
             let abs = search_from + rel;
             let before_ok = abs == 0 || is_pass_boundary(bytes, abs - 1);
             let after = abs + name.len();
-            let after_ok = after >= bytes.len() || is_pass_boundary(bytes, after);
+            let after_ok = is_valid_right_boundary(bytes, after, name);
             if before_ok && after_ok {
                 found.push((abs, pass));
                 break; // first occurrence only
@@ -1025,7 +1043,7 @@ fn extract_our_passes_with_repetition(pipeline: &str) -> Vec<Pass> {
             let abs = search_from + rel;
             let before_ok = abs == 0 || is_pass_boundary(bytes, abs - 1);
             let after = abs + name.len();
-            let after_ok = after >= bytes.len() || is_pass_boundary(bytes, after);
+            let after_ok = is_valid_right_boundary(bytes, after, name);
             if before_ok && after_ok {
                 occurrences.push((abs, pass));
             }

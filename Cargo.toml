@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Enable all passes present in opt's -O3 pipeline for reproducibility testing.
-# When enabled, the action space expands from 33 to 73 (32 base transforms + 39 extended + Stop).
-full_o3_passes = []
+# Expand the action space from 28 to 86 with a secondary pass set.
+# Primary (always on): 27 high-impact, C-oriented passes + Stop = 28 actions.
+# Secondary (this feature): 57 additional passes covering interprocedural,
+# coroutine, module-level, and niche function passes + new Stop = 86 actions.
+# Enable when the primary set converges but still leaves room to improve.
+secondary_passes = []
 
 [dependencies]
 burn = { version = "0.20.1", features = ["ndarray"] }

@@ -5,280 +5,348 @@ use serde::{Deserialize, Serialize};
 /// A selectable optimization pass.
 ///
 /// Index layout:
-///   Base (always):             0-30  (31 transforms) + Stop at 31   → count = 32
-///   Extended (full_o3_passes): 0-30  (31 transforms)
-///                              32-76 (45 extended transforms)
-///                              + Stop at 77                          → count = 78
+///   Primary (always):    0-27  (28 transforms) + Stop at 28   → count = 29
+///   Secondary (feature): 0-27  (28 primary transforms)
+///                        29-70 (42 secondary transforms)
+///                        + Stop at 71                          → count = 72
 ///
-/// Index 31 is unused / Stop when full_o3_passes is disabled.
-/// Index 31 is a gap (invalid action) when full_o3_passes is enabled.
+/// Index 28 is a gap (invalid action) when secondary_passes is enabled.
+/// Stop is at 28 (primary only) or 71 (secondary enabled).
+///
+/// ── Why primary vs secondary ─────────────────────────────────────────────────
+///
+/// PRIMARY passes satisfy all three:
+///   1. Appear in -O3's inner devirt<4> function loop (the core repeated kernel)
+///      or are a direct prerequisite that the inner loop depends on.
+///   2. Have demonstrable, broad impact on typical C compute code specifically.
+///   3. Cover a distinct optimization category — no two primaries are
+///      redundant substitutes for each other.
+///
+/// SECONDARY passes fail at least one:
+///   - Language-specific (coro-*, openmp-*): irrelevant for plain C.
+///   - Interprocedural/module-level analytics (deadargelim, ipsccp, etc.):
+///     useful but marginal for function-level hot-path tuning.
+///   - Niche or rarely decisive standalone (bdce, float2int, vector-combine,
+///     constraint-elimination): catches things other passes miss but rarely
+///     worth a dedicated action in a constrained search space.
+///   - Infrastructure / diagnostic (verify, ee-instrument, annotation-*).
+///   - O3-parameterized variant whose base pass is already primary but the
+///     variant's gain is modest enough to not justify primary space
+///     (simplifycfg-o3, early-cse plain, argpromotion, globalopt).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Pass {
-    // ── Base passes (indices 0–30) ────────────────────────────────────────────
-    Instcombine,            // 0
-    Inline,                 // 1
-    LoopUnroll,             // 2
-    Licm,                   // 3
-    Gvn,                    // 4
-    Sroa,                   // 5
-    Mem2reg,                // 6
-    Simplifycfg,            // 7
-    Dse,                    // 8
-    Reassociate,            // 9
-    JumpThreading,          // 10
-    LoopRotate,             // 11
-    Adce,                   // 12
-    EarlyCse,               // 13
-    Tailcallelim,           // 14
-    Sccp,                   // 15
-    Bdce,                   // 16
-    Memcpyopt,              // 17
-    LoopDeletion,           // 18
-    Argpromotion,           // 19
-    GlobalOpt,              // 20
-    IndVars,                // 21
-    LoopVectorize,          // 22
-    SlpVectorizer,          // 23
-    CorrelatedPropagation,  // 24
-    AggressiveInstcombine,  // 25
-    ConstraintElimination,  // 26
-    VectorCombine,          // 27
-    Float2int,              // 28
-    LoopIdiom,              // 29
-    SimpleLoopUnswitch,     // 30
+    // ── Primary passes (indices 0–26) ─────────────────────────────────────────
+    //
+    // Core instruction cleanup
+    Instcombine,                // 0  — instruction combining; foundational for all IR clean-up
+    Mem2reg,                    // 1  — alloca→SSA; must run early, everything depends on it
+    Adce,                       // 2  — aggressive DCE; prunes dead computation after transforms
+    Dse,                        // 3  — dead store elimination; critical for C pointer writes
+    Sccp,                       // 4  — sparse conditional constant prop; resolves branch conditions
+    Reassociate,                // 5  — arithmetic re-association; enables constant folding downstream
+    JumpThreading,              // 6  — threads jumps; eliminates branch chains common in C
+    Gvn,                        // 7  — global value numbering; eliminates cross-block redundancies
+    //
+    // Memory / struct promotion (two variants so model learns when CFG mods help)
+    Sroa,                       // 8  — scalar replacement of aggregates (conservative, no CFG mods)
+    SroaModifyCfg,              // 9  — sroa<modify-cfg>; O3's form, allows CFG restructuring
+    Memcpyopt,                  // 10 — merges memcpy/stores; C code is full of struct copies
+    //
+    // CFG simplification
+    Simplifycfg,                // 11 — simplifies CFG; needed after nearly every transform
+    //
+    // Inlining
+    Inline,                     // 12 — function inlining; single biggest win for C call-heavy code
+    //
+    // CSE (only the MemSSA form; plain early-cse is strictly weaker for C)
+    EarlyCseMemssa,             // 13 — early-cse<memssa>; eliminates redundant loads/stores via MemSSA
+    //
+    // Loop infrastructure (rotation must precede LICM, indvars, vectorization)
+    LoopRotate,                 // 14 — loop rotation (conservative)
+    LoopRotateHeaderDup,        // 15 — loop-rotate<header-duplication;no-prepare-for-lto>; O3 form
+    //
+    // Loop-invariant code motion (two variants; model learns when speculation helps)
+    Licm,                       // 16 — LICM without speculation (conservative, safe for aliased loads)
+    LicmAllowSpeculation,       // 17 — licm<allowspeculation>; O3's second LICM pass; hoists aggressively
+    //
+    // Loop canonicalization (prerequisite for vectorization and unrolling)
+    IndVars,                    // 18 — canonicalizes induction variables
+    LoopIdiom,                  // 19 — recognises memset/memcpy idioms; very common in C
+    LoopDeletion,               // 20 — deletes provably empty or infinite-but-unused loops
+    //
+    // Loop unswitching (two variants)
+    SimpleLoopUnswitch,         // 21 — trivial unswitching only (cheap, always safe)
+    SimpleLoopUnswitchNontrivial, // 22 — simple-loop-unswitch<nontrivial;trivial>; O3 form, duplicates body
+    //
+    // Loop unrolling (two variants; model learns when aggressive thresholds hurt vs help)
+    LoopUnroll,                 // 23 — partial unrolling at default thresholds
+    LoopUnrollO3,               // 24 — loop-unroll<O3>; much higher threshold; O3's late unroll pass
+    //
+    // Vectorization
+    LoopVectorize,              // 25 — auto-vectorizes counted loops; huge for C compute arrays
+    SlpVectorizer,              // 26 — superword-level parallelism; vectorises straight-line C code
+    Tailcallelim,               // 27 — tail call elimination; primary because tail_recursive.c and
+    //      interpreter/recursive-descent patterns in the benchmark set benefit
+    //      directly; the LSTM can learn to skip it for non-recursive benchmarks
 
-    // ── Extended passes matching opt -O3 (indices 32–76) ─────────────────────
-    // Module-level
-    #[cfg(feature = "full_o3_passes")]
-    Annotation2Metadata,        // 32
-    #[cfg(feature = "full_o3_passes")]
-    CalledValuePropagation,     // 33
-    #[cfg(feature = "full_o3_passes")]
-    CgProfile,                  // 34
-    #[cfg(feature = "full_o3_passes")]
-    CoroAnnotationElide,        // 35
-    #[cfg(feature = "full_o3_passes")]
-    ConstMerge,                 // 36
-    #[cfg(feature = "full_o3_passes")]
-    CoroCleanup,                // 37
-    #[cfg(feature = "full_o3_passes")]
-    CoroEarly,                  // 38
-    #[cfg(feature = "full_o3_passes")]
-    Deadargelim,                // 39
-    #[cfg(feature = "full_o3_passes")]
-    ElimAvailExtern,            // 40
-    #[cfg(feature = "full_o3_passes")]
-    ForceAttrs,                 // 41
-    #[cfg(feature = "full_o3_passes")]
+    // ── Secondary passes (indices 29–84) ──────────────────────────────────────
+    //
+    // DEMOTED FROM OLD BASE — useful but not primary-tier for C:
+
+    /// Plain early-cse without MemSSA.  Weaker than EarlyCseMemssa for
+    /// pointer-heavy C; kept as secondary so the model can use the cheaper form.
+    #[cfg(feature = "secondary_passes")]
+    EarlyCse,                   // 29
+
+    /// Bit-tracking dead code elimination.  Catches things instcombine misses
+    /// (e.g. dead high bits) but rarely moves the needle alone.
+    #[cfg(feature = "secondary_passes")]
+    Bdce,                       // 30
+
+    /// Argument promotion (pointer→value).  CGSCC-level; useful when inlining
+    /// exposes pointer args that can be passed by value, but secondary because
+    /// it requires callgraph context to matter much.
+    #[cfg(feature = "secondary_passes")]
+    Argpromotion,               // 31
+
+    /// Global variable optimisation.  Module-level; rarely in the hot path of
+    /// compute-focused C benchmarks which mostly operate on local/heap data.
+    #[cfg(feature = "secondary_passes")]
+    GlobalOpt,                  // 32
+
+    /// Correlated value propagation.  Propagates value ranges across branches;
+    /// overlaps significantly with SCCP and GVN already in primary.
+    #[cfg(feature = "secondary_passes")]
+    CorrelatedPropagation,      // 33
+
+    /// Aggressive instcombine.  A heavier instcombine sweep for patterns the
+    /// standard pass misses.  Marginal gain over primary Instcombine for C.
+    #[cfg(feature = "secondary_passes")]
+    AggressiveInstcombine,      // 34
+
+    /// Constraint-based range elimination.  Newer pass; niche use cases;
+    /// overlaps with SCCP for most C programs.
+    #[cfg(feature = "secondary_passes")]
+    ConstraintElimination,      // 35
+
+    /// Vector combine.  Recombines vector operations after SLP/loop-vectorize;
+    /// only useful when vectorization already fired.
+    #[cfg(feature = "secondary_passes")]
+    VectorCombine,              // 36
+
+    /// Float-to-int conversion.  Detects loops that accidentally use float
+    /// arithmetic for integer semantics; very niche for hand-written C.
+    #[cfg(feature = "secondary_passes")]
+    Float2int,                  // 37
+
+    // OLD EXTENDED SET — module-level analytics:
+
+    #[cfg(feature = "secondary_passes")]
+    CalledValuePropagation,     // 38
+    #[cfg(feature = "secondary_passes")]
+    ConstMerge,                 // 39
+    #[cfg(feature = "secondary_passes")]
+    Deadargelim,                // 40
+    #[cfg(feature = "secondary_passes")]
+    ElimAvailExtern,            // 41
+    #[cfg(feature = "secondary_passes")]
     GlobalDce,                  // 42
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     InferAttrs,                 // 43
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     Ipsccp,                     // 44
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     RelLookupTableConverter,    // 45
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     RpoFunctionAttrs,           // 46
     // CGSCC-level
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     AlwaysInline,               // 47
-    #[cfg(feature = "full_o3_passes")]
-    CoroSplit,                  // 48
-    #[cfg(feature = "full_o3_passes")]
-    FunctionAttrs,              // 49
-    #[cfg(feature = "full_o3_passes")]
-    OpenMpOpt,                  // 50
-    #[cfg(feature = "full_o3_passes")]
-    OpenMpOptCgscc,             // 51
+    #[cfg(feature = "secondary_passes")]
+    FunctionAttrs,              // 48
     // Loop-level
-    #[cfg(feature = "full_o3_passes")]
-    ExtraSimpleLoopUnswitchPasses, // 52
-    #[cfg(feature = "full_o3_passes")]
-    LoopInstsimplify,           // 53
-    #[cfg(feature = "full_o3_passes")]
-    LoopSimplifycfg,            // 54
-    #[cfg(feature = "full_o3_passes")]
-    LoopUnrollFull,             // 55
+    #[cfg(feature = "secondary_passes")]
+    ExtraSimpleLoopUnswitchPasses, // 49
+    #[cfg(feature = "secondary_passes")]
+    LoopInstsimplify,           // 50
+    #[cfg(feature = "secondary_passes")]
+    LoopSimplifycfg,            // 51
+    #[cfg(feature = "secondary_passes")]
+    LoopUnrollFull,             // 52
     // Function-level
-    #[cfg(feature = "full_o3_passes")]
-    AlignmentFromAssumptions,   // 56
-    #[cfg(feature = "full_o3_passes")]
-    AnnotationRemarks,          // 57
-    #[cfg(feature = "full_o3_passes")]
-    CallsiteSplitting,          // 58
-    #[cfg(feature = "full_o3_passes")]
-    Chr,                        // 59
-    #[cfg(feature = "full_o3_passes")]
-    CoroElide,                  // 60
-    #[cfg(feature = "full_o3_passes")]
-    DivRemPairs,                // 61
-    #[cfg(feature = "full_o3_passes")]
-    EeInstrument,               // 62
-    #[cfg(feature = "full_o3_passes")]
-    InferAlignment,             // 63
-    #[cfg(feature = "full_o3_passes")]
-    InjectTliMappings,          // 64
-    #[cfg(feature = "full_o3_passes")]
-    InstSimplify,               // 65
-    #[cfg(feature = "full_o3_passes")]
-    LibcallsShrinkwrap,         // 66
-    #[cfg(feature = "full_o3_passes")]
-    LoopDistribute,             // 67
-    #[cfg(feature = "full_o3_passes")]
-    LoopLoadElim,               // 68
-    #[cfg(feature = "full_o3_passes")]
-    LoopSink,                   // 69
-    #[cfg(feature = "full_o3_passes")]
-    LowerConstantIntrinsics,    // 70
-    #[cfg(feature = "full_o3_passes")]
-    LowerExpect,                // 71
-    #[cfg(feature = "full_o3_passes")]
-    MldstMotion,                // 72
-    #[cfg(feature = "full_o3_passes")]
-    MoveAutoInit,               // 73
-    #[cfg(feature = "full_o3_passes")]
-    SpeculativeExecution,       // 74
-    #[cfg(feature = "full_o3_passes")]
-    TransformWarning,           // 75
-    #[cfg(feature = "full_o3_passes")]
-    Verify,                     // 76
-    #[cfg(feature = "full_o3_passes")]
-    LoopUnrollAndJam,           // 77
+    #[cfg(feature = "secondary_passes")]
+    AlignmentFromAssumptions,   // 53
+    #[cfg(feature = "secondary_passes")]
+    CallsiteSplitting,          // 54
+    #[cfg(feature = "secondary_passes")]
+    Chr,                        // 55
+    #[cfg(feature = "secondary_passes")]
+    DivRemPairs,                // 56
+    #[cfg(feature = "secondary_passes")]
+    InferAlignment,             // 57
+    #[cfg(feature = "secondary_passes")]
+    InjectTliMappings,          // 58
+    #[cfg(feature = "secondary_passes")]
+    InstSimplify,               // 59
+    #[cfg(feature = "secondary_passes")]
+    LibcallsShrinkwrap,         // 60
+    #[cfg(feature = "secondary_passes")]
+    LoopDistribute,             // 61
+    #[cfg(feature = "secondary_passes")]
+    LoopLoadElim,               // 62
+    #[cfg(feature = "secondary_passes")]
+    LoopSink,                   // 63
+    #[cfg(feature = "secondary_passes")]
+    LowerConstantIntrinsics,    // 64
+    #[cfg(feature = "secondary_passes")]
+    LowerExpect,                // 65
+    #[cfg(feature = "secondary_passes")]
+    MldstMotion,                // 66
+    #[cfg(feature = "secondary_passes")]
+    MoveAutoInit,               // 67
+    #[cfg(feature = "secondary_passes")]
+    SpeculativeExecution,       // 68
+    #[cfg(feature = "secondary_passes")]
+    LoopUnrollAndJam,           // 69
+    // O3-parameterised variant relegated to secondary
+    /// simplifycfg with the full O3 flag set.  The speculate-blocks and
+    /// simplify-cond-branch flags help most for irregular control flow; for
+    /// compute-heavy C with regular loops the gain over plain simplifycfg is
+    /// modest — not worth consuming a primary slot.
+    #[cfg(feature = "secondary_passes")]
+    SimplifycfgO3,              // 70
 
     // ── Terminal action ───────────────────────────────────────────────────────
-    Stop, // 31 (base) or 78 (full_o3_passes)
+    Stop, // 28 (primary only) or 71 (secondary enabled)
 }
 
 impl Pass {
     pub fn opt_name(&self) -> &str {
         match self {
+            // Primary
             Pass::Instcombine => "instcombine",
-            Pass::Inline => "inline",
-            Pass::LoopUnroll => "loop-unroll",
-            Pass::Licm => "licm",
-            Pass::Gvn => "gvn",
-            Pass::Sroa => "sroa",
             Pass::Mem2reg => "mem2reg",
-            Pass::Simplifycfg => "simplifycfg",
+            Pass::Adce => "adce",
             Pass::Dse => "dse",
+            Pass::Sccp => "sccp",
             Pass::Reassociate => "reassociate",
             Pass::JumpThreading => "jump-threading",
-            Pass::LoopRotate => "loop-rotate",
-            Pass::Adce => "adce",
-            Pass::EarlyCse => "early-cse",
-            Pass::Tailcallelim => "tailcallelim",
-            Pass::Sccp => "sccp",
-            Pass::Bdce => "bdce",
+            Pass::Gvn => "gvn",
+            Pass::Sroa => "sroa",
+            Pass::SroaModifyCfg => "sroa<modify-cfg>",
             Pass::Memcpyopt => "memcpyopt",
-            Pass::LoopDeletion => "loop-deletion",
-            Pass::Argpromotion => "argpromotion",
-            Pass::GlobalOpt => "globalopt",
+            Pass::Simplifycfg => "simplifycfg",
+            Pass::Inline => "inline",
+            Pass::EarlyCseMemssa => "early-cse<memssa>",
+            Pass::LoopRotate => "loop-rotate",
+            Pass::LoopRotateHeaderDup => "loop-rotate<header-duplication;no-prepare-for-lto>",
+            Pass::Licm => "licm",
+            Pass::LicmAllowSpeculation => "licm<allowspeculation>",
             Pass::IndVars => "indvars",
+            Pass::LoopIdiom => "loop-idiom",
+            Pass::LoopDeletion => "loop-deletion",
+            Pass::SimpleLoopUnswitch => "simple-loop-unswitch",
+            Pass::SimpleLoopUnswitchNontrivial => "simple-loop-unswitch<nontrivial;trivial>",
+            Pass::LoopUnroll => "loop-unroll",
+            Pass::LoopUnrollO3 => "loop-unroll<O3>",
             Pass::LoopVectorize => "loop-vectorize",
             Pass::SlpVectorizer => "slp-vectorizer",
+            Pass::Tailcallelim => "tailcallelim",
+            // Secondary — demoted base passes
+            #[cfg(feature = "secondary_passes")]
+            Pass::EarlyCse => "early-cse",
+            #[cfg(feature = "secondary_passes")]
+            Pass::Bdce => "bdce",
+            #[cfg(feature = "secondary_passes")]
+            Pass::Argpromotion => "argpromotion",
+            #[cfg(feature = "secondary_passes")]
+            Pass::GlobalOpt => "globalopt",
+            #[cfg(feature = "secondary_passes")]
             Pass::CorrelatedPropagation => "correlated-propagation",
+            #[cfg(feature = "secondary_passes")]
             Pass::AggressiveInstcombine => "aggressive-instcombine",
+            #[cfg(feature = "secondary_passes")]
             Pass::ConstraintElimination => "constraint-elimination",
+            #[cfg(feature = "secondary_passes")]
             Pass::VectorCombine => "vector-combine",
+            #[cfg(feature = "secondary_passes")]
             Pass::Float2int => "float2int",
-            Pass::LoopIdiom => "loop-idiom",
-            Pass::SimpleLoopUnswitch => "simple-loop-unswitch",
-            // Module
-            #[cfg(feature = "full_o3_passes")]
-            Pass::Annotation2Metadata => "annotation2metadata",
-            #[cfg(feature = "full_o3_passes")]
+            // Secondary — module-level
+            #[cfg(feature = "secondary_passes")]
             Pass::CalledValuePropagation => "called-value-propagation",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CgProfile => "cg-profile",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroAnnotationElide => "coro-annotation-elide",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::ConstMerge => "constmerge",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroCleanup => "coro-cleanup",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroEarly => "coro-early",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::Deadargelim => "deadargelim",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::ElimAvailExtern => "elim-avail-extern",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::ForceAttrs => "forceattrs",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::GlobalDce => "globaldce",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::InferAttrs => "inferattrs",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::Ipsccp => "ipsccp",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::RelLookupTableConverter => "rel-lookup-table-converter",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::RpoFunctionAttrs => "rpo-function-attrs",
-            // CGSCC
-            #[cfg(feature = "full_o3_passes")]
+            // Secondary — CGSCC-level
+            #[cfg(feature = "secondary_passes")]
             Pass::AlwaysInline => "always-inline",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroSplit => "coro-split",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::FunctionAttrs => "function-attrs",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::OpenMpOpt => "openmp-opt",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::OpenMpOptCgscc => "openmp-opt-cgscc",
-            // Loop
-            #[cfg(feature = "full_o3_passes")]
+            // Secondary — loop-level
+            #[cfg(feature = "secondary_passes")]
             Pass::ExtraSimpleLoopUnswitchPasses => "extra-simple-loop-unswitch-passes",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopInstsimplify => "loop-instsimplify",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopSimplifycfg => "loop-simplifycfg",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopUnrollFull => "loop-unroll-full",
-            // Function
-            #[cfg(feature = "full_o3_passes")]
+            // Secondary — function-level
+            #[cfg(feature = "secondary_passes")]
             Pass::AlignmentFromAssumptions => "alignment-from-assumptions",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::AnnotationRemarks => "annotation-remarks",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::CallsiteSplitting => "callsite-splitting",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::Chr => "chr",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroElide => "coro-elide",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::DivRemPairs => "div-rem-pairs",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::EeInstrument => "ee-instrument",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::InferAlignment => "infer-alignment",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::InjectTliMappings => "inject-tli-mappings",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::InstSimplify => "instsimplify",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LibcallsShrinkwrap => "libcalls-shrinkwrap",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopDistribute => "loop-distribute",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopLoadElim => "loop-load-elim",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopSink => "loop-sink",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LowerConstantIntrinsics => "lower-constant-intrinsics",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LowerExpect => "lower-expect",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::MldstMotion => "mldst-motion",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::MoveAutoInit => "move-auto-init",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::SpeculativeExecution => "speculative-execution",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::TransformWarning => "transform-warning",
-            #[cfg(feature = "full_o3_passes")]
-            Pass::Verify => "verify",
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::LoopUnrollAndJam => "loop-unroll-and-jam",
+            #[cfg(feature = "secondary_passes")]
+            Pass::SimplifycfgO3 => concat!(
+                "simplifycfg<bonus-inst-threshold=1;no-forward-switch-cond;",
+                "switch-range-to-icmp;no-switch-to-lookup;keep-loops;",
+                "no-hoist-common-insts;no-hoist-loads-stores-with-cond-faulting;",
+                "no-sink-common-insts;speculate-blocks;simplify-cond-branch;",
+                "no-speculate-unpredictables>"
+            ),
 
             Pass::Stop => "stop",
         }
@@ -292,45 +360,43 @@ impl Pass {
         }
 
         let is_module = |p: &Pass| match p {
-            Pass::GlobalOpt => true,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::AlwaysInline          // runs at top-level in -O3, not inside cgscc
-            | Pass::Annotation2Metadata
+            #[cfg(feature = "secondary_passes")]
+            Pass::GlobalOpt
+            | Pass::AlwaysInline
             | Pass::CalledValuePropagation
-            | Pass::CgProfile
             | Pass::ConstMerge
-            | Pass::CoroCleanup
-            | Pass::CoroEarly
             | Pass::Deadargelim
             | Pass::ElimAvailExtern
-            | Pass::ForceAttrs
             | Pass::GlobalDce
             | Pass::InferAttrs
             | Pass::Ipsccp
-            | Pass::OpenMpOpt           // module-level; openmp-opt-cgscc is the cgscc variant
             | Pass::RelLookupTableConverter
             | Pass::RpoFunctionAttrs => true,
             _ => false,
         };
 
         let is_cgscc = |p: &Pass| match p {
-            Pass::Inline | Pass::Argpromotion => true,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroAnnotationElide   // inside cgscc(devirt<4>(...)) in -O3
-            | Pass::CoroSplit
-            | Pass::FunctionAttrs
-            | Pass::OpenMpOptCgscc => true,
+            Pass::Inline => true,
+            #[cfg(feature = "secondary_passes")]
+            Pass::Argpromotion | Pass::FunctionAttrs => true,
             _ => false,
         };
 
+        // Passes that must be wrapped in loop(...) or loop-mssa(...).
+        // Note: LoopUnroll, LoopUnrollO3, LoopVectorize, SlpVectorizer are
+        // function-level adaptors, NOT loop-level — they iterate loops
+        // internally and do not need a loop(...) wrapper.
         let is_loop = |p: &Pass| match p {
             Pass::LoopRotate
+            | Pass::LoopRotateHeaderDup
             | Pass::LoopDeletion
             | Pass::IndVars
             | Pass::Licm
+            | Pass::LicmAllowSpeculation
             | Pass::LoopIdiom
-            | Pass::SimpleLoopUnswitch => true,
-            #[cfg(feature = "full_o3_passes")]
+            | Pass::SimpleLoopUnswitch
+            | Pass::SimpleLoopUnswitchNontrivial => true,
+            #[cfg(feature = "secondary_passes")]
             Pass::ExtraSimpleLoopUnswitchPasses
             | Pass::LoopInstsimplify
             | Pass::LoopSimplifycfg
@@ -357,29 +423,41 @@ impl Pass {
             .map(|p| {
                 if is_loop(p) {
                     match **p {
+                        // Primary loop passes
                         Pass::Licm => "loop-mssa(licm)".to_string(),
+                        Pass::LicmAllowSpeculation => "loop-mssa(licm<allowspeculation>)".to_string(),
                         Pass::LoopRotate => "loop(loop-rotate)".to_string(),
+                        Pass::LoopRotateHeaderDup => {
+                            "loop(loop-rotate<header-duplication;no-prepare-for-lto>)".to_string()
+                        }
                         Pass::LoopDeletion => "loop(loop-deletion)".to_string(),
                         Pass::IndVars => "loop(indvars)".to_string(),
                         Pass::LoopIdiom => "loop(loop-idiom)".to_string(),
                         Pass::SimpleLoopUnswitch => "loop(simple-loop-unswitch)".to_string(),
-                        #[cfg(feature = "full_o3_passes")]
+                        Pass::SimpleLoopUnswitchNontrivial => {
+                            "loop(simple-loop-unswitch<nontrivial;trivial>)".to_string()
+                        }
+                        // Secondary loop passes
+                        #[cfg(feature = "secondary_passes")]
                         Pass::ExtraSimpleLoopUnswitchPasses => {
                             "loop(extra-simple-loop-unswitch-passes)".to_string()
                         }
-                        #[cfg(feature = "full_o3_passes")]
+                        #[cfg(feature = "secondary_passes")]
                         Pass::LoopInstsimplify => "loop(loop-instsimplify)".to_string(),
-                        #[cfg(feature = "full_o3_passes")]
+                        #[cfg(feature = "secondary_passes")]
                         Pass::LoopSimplifycfg => "loop(loop-simplifycfg)".to_string(),
-                        #[cfg(feature = "full_o3_passes")]
+                        #[cfg(feature = "secondary_passes")]
                         Pass::LoopUnrollFull => "loop(loop-unroll-full)".to_string(),
-                        #[cfg(feature = "full_o3_passes")]
+                        #[cfg(feature = "secondary_passes")]
                         Pass::LoopUnrollAndJam => "loop(loop-unroll-and-jam)".to_string(),
                         _ => unreachable!(),
                     }
                 } else if **p == Pass::Instcombine {
                     "instcombine<no-verify-fixpoint>".to_string()
                 } else {
+                    // All other function-level passes.  Parameterised variants
+                    // (SroaModifyCfg, EarlyCseMemssa, LoopUnrollO3, SimplifycfgO3, …)
+                    // carry their full opt string inside opt_name() already.
                     p.opt_name().to_string()
                 }
             })
@@ -406,386 +484,360 @@ impl Pass {
 
     pub fn from_index(i: usize) -> Self {
         match i {
+            // Primary
             0  => Pass::Instcombine,
-            1  => Pass::Inline,
-            2  => Pass::LoopUnroll,
-            3  => Pass::Licm,
-            4  => Pass::Gvn,
-            5  => Pass::Sroa,
-            6  => Pass::Mem2reg,
-            7  => Pass::Simplifycfg,
-            8  => Pass::Dse,
-            9  => Pass::Reassociate,
-            10 => Pass::JumpThreading,
-            11 => Pass::LoopRotate,
-            12 => Pass::Adce,
-            13 => Pass::EarlyCse,
-            14 => Pass::Tailcallelim,
-            15 => Pass::Sccp,
-            16 => Pass::Bdce,
-            17 => Pass::Memcpyopt,
-            18 => Pass::LoopDeletion,
-            19 => Pass::Argpromotion,
-            20 => Pass::GlobalOpt,
-            21 => Pass::IndVars,
-            22 => Pass::LoopVectorize,
-            23 => Pass::SlpVectorizer,
-            24 => Pass::CorrelatedPropagation,
-            25 => Pass::AggressiveInstcombine,
-            26 => Pass::ConstraintElimination,
-            27 => Pass::VectorCombine,
-            28 => Pass::Float2int,
-            29 => Pass::LoopIdiom,
-            30 => Pass::SimpleLoopUnswitch,
-            // Stop (base, no feature)
-            #[cfg(not(feature = "full_o3_passes"))]
-            31 => Pass::Stop,
-            // Extended passes
-            #[cfg(feature = "full_o3_passes")]
-            32 => Pass::Annotation2Metadata,
-            #[cfg(feature = "full_o3_passes")]
-            33 => Pass::CalledValuePropagation,
-            #[cfg(feature = "full_o3_passes")]
-            34 => Pass::CgProfile,
-            #[cfg(feature = "full_o3_passes")]
-            35 => Pass::CoroAnnotationElide,
-            #[cfg(feature = "full_o3_passes")]
-            36 => Pass::ConstMerge,
-            #[cfg(feature = "full_o3_passes")]
-            37 => Pass::CoroCleanup,
-            #[cfg(feature = "full_o3_passes")]
-            38 => Pass::CoroEarly,
-            #[cfg(feature = "full_o3_passes")]
-            39 => Pass::Deadargelim,
-            #[cfg(feature = "full_o3_passes")]
-            40 => Pass::ElimAvailExtern,
-            #[cfg(feature = "full_o3_passes")]
-            41 => Pass::ForceAttrs,
-            #[cfg(feature = "full_o3_passes")]
+            1  => Pass::Mem2reg,
+            2  => Pass::Adce,
+            3  => Pass::Dse,
+            4  => Pass::Sccp,
+            5  => Pass::Reassociate,
+            6  => Pass::JumpThreading,
+            7  => Pass::Gvn,
+            8  => Pass::Sroa,
+            9  => Pass::SroaModifyCfg,
+            10 => Pass::Memcpyopt,
+            11 => Pass::Simplifycfg,
+            12 => Pass::Inline,
+            13 => Pass::EarlyCseMemssa,
+            14 => Pass::LoopRotate,
+            15 => Pass::LoopRotateHeaderDup,
+            16 => Pass::Licm,
+            17 => Pass::LicmAllowSpeculation,
+            18 => Pass::IndVars,
+            19 => Pass::LoopIdiom,
+            20 => Pass::LoopDeletion,
+            21 => Pass::SimpleLoopUnswitch,
+            22 => Pass::SimpleLoopUnswitchNontrivial,
+            23 => Pass::LoopUnroll,
+            24 => Pass::LoopUnrollO3,
+            25 => Pass::LoopVectorize,
+            26 => Pass::SlpVectorizer,
+            27 => Pass::Tailcallelim,
+            // Stop (primary only)
+            #[cfg(not(feature = "secondary_passes"))]
+            28 => Pass::Stop,
+            // 28 is a gap when secondary_passes is enabled
+            // Secondary (29–70)
+            #[cfg(feature = "secondary_passes")]
+            29 => Pass::EarlyCse,
+            #[cfg(feature = "secondary_passes")]
+            30 => Pass::Bdce,
+            #[cfg(feature = "secondary_passes")]
+            31 => Pass::Argpromotion,
+            #[cfg(feature = "secondary_passes")]
+            32 => Pass::GlobalOpt,
+            #[cfg(feature = "secondary_passes")]
+            33 => Pass::CorrelatedPropagation,
+            #[cfg(feature = "secondary_passes")]
+            34 => Pass::AggressiveInstcombine,
+            #[cfg(feature = "secondary_passes")]
+            35 => Pass::ConstraintElimination,
+            #[cfg(feature = "secondary_passes")]
+            36 => Pass::VectorCombine,
+            #[cfg(feature = "secondary_passes")]
+            37 => Pass::Float2int,
+            #[cfg(feature = "secondary_passes")]
+            38 => Pass::CalledValuePropagation,
+            #[cfg(feature = "secondary_passes")]
+            39 => Pass::ConstMerge,
+            #[cfg(feature = "secondary_passes")]
+            40 => Pass::Deadargelim,
+            #[cfg(feature = "secondary_passes")]
+            41 => Pass::ElimAvailExtern,
+            #[cfg(feature = "secondary_passes")]
             42 => Pass::GlobalDce,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             43 => Pass::InferAttrs,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             44 => Pass::Ipsccp,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             45 => Pass::RelLookupTableConverter,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             46 => Pass::RpoFunctionAttrs,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             47 => Pass::AlwaysInline,
-            #[cfg(feature = "full_o3_passes")]
-            48 => Pass::CoroSplit,
-            #[cfg(feature = "full_o3_passes")]
-            49 => Pass::FunctionAttrs,
-            #[cfg(feature = "full_o3_passes")]
-            50 => Pass::OpenMpOpt,
-            #[cfg(feature = "full_o3_passes")]
-            51 => Pass::OpenMpOptCgscc,
-            #[cfg(feature = "full_o3_passes")]
-            52 => Pass::ExtraSimpleLoopUnswitchPasses,
-            #[cfg(feature = "full_o3_passes")]
-            53 => Pass::LoopInstsimplify,
-            #[cfg(feature = "full_o3_passes")]
-            54 => Pass::LoopSimplifycfg,
-            #[cfg(feature = "full_o3_passes")]
-            55 => Pass::LoopUnrollFull,
-            #[cfg(feature = "full_o3_passes")]
-            56 => Pass::AlignmentFromAssumptions,
-            #[cfg(feature = "full_o3_passes")]
-            57 => Pass::AnnotationRemarks,
-            #[cfg(feature = "full_o3_passes")]
-            58 => Pass::CallsiteSplitting,
-            #[cfg(feature = "full_o3_passes")]
-            59 => Pass::Chr,
-            #[cfg(feature = "full_o3_passes")]
-            60 => Pass::CoroElide,
-            #[cfg(feature = "full_o3_passes")]
-            61 => Pass::DivRemPairs,
-            #[cfg(feature = "full_o3_passes")]
-            62 => Pass::EeInstrument,
-            #[cfg(feature = "full_o3_passes")]
-            63 => Pass::InferAlignment,
-            #[cfg(feature = "full_o3_passes")]
-            64 => Pass::InjectTliMappings,
-            #[cfg(feature = "full_o3_passes")]
-            65 => Pass::InstSimplify,
-            #[cfg(feature = "full_o3_passes")]
-            66 => Pass::LibcallsShrinkwrap,
-            #[cfg(feature = "full_o3_passes")]
-            67 => Pass::LoopDistribute,
-            #[cfg(feature = "full_o3_passes")]
-            68 => Pass::LoopLoadElim,
-            #[cfg(feature = "full_o3_passes")]
-            69 => Pass::LoopSink,
-            #[cfg(feature = "full_o3_passes")]
-            70 => Pass::LowerConstantIntrinsics,
-            #[cfg(feature = "full_o3_passes")]
-            71 => Pass::LowerExpect,
-            #[cfg(feature = "full_o3_passes")]
-            72 => Pass::MldstMotion,
-            #[cfg(feature = "full_o3_passes")]
-            73 => Pass::MoveAutoInit,
-            #[cfg(feature = "full_o3_passes")]
-            74 => Pass::SpeculativeExecution,
-            #[cfg(feature = "full_o3_passes")]
-            75 => Pass::TransformWarning,
-            #[cfg(feature = "full_o3_passes")]
-            76 => Pass::Verify,
-            #[cfg(feature = "full_o3_passes")]
-            77 => Pass::LoopUnrollAndJam,
-            // Stop (extended)
-            #[cfg(feature = "full_o3_passes")]
-            78 => Pass::Stop,
+            #[cfg(feature = "secondary_passes")]
+            48 => Pass::FunctionAttrs,
+            #[cfg(feature = "secondary_passes")]
+            49 => Pass::ExtraSimpleLoopUnswitchPasses,
+            #[cfg(feature = "secondary_passes")]
+            50 => Pass::LoopInstsimplify,
+            #[cfg(feature = "secondary_passes")]
+            51 => Pass::LoopSimplifycfg,
+            #[cfg(feature = "secondary_passes")]
+            52 => Pass::LoopUnrollFull,
+            #[cfg(feature = "secondary_passes")]
+            53 => Pass::AlignmentFromAssumptions,
+            #[cfg(feature = "secondary_passes")]
+            54 => Pass::CallsiteSplitting,
+            #[cfg(feature = "secondary_passes")]
+            55 => Pass::Chr,
+            #[cfg(feature = "secondary_passes")]
+            56 => Pass::DivRemPairs,
+            #[cfg(feature = "secondary_passes")]
+            57 => Pass::InferAlignment,
+            #[cfg(feature = "secondary_passes")]
+            58 => Pass::InjectTliMappings,
+            #[cfg(feature = "secondary_passes")]
+            59 => Pass::InstSimplify,
+            #[cfg(feature = "secondary_passes")]
+            60 => Pass::LibcallsShrinkwrap,
+            #[cfg(feature = "secondary_passes")]
+            61 => Pass::LoopDistribute,
+            #[cfg(feature = "secondary_passes")]
+            62 => Pass::LoopLoadElim,
+            #[cfg(feature = "secondary_passes")]
+            63 => Pass::LoopSink,
+            #[cfg(feature = "secondary_passes")]
+            64 => Pass::LowerConstantIntrinsics,
+            #[cfg(feature = "secondary_passes")]
+            65 => Pass::LowerExpect,
+            #[cfg(feature = "secondary_passes")]
+            66 => Pass::MldstMotion,
+            #[cfg(feature = "secondary_passes")]
+            67 => Pass::MoveAutoInit,
+            #[cfg(feature = "secondary_passes")]
+            68 => Pass::SpeculativeExecution,
+            #[cfg(feature = "secondary_passes")]
+            69 => Pass::LoopUnrollAndJam,
+            #[cfg(feature = "secondary_passes")]
+            70 => Pass::SimplifycfgO3,
+            // Stop (secondary) — secondary block is 29–70, so Stop = 71
+            #[cfg(feature = "secondary_passes")]
+            71 => Pass::Stop,
             _ => panic!("Invalid pass index: {i}"),
         }
     }
 
     pub fn to_index(&self) -> usize {
         match self {
+            // Primary
             Pass::Instcombine => 0,
-            Pass::Inline => 1,
-            Pass::LoopUnroll => 2,
-            Pass::Licm => 3,
-            Pass::Gvn => 4,
-            Pass::Sroa => 5,
-            Pass::Mem2reg => 6,
-            Pass::Simplifycfg => 7,
-            Pass::Dse => 8,
-            Pass::Reassociate => 9,
-            Pass::JumpThreading => 10,
-            Pass::LoopRotate => 11,
-            Pass::Adce => 12,
-            Pass::EarlyCse => 13,
-            Pass::Tailcallelim => 14,
-            Pass::Sccp => 15,
-            Pass::Bdce => 16,
-            Pass::Memcpyopt => 17,
-            Pass::LoopDeletion => 18,
-            Pass::Argpromotion => 19,
-            Pass::GlobalOpt => 20,
-            Pass::IndVars => 21,
-            Pass::LoopVectorize => 22,
-            Pass::SlpVectorizer => 23,
-            Pass::CorrelatedPropagation => 24,
-            Pass::AggressiveInstcombine => 25,
-            Pass::ConstraintElimination => 26,
-            Pass::VectorCombine => 27,
-            Pass::Float2int => 28,
-            Pass::LoopIdiom => 29,
-            Pass::SimpleLoopUnswitch => 30,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::Annotation2Metadata => 32,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CalledValuePropagation => 33,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CgProfile => 34,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroAnnotationElide => 35,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::ConstMerge => 36,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroCleanup => 37,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroEarly => 38,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::Deadargelim => 39,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::ElimAvailExtern => 40,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::ForceAttrs => 41,
-            #[cfg(feature = "full_o3_passes")]
+            Pass::Mem2reg => 1,
+            Pass::Adce => 2,
+            Pass::Dse => 3,
+            Pass::Sccp => 4,
+            Pass::Reassociate => 5,
+            Pass::JumpThreading => 6,
+            Pass::Gvn => 7,
+            Pass::Sroa => 8,
+            Pass::SroaModifyCfg => 9,
+            Pass::Memcpyopt => 10,
+            Pass::Simplifycfg => 11,
+            Pass::Inline => 12,
+            Pass::EarlyCseMemssa => 13,
+            Pass::LoopRotate => 14,
+            Pass::LoopRotateHeaderDup => 15,
+            Pass::Licm => 16,
+            Pass::LicmAllowSpeculation => 17,
+            Pass::IndVars => 18,
+            Pass::LoopIdiom => 19,
+            Pass::LoopDeletion => 20,
+            Pass::SimpleLoopUnswitch => 21,
+            Pass::SimpleLoopUnswitchNontrivial => 22,
+            Pass::LoopUnroll => 23,
+            Pass::LoopUnrollO3 => 24,
+            Pass::LoopVectorize => 25,
+            Pass::SlpVectorizer => 26,
+            Pass::Tailcallelim => 27,
+            // Secondary
+            #[cfg(feature = "secondary_passes")]
+            Pass::EarlyCse => 29,
+            #[cfg(feature = "secondary_passes")]
+            Pass::Bdce => 30,
+            #[cfg(feature = "secondary_passes")]
+            Pass::Argpromotion => 31,
+            #[cfg(feature = "secondary_passes")]
+            Pass::GlobalOpt => 32,
+            #[cfg(feature = "secondary_passes")]
+            Pass::CorrelatedPropagation => 33,
+            #[cfg(feature = "secondary_passes")]
+            Pass::AggressiveInstcombine => 34,
+            #[cfg(feature = "secondary_passes")]
+            Pass::ConstraintElimination => 35,
+            #[cfg(feature = "secondary_passes")]
+            Pass::VectorCombine => 36,
+            #[cfg(feature = "secondary_passes")]
+            Pass::Float2int => 37,
+            #[cfg(feature = "secondary_passes")]
+            Pass::CalledValuePropagation => 38,
+            #[cfg(feature = "secondary_passes")]
+            Pass::ConstMerge => 39,
+            #[cfg(feature = "secondary_passes")]
+            Pass::Deadargelim => 40,
+            #[cfg(feature = "secondary_passes")]
+            Pass::ElimAvailExtern => 41,
+            #[cfg(feature = "secondary_passes")]
             Pass::GlobalDce => 42,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::InferAttrs => 43,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::Ipsccp => 44,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::RelLookupTableConverter => 45,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::RpoFunctionAttrs => 46,
-            #[cfg(feature = "full_o3_passes")]
+            #[cfg(feature = "secondary_passes")]
             Pass::AlwaysInline => 47,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroSplit => 48,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::FunctionAttrs => 49,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::OpenMpOpt => 50,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::OpenMpOptCgscc => 51,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::ExtraSimpleLoopUnswitchPasses => 52,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopInstsimplify => 53,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopSimplifycfg => 54,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopUnrollFull => 55,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::AlignmentFromAssumptions => 56,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::AnnotationRemarks => 57,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CallsiteSplitting => 58,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::Chr => 59,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::CoroElide => 60,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::DivRemPairs => 61,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::EeInstrument => 62,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::InferAlignment => 63,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::InjectTliMappings => 64,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::InstSimplify => 65,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LibcallsShrinkwrap => 66,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopDistribute => 67,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopLoadElim => 68,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopSink => 69,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LowerConstantIntrinsics => 70,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LowerExpect => 71,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::MldstMotion => 72,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::MoveAutoInit => 73,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::SpeculativeExecution => 74,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::TransformWarning => 75,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::Verify => 76,
-            #[cfg(feature = "full_o3_passes")]
-            Pass::LoopUnrollAndJam => 77,
+            #[cfg(feature = "secondary_passes")]
+            Pass::FunctionAttrs => 48,
+            #[cfg(feature = "secondary_passes")]
+            Pass::ExtraSimpleLoopUnswitchPasses => 49,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopInstsimplify => 50,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopSimplifycfg => 51,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopUnrollFull => 52,
+            #[cfg(feature = "secondary_passes")]
+            Pass::AlignmentFromAssumptions => 53,
+            #[cfg(feature = "secondary_passes")]
+            Pass::CallsiteSplitting => 54,
+            #[cfg(feature = "secondary_passes")]
+            Pass::Chr => 55,
+            #[cfg(feature = "secondary_passes")]
+            Pass::DivRemPairs => 56,
+            #[cfg(feature = "secondary_passes")]
+            Pass::InferAlignment => 57,
+            #[cfg(feature = "secondary_passes")]
+            Pass::InjectTliMappings => 58,
+            #[cfg(feature = "secondary_passes")]
+            Pass::InstSimplify => 59,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LibcallsShrinkwrap => 60,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopDistribute => 61,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopLoadElim => 62,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopSink => 63,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LowerConstantIntrinsics => 64,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LowerExpect => 65,
+            #[cfg(feature = "secondary_passes")]
+            Pass::MldstMotion => 66,
+            #[cfg(feature = "secondary_passes")]
+            Pass::MoveAutoInit => 67,
+            #[cfg(feature = "secondary_passes")]
+            Pass::SpeculativeExecution => 68,
+            #[cfg(feature = "secondary_passes")]
+            Pass::LoopUnrollAndJam => 69,
+            #[cfg(feature = "secondary_passes")]
+            Pass::SimplifycfgO3 => 70,
             Pass::Stop => {
-                #[cfg(not(feature = "full_o3_passes"))]
-                { 31 }
-                #[cfg(feature = "full_o3_passes")]
-                { 78 }
+                #[cfg(not(feature = "secondary_passes"))]
+                { 28 }
+                #[cfg(feature = "secondary_passes")]
+                { 71 }
             }
         }
     }
 
     /// Total number of actions (transforms + Stop).
     pub fn count() -> usize {
-        #[cfg(not(feature = "full_o3_passes"))]
-        { 32 }
-        #[cfg(feature = "full_o3_passes")]
-        { 79 }
+        #[cfg(not(feature = "secondary_passes"))]
+        { 29 }
+        #[cfg(feature = "secondary_passes")]
+        { 72 }
     }
 
     /// All transform passes (excludes Stop).
     pub fn all_transforms() -> &'static [Pass] {
-        #[cfg(not(feature = "full_o3_passes"))]
+        #[cfg(not(feature = "secondary_passes"))]
         {
             &[
                 Pass::Instcombine,
-                Pass::Inline,
-                Pass::LoopUnroll,
-                Pass::Licm,
-                Pass::Gvn,
-                Pass::Sroa,
                 Pass::Mem2reg,
-                Pass::Simplifycfg,
+                Pass::Adce,
                 Pass::Dse,
+                Pass::Sccp,
                 Pass::Reassociate,
                 Pass::JumpThreading,
-                Pass::LoopRotate,
-                Pass::Adce,
-                Pass::EarlyCse,
-                Pass::Tailcallelim,
-                Pass::Sccp,
-                Pass::Bdce,
+                Pass::Gvn,
+                Pass::Sroa,
+                Pass::SroaModifyCfg,
                 Pass::Memcpyopt,
-                Pass::LoopDeletion,
-                Pass::Argpromotion,
-                Pass::GlobalOpt,
+                Pass::Simplifycfg,
+                Pass::Inline,
+                Pass::EarlyCseMemssa,
+                Pass::LoopRotate,
+                Pass::LoopRotateHeaderDup,
+                Pass::Licm,
+                Pass::LicmAllowSpeculation,
                 Pass::IndVars,
+                Pass::LoopIdiom,
+                Pass::LoopDeletion,
+                Pass::SimpleLoopUnswitch,
+                Pass::SimpleLoopUnswitchNontrivial,
+                Pass::LoopUnroll,
+                Pass::LoopUnrollO3,
                 Pass::LoopVectorize,
                 Pass::SlpVectorizer,
-                Pass::CorrelatedPropagation,
-                Pass::AggressiveInstcombine,
-                Pass::ConstraintElimination,
-                Pass::VectorCombine,
-                Pass::Float2int,
-                Pass::LoopIdiom,
-                Pass::SimpleLoopUnswitch,
+                Pass::Tailcallelim,
             ]
         }
-        #[cfg(feature = "full_o3_passes")]
+        #[cfg(feature = "secondary_passes")]
         {
             &[
+                // Primary
                 Pass::Instcombine,
-                Pass::Inline,
-                Pass::LoopUnroll,
-                Pass::Licm,
-                Pass::Gvn,
-                Pass::Sroa,
                 Pass::Mem2reg,
-                Pass::Simplifycfg,
+                Pass::Adce,
                 Pass::Dse,
+                Pass::Sccp,
                 Pass::Reassociate,
                 Pass::JumpThreading,
-                Pass::LoopRotate,
-                Pass::Adce,
-                Pass::EarlyCse,
-                Pass::Tailcallelim,
-                Pass::Sccp,
-                Pass::Bdce,
+                Pass::Gvn,
+                Pass::Sroa,
+                Pass::SroaModifyCfg,
                 Pass::Memcpyopt,
-                Pass::LoopDeletion,
-                Pass::Argpromotion,
-                Pass::GlobalOpt,
+                Pass::Simplifycfg,
+                Pass::Inline,
+                Pass::EarlyCseMemssa,
+                Pass::LoopRotate,
+                Pass::LoopRotateHeaderDup,
+                Pass::Licm,
+                Pass::LicmAllowSpeculation,
                 Pass::IndVars,
+                Pass::LoopIdiom,
+                Pass::LoopDeletion,
+                Pass::SimpleLoopUnswitch,
+                Pass::SimpleLoopUnswitchNontrivial,
+                Pass::LoopUnroll,
+                Pass::LoopUnrollO3,
                 Pass::LoopVectorize,
                 Pass::SlpVectorizer,
+                Pass::Tailcallelim,
+                // Secondary
+                Pass::EarlyCse,
+                Pass::Bdce,
+                Pass::Argpromotion,
+                Pass::GlobalOpt,
                 Pass::CorrelatedPropagation,
                 Pass::AggressiveInstcombine,
                 Pass::ConstraintElimination,
                 Pass::VectorCombine,
                 Pass::Float2int,
-                Pass::LoopIdiom,
-                Pass::SimpleLoopUnswitch,
-                // Extended
-                Pass::Annotation2Metadata,
                 Pass::CalledValuePropagation,
-                Pass::CgProfile,
-                Pass::CoroAnnotationElide,
                 Pass::ConstMerge,
-                Pass::CoroCleanup,
-                Pass::CoroEarly,
                 Pass::Deadargelim,
                 Pass::ElimAvailExtern,
-                Pass::ForceAttrs,
                 Pass::GlobalDce,
                 Pass::InferAttrs,
                 Pass::Ipsccp,
                 Pass::RelLookupTableConverter,
                 Pass::RpoFunctionAttrs,
                 Pass::AlwaysInline,
-                Pass::CoroSplit,
                 Pass::FunctionAttrs,
-                Pass::OpenMpOpt,
-                Pass::OpenMpOptCgscc,
                 Pass::ExtraSimpleLoopUnswitchPasses,
                 Pass::LoopInstsimplify,
                 Pass::LoopSimplifycfg,
                 Pass::LoopUnrollFull,
                 Pass::AlignmentFromAssumptions,
-                Pass::AnnotationRemarks,
                 Pass::CallsiteSplitting,
                 Pass::Chr,
-                Pass::CoroElide,
                 Pass::DivRemPairs,
-                Pass::EeInstrument,
                 Pass::InferAlignment,
                 Pass::InjectTliMappings,
                 Pass::InstSimplify,
@@ -798,9 +850,8 @@ impl Pass {
                 Pass::MldstMotion,
                 Pass::MoveAutoInit,
                 Pass::SpeculativeExecution,
-                Pass::TransformWarning,
-                Pass::Verify,
                 Pass::LoopUnrollAndJam,
+                Pass::SimplifycfgO3,
             ]
         }
     }
@@ -838,27 +889,62 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_with_inline_and_licm() {
-        let passes = vec![Pass::Inline, Pass::Licm, Pass::Instcombine];
+    fn test_pipeline_with_licm_allow_speculation() {
+        let passes = vec![Pass::LicmAllowSpeculation, Pass::Instcombine];
         let pipeline = Pass::to_opt_pipeline(&passes);
         assert_eq!(
             pipeline,
-            "cgscc(inline),function(loop-mssa(licm),instcombine<no-verify-fixpoint>)"
+            "loop-mssa(licm<allowspeculation>),instcombine<no-verify-fixpoint>"
         );
     }
 
     #[test]
-    fn test_pipeline_with_argpromotion() {
-        let passes = vec![Pass::Argpromotion, Pass::Inline, Pass::Sroa];
+    fn test_licm_variants_coexist() {
+        let passes = vec![Pass::Licm, Pass::LicmAllowSpeculation];
         let pipeline = Pass::to_opt_pipeline(&passes);
-        assert_eq!(pipeline, "cgscc(argpromotion,inline),function(sroa)");
+        assert_eq!(pipeline, "loop-mssa(licm),loop-mssa(licm<allowspeculation>)");
     }
 
     #[test]
-    fn test_pipeline_with_loop_deletion() {
-        let passes = vec![Pass::LoopDeletion, Pass::LoopRotate];
+    fn test_sroa_variants() {
+        let passes = vec![Pass::Sroa, Pass::SroaModifyCfg];
         let pipeline = Pass::to_opt_pipeline(&passes);
-        assert_eq!(pipeline, "loop(loop-deletion),loop(loop-rotate)");
+        assert_eq!(pipeline, "sroa,sroa<modify-cfg>");
+    }
+
+    #[test]
+    fn test_pipeline_with_loop_rotate_variants() {
+        let passes = vec![Pass::LoopRotate, Pass::LoopRotateHeaderDup];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(
+            pipeline,
+            "loop(loop-rotate),loop(loop-rotate<header-duplication;no-prepare-for-lto>)"
+        );
+    }
+
+    #[test]
+    fn test_simple_loop_unswitch_variants() {
+        let passes = vec![Pass::SimpleLoopUnswitch, Pass::SimpleLoopUnswitchNontrivial];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(
+            pipeline,
+            "loop(simple-loop-unswitch),loop(simple-loop-unswitch<nontrivial;trivial>)"
+        );
+    }
+
+    #[test]
+    fn test_loop_unroll_variants() {
+        // Both are function-level adaptors, not wrapped in loop(...)
+        let passes = vec![Pass::LoopUnroll, Pass::LoopUnrollO3];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(pipeline, "loop-unroll,loop-unroll<O3>");
+    }
+
+    #[test]
+    fn test_early_cse_memssa() {
+        let passes = vec![Pass::EarlyCseMemssa, Pass::Gvn];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(pipeline, "early-cse<memssa>,gvn");
     }
 
     #[test]
@@ -869,94 +955,110 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_index() {
-        for i in 0..Pass::count() {
-            // index 31 is a gap (unused) when full_o3_passes is enabled
-            #[cfg(feature = "full_o3_passes")]
-            if i == 31 { continue; }
-            assert_eq!(Pass::from_index(i).to_index(), i);
-        }
-    }
-
-    #[test]
-    fn test_pipeline_with_globalopt() {
-        let passes = vec![Pass::GlobalOpt, Pass::Instcombine];
-        let pipeline = Pass::to_opt_pipeline(&passes);
-        assert_eq!(pipeline, "module(globalopt),function(instcombine<no-verify-fixpoint>)");
-    }
-
-    #[test]
-    fn test_pipeline_with_indvars() {
-        let passes = vec![Pass::IndVars, Pass::Instcombine];
-        let pipeline = Pass::to_opt_pipeline(&passes);
-        assert_eq!(pipeline, "loop(indvars),instcombine<no-verify-fixpoint>");
-    }
-
-    #[test]
     fn test_pipeline_mixed_levels() {
-        let passes = vec![Pass::GlobalOpt, Pass::Inline, Pass::IndVars, Pass::Instcombine];
+        let passes = vec![Pass::Inline, Pass::IndVars, Pass::Instcombine];
         let pipeline = Pass::to_opt_pipeline(&passes);
         assert_eq!(
             pipeline,
-            "module(globalopt),cgscc(inline),function(loop(indvars),instcombine<no-verify-fixpoint>)"
+            "cgscc(inline),function(loop(indvars),instcombine<no-verify-fixpoint>)"
         );
     }
 
     #[test]
     fn test_pipeline_with_vectorize() {
+        // LoopVectorize and SlpVectorizer are function-level, not loop(...)
         let passes = vec![Pass::LoopVectorize, Pass::SlpVectorizer, Pass::Sroa];
         let pipeline = Pass::to_opt_pipeline(&passes);
         assert_eq!(pipeline, "loop-vectorize,slp-vectorizer,sroa");
     }
 
     #[test]
-    fn test_pipeline_vectorize_with_inline() {
-        let passes = vec![Pass::Inline, Pass::LoopVectorize, Pass::SlpVectorizer];
-        let pipeline = Pass::to_opt_pipeline(&passes);
-        assert_eq!(
-            pipeline,
-            "cgscc(inline),function(loop-vectorize,slp-vectorizer)"
-        );
+    fn test_roundtrip_index() {
+        for i in 0..Pass::count() {
+            // index 28 is a gap (unused) when secondary_passes is enabled
+            #[cfg(feature = "secondary_passes")]
+            if i == 28 { continue; }
+            assert_eq!(Pass::from_index(i).to_index(), i, "roundtrip failed at index {i}");
+        }
     }
 
-    #[cfg(not(feature = "full_o3_passes"))]
+    #[cfg(not(feature = "secondary_passes"))]
     #[test]
-    fn test_base_count() {
-        assert_eq!(Pass::count(), 32);
-        assert_eq!(Pass::Stop.to_index(), 31);
-        assert_eq!(Pass::all_transforms().len(), 31);
+    fn test_primary_count() {
+        assert_eq!(Pass::count(), 29);
+        assert_eq!(Pass::Stop.to_index(), 28);
+        assert_eq!(Pass::all_transforms().len(), 28);
     }
 
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     #[test]
-    fn test_extended_count() {
-        assert_eq!(Pass::count(), 79);
-        assert_eq!(Pass::Stop.to_index(), 78);
-        assert_eq!(Pass::all_transforms().len(), 77);
+    fn test_secondary_count() {
+        assert_eq!(Pass::count(), 72);
+        assert_eq!(Pass::Stop.to_index(), 71);
+        // 28 primary + 42 secondary = 70 transforms
+        assert_eq!(Pass::all_transforms().len(), 70);
     }
 
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     #[test]
-    fn test_extended_module_passes() {
+    fn test_secondary_module_passes() {
         let passes = vec![Pass::GlobalDce, Pass::ConstMerge, Pass::Ipsccp];
         let pipeline = Pass::to_opt_pipeline(&passes);
         assert_eq!(pipeline, "module(globaldce,constmerge,ipsccp)");
     }
 
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     #[test]
-    fn test_extended_cgscc_passes() {
-        // always-inline is module-level; function-attrs is cgscc-level
+    fn test_secondary_cgscc_passes() {
         let passes = vec![Pass::AlwaysInline, Pass::FunctionAttrs, Pass::Sroa];
         let pipeline = Pass::to_opt_pipeline(&passes);
         assert_eq!(pipeline, "module(always-inline),cgscc(function-attrs),function(sroa)");
     }
 
-    #[cfg(feature = "full_o3_passes")]
+    #[cfg(feature = "secondary_passes")]
     #[test]
-    fn test_extended_loop_passes() {
+    fn test_secondary_argpromotion() {
+        let passes = vec![Pass::Argpromotion, Pass::Inline, Pass::Sroa];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(pipeline, "cgscc(argpromotion,inline),function(sroa)");
+    }
+
+    #[cfg(feature = "secondary_passes")]
+    #[test]
+    fn test_secondary_loop_passes() {
         let passes = vec![Pass::LoopInstsimplify, Pass::LoopUnrollFull];
         let pipeline = Pass::to_opt_pipeline(&passes);
         assert_eq!(pipeline, "loop(loop-instsimplify),loop(loop-unroll-full)");
+    }
+
+    #[cfg(feature = "secondary_passes")]
+    #[test]
+    fn test_simplifycfg_o3() {
+        let passes = vec![Pass::SimplifycfgO3];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert!(pipeline.starts_with("simplifycfg<bonus-inst-threshold=1;"));
+        assert!(pipeline.contains("speculate-blocks"));
+        assert!(pipeline.contains("simplify-cond-branch"));
+        assert!(pipeline.contains("switch-range-to-icmp"));
+    }
+
+    #[cfg(feature = "secondary_passes")]
+    #[test]
+    fn test_secondary_globalopt_is_module() {
+        let passes = vec![Pass::GlobalOpt, Pass::Instcombine];
+        let pipeline = Pass::to_opt_pipeline(&passes);
+        assert_eq!(
+            pipeline,
+            "module(globalopt),function(instcombine<no-verify-fixpoint>)"
+        );
+    }
+
+    #[cfg(feature = "secondary_passes")]
+    #[test]
+    fn test_gap_index_28_not_valid() {
+        assert_eq!(Pass::SlpVectorizer.to_index(), 26);
+        assert_eq!(Pass::Tailcallelim.to_index(), 27);
+        assert_eq!(Pass::EarlyCse.to_index(), 29); // 28 is the gap
+        assert_eq!(Pass::Stop.to_index(), 71);
     }
 }
