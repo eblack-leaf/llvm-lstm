@@ -20,5 +20,3 @@ rand = "0.8"
 rayon = "1"
 toml = "0.8"
 anyhow = "1"
-bhtsne = { version = "0.5", default-features = false }
-plotters = { version = "0.3", default-features = false, features = ["svg_backend", "all_series", "all_elements", "full_palette"] }

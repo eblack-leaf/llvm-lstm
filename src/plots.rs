@@ -1,20 +1,18 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Result;
-use plotters::prelude::*;
 
 // ---------------------------------------------------------------------------
-// Public entry point — called from eda after analysis
+// Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn generate_all(output_dir: &Path, report: &PlotData) -> Result<()> {
+pub fn generate_all(output_dir: &Path, data: &PlotData) -> Result<()> {
     std::fs::create_dir_all(output_dir)?;
-
-    ceiling_chart(output_dir, &report.ceiling)?;
-    enrichment_chart(output_dir, &report.enrichment)?;
-    distribution_chart(output_dir, &report.distributions)?;
-    ir_heatmap(output_dir, &report.ir_features)?;
-
+    ceiling_chart(output_dir, &data.ceiling)?;
+    enrichment_chart(output_dir, &data.enrichment)?;
+    distribution_chart(output_dir, &data.distributions)?;
+    ir_heatmap(output_dir, &data.ir_features)?;
     eprintln!("Wrote 4 SVG plots to {}", output_dir.display());
     Ok(())
 }
@@ -30,15 +28,12 @@ pub struct PlotData {
     pub ir_features: Vec<FeatureRow>,
 }
 
-/// One benchmark's z-score normalized IR features for the heatmap
 pub struct FeatureRow {
     pub name: String,
     pub cluster: usize,
-    /// z-score normalized values, one per feature dimension
     pub values: Vec<f64>,
 }
 
-/// Feature dimension names (matches IrFeatures::to_vec() order — all 18 dimensions)
 pub const FEATURE_NAMES: &[&str] = &[
     "add", "mul", "load", "store", "br", "call", "phi",
     "alloca", "gep", "icmp", "fcmp", "ret", "other",
@@ -69,520 +64,326 @@ pub struct DistPoint {
 }
 
 // ---------------------------------------------------------------------------
-// Constants
+// SVG helpers — hex colors go through hex() to avoid # in format!() macros
 // ---------------------------------------------------------------------------
 
-const TITLE_FONT: u32 = 22;
-const LABEL_FONT: u32 = 14;
-const AXIS_FONT: u32 = 13;
-const LEGEND_FONT: u32 = 14;
-const TICK_FONT: u32 = 12;
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Returns e.g. "#1f77b4" — kept out of format!() raw strings where # is
+/// parsed as a Rust 2021 prefix literal.
+fn hex(rgb: &str) -> String {
+    format!("#{rgb}")
+}
+
+fn svg_header(buf: &mut String, width: u32, height: u32) {
+    let _ = write!(buf,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" font-family="sans-serif">"#,
+    );
+    let _ = write!(buf, r#"<rect width="{width}" height="{height}" fill="{c}"/>"#, c = hex("fff"));
+}
+
+fn svg_footer(buf: &mut String) {
+    buf.push_str("</svg>");
+}
+
+/// Pick a "nice" tick step for an axis range.
+fn nice_step(range: f64, target_ticks: usize) -> f64 {
+    let raw = range / target_ticks as f64;
+    let mag = 10.0f64.powf(raw.log10().floor());
+    let norm = raw / mag;
+    let nice = if norm < 1.5 { 1.0 } else if norm < 3.5 { 2.0 } else if norm < 7.5 { 5.0 } else { 10.0 };
+    nice * mag
+}
+
+/// Map z-score to "r,g,b" for use in fill="rgb(…)".
+fn zscore_rgb(z: f64) -> String {
+    let z = z.clamp(-3.0, 3.0);
+    let (r, g, b) = if z >= 0.0 {
+        let t = z / 3.0;
+        (255, (255.0 * (1.0 - t * 0.7)) as u8, (255.0 * (1.0 - t * 0.85)) as u8)
+    } else {
+        let t = -z / 3.0;
+        ((255.0 * (1.0 - t * 0.85)) as u8, (255.0 * (1.0 - t * 0.55)) as u8, 255)
+    };
+    format!("rgb({r},{g},{b})")
+}
 
 // ---------------------------------------------------------------------------
-// 1. Ceiling gap chart (horizontal bars)
-//    Shows: how close the best random sequence got to O3 and O2
-//    Negative = faster than baseline (good), Positive = slower
+// 1. Ceiling gap chart
 // ---------------------------------------------------------------------------
 
-fn ceiling_chart(dir: &Path, points: &[CeilingPoint]) -> Result<()> {
-    if points.is_empty() {
-        return Ok(());
+fn ceiling_chart(dir: &Path, pts: &[CeilingPoint]) -> Result<()> {
+    if pts.is_empty() { return Ok(()); }
+    let n = pts.len();
+    let row_h = 26.0_f64;
+    let left = 200.0_f64;
+    let top = 50.0_f64;
+    let plot_w = 700.0_f64;
+    let width = (left + plot_w + 30.0) as u32;
+    let height = (top + n as f64 * row_h + 50.0) as u32;
+
+    let x_min = pts.iter().map(|p| p.gap_vs_o3.min(p.gap_vs_o2)).fold(f64::MAX, f64::min).min(-5.0) - 5.0;
+    let x_max = pts.iter().map(|p| p.gap_vs_o3.max(p.gap_vs_o2)).fold(f64::MIN, f64::max).max(5.0) + 15.0;
+    let x_range = x_max - x_min;
+    let mx = |v: f64| left + (v - x_min) / x_range * plot_w;
+    let my = |i: usize| top + (i as f64 + 0.5) * row_h;
+
+    let mut s = String::with_capacity(8192);
+    svg_header(&mut s, width, height);
+
+    let _ = write!(s, r#"<text x="{:.0}" y="30" text-anchor="middle" font-size="18" font-weight="bold">Best Random Search vs Baselines (% gap)</text>"#, width as f64 / 2.0);
+
+    // zero line
+    let bot = top + n as f64 * row_h;
+    let _ = write!(s, r#"<line x1="{:.1}" y1="{top}" x2="{:.1}" y2="{bot:.1}" stroke="{c}" stroke-width="1" stroke-dasharray="4,3"/>"#, mx(0.0), mx(0.0), c = hex("888"));
+
+    // x ticks
+    let step = nice_step(x_range, 8);
+    let mut t = (x_min / step).ceil() * step;
+    while t <= x_max {
+        let tx = mx(t);
+        let _ = write!(s, r#"<line x1="{tx:.1}" y1="{bot:.1}" x2="{tx:.1}" y2="{:.1}" stroke="{c}" stroke-width="1"/>"#, bot + 5.0, c = hex("ccc"));
+        let _ = write!(s, r#"<text x="{tx:.1}" y="{:.1}" text-anchor="middle" font-size="11">{t:.0}</text>"#, bot + 18.0);
+        t += step;
     }
-    let path = dir.join("ceiling_gaps.svg");
-    let n = points.len();
-    let row_height = 28u32;
-    let height = (n as u32 * row_height + 120).max(500).min(1400);
-    let root = SVGBackend::new(&path, (1000, height)).into_drawing_area();
-    root.fill(&WHITE)?;
+    let _ = write!(s, r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-size="12" fill="{c}">% gap (negative = beats baseline)</text>"#, left + plot_w / 2.0, bot + 38.0, c = hex("555"));
 
-    let x_min = points
-        .iter()
-        .map(|p| p.gap_vs_o3.min(p.gap_vs_o2))
-        .fold(f64::MAX, f64::min)
-        .min(-5.0)
-        .max(-60.0)
-        - 5.0;
-    let x_max = points
-        .iter()
-        .map(|p| p.gap_vs_o3.max(p.gap_vs_o2))
-        .fold(f64::MIN, f64::max)
-        .max(5.0)
-        .min(200.0)
-        + 15.0;
+    let green = hex("2ca02c");
+    let blue = hex("1f77b4");
+    let orange = hex("ff8c00");
 
-    let y_range = -0.5..(n as f64 + 0.5);
+    for (i, p) in pts.iter().enumerate() {
+        let cy = my(i);
+        let bh = row_h * 0.65;
+        let bx1 = mx(0.0);
+        let bx2 = mx(p.gap_vs_o3.clamp(x_min, x_max));
+        let (bl, br) = if bx1 < bx2 { (bx1, bx2) } else { (bx2, bx1) };
+        let col = if p.gap_vs_o3 < 0.0 { &green } else { &blue };
+        let _ = write!(s, r#"<rect x="{bl:.1}" y="{:.1}" width="{:.1}" height="{bh:.1}" fill="{col}" opacity="0.8"/>"#, cy - bh / 2.0, br - bl);
 
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "Best Random Search vs Baselines (% gap)",
-            ("sans-serif", TITLE_FONT),
-        )
-        .margin(15)
-        .margin_right(30)
-        .x_label_area_size(45)
-        .y_label_area_size(200)
-        .build_cartesian_2d(x_min..x_max, y_range)?;
+        let dx = mx(p.gap_vs_o2.clamp(x_min, x_max));
+        let ds = 5.0;
+        let _ = write!(s, r#"<polygon points="{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}" fill="{orange}"/>"#, dx, cy - ds, dx + ds, cy, dx, cy + ds, dx - ds, cy);
 
-    chart
-        .configure_mesh()
-        .disable_y_mesh()
-        .x_label_style(("sans-serif", TICK_FONT))
-        .y_label_style(("sans-serif", LABEL_FONT))
-        .y_labels(n)
-        .y_label_formatter(&|y| {
-            let idx = y.round() as usize;
-            let rev_idx = if idx < n { n - 1 - idx } else { return String::new() };
-            points
-                .get(rev_idx)
-                .map(|p| p.name.clone())
-                .unwrap_or_default()
-        })
-        .x_desc("% gap (negative = beats baseline)")
-        .x_label_offset(0)
-        .axis_desc_style(("sans-serif", AXIS_FONT))
-        .draw()?;
-
-    // Zero line (break-even)
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(0.0, -0.5), (0.0, n as f64 + 0.5)],
-        BLACK.stroke_width(1),
-    )))?;
-
-    let blue = RGBColor(31, 119, 180);
-    let green = RGBColor(44, 160, 44);
-    let orange = RGBColor(255, 140, 0);
-
-    for (i, p) in points.iter().enumerate() {
-        let y = (n - 1 - i) as f64;
-        let gap_o3 = p.gap_vs_o3.clamp(x_min, x_max);
-        let gap_o2 = p.gap_vs_o2.clamp(x_min, x_max);
-
-        let bar_color = if p.gap_vs_o3 < 0.0 { green } else { blue };
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(0.0, y - 0.35), (gap_o3, y + 0.35)],
-            bar_color.mix(0.8).filled(),
-        )))?;
-
-        // vs O2 diamond marker
-        let dy = 0.15;
-        chart.draw_series(std::iter::once(Polygon::new(
-            vec![
-                (gap_o2, y + dy),
-                (gap_o2 + (x_max - x_min) * 0.008, y),
-                (gap_o2, y - dy),
-                (gap_o2 - (x_max - x_min) * 0.008, y),
-            ],
-            orange.filled(),
-        )))?;
+        let _ = write!(s, r#"<text x="{:.1}" y="{cy:.1}" text-anchor="end" font-size="12" dominant-baseline="middle">{}</text>"#, left - 8.0, xml_escape(&p.name));
     }
 
-    // Legend
-    chart
-        .draw_series(std::iter::once(Rectangle::new(
-            [(x_max, 0.0), (x_max, 0.0)],
-            blue.filled(),
-        )))?
-        .label("Gap vs O3 (green = beats)")
-        .legend(move |(x, y)| {
-            Rectangle::new([(x, y - 5), (x + 16, y + 5)], blue.mix(0.8).filled())
-        });
+    // legend
+    let lx = left + plot_w - 200.0;
+    let ly = top + 10.0;
+    let _ = write!(s, r#"<rect x="{lx:.0}" y="{ly:.0}" width="195" height="50" fill="{c1}" stroke="{c2}" rx="4"/>"#, c1 = hex("fff"), c2 = hex("ccc"));
+    let _ = write!(s, r#"<rect x="{:.0}" y="{:.0}" width="14" height="10" fill="{blue}" opacity="0.8"/>"#, lx + 8.0, ly + 8.0);
+    let _ = write!(s, r#"<text x="{:.0}" y="{:.0}" font-size="11">Gap vs O3 (green = beats)</text>"#, lx + 28.0, ly + 17.0);
+    let _ = write!(s, r#"<polygon points="{:.0},{:.0} {:.0},{:.0} {:.0},{:.0} {:.0},{:.0}" fill="{orange}"/>"#, lx + 15.0, ly + 26.0, lx + 20.0, ly + 31.0, lx + 15.0, ly + 36.0, lx + 10.0, ly + 31.0);
+    let _ = write!(s, r#"<text x="{:.0}" y="{:.0}" font-size="11">Gap vs O2</text>"#, lx + 28.0, ly + 35.0);
 
-    chart
-        .draw_series(std::iter::once(Rectangle::new(
-            [(x_max, 0.0), (x_max, 0.0)],
-            orange.filled(),
-        )))?
-        .label("Gap vs O2")
-        .legend(move |(x, y)| {
-            Polygon::new(
-                vec![
-                    (x + 8, y - 5),
-                    (x + 14, y),
-                    (x + 8, y + 5),
-                    (x + 2, y),
-                ],
-                orange.filled(),
-            )
-        });
-
-    chart
-        .configure_series_labels()
-        .position(SeriesLabelPosition::LowerRight)
-        .margin(15)
-        .label_font(("sans-serif", LEGEND_FONT))
-        .background_style(WHITE.mix(0.9))
-        .border_style(BLACK.mix(0.4))
-        .draw()?;
-
-    root.present()?;
+    svg_footer(&mut s);
+    std::fs::write(dir.join("ceiling_gaps.svg"), &s)?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // 2. Pass enrichment chart
-//    How often each pass appears in top-10% sequences vs overall.
-//    Ratio > 1.0 means overrepresented in good sequences.
 // ---------------------------------------------------------------------------
 
-fn enrichment_chart(dir: &Path, points: &[EnrichPoint]) -> Result<()> {
-    if points.is_empty() {
-        return Ok(());
+fn enrichment_chart(dir: &Path, pts: &[EnrichPoint]) -> Result<()> {
+    if pts.is_empty() { return Ok(()); }
+    let n = pts.len();
+    let row_h = 24.0_f64;
+    let left = 220.0_f64;
+    let top = 50.0_f64;
+    let plot_w = 500.0_f64;
+    let width = (left + plot_w + 30.0) as u32;
+    let height = (top + n as f64 * row_h + 50.0) as u32;
+    let x_max = pts.iter().map(|p| p.enrichment).fold(0.0f64, f64::max) + 0.3;
+    let mx = |v: f64| left + v / x_max * plot_w;
+    let my = |i: usize| top + (i as f64 + 0.5) * row_h;
+
+    let mut s = String::with_capacity(4096);
+    svg_header(&mut s, width, height);
+
+    let _ = write!(s, r#"<text x="{:.0}" y="30" text-anchor="middle" font-size="18" font-weight="bold">Pass Enrichment in Top-10% Sequences</text>"#, width as f64 / 2.0);
+
+    let bot = top + n as f64 * row_h;
+    let _ = write!(s, r#"<line x1="{:.1}" y1="{top}" x2="{:.1}" y2="{bot:.1}" stroke="{c}" stroke-width="1" stroke-dasharray="4,3"/>"#, mx(1.0), mx(1.0), c = hex("888"));
+
+    let step = nice_step(x_max, 6);
+    let mut t = 0.0;
+    while t <= x_max {
+        let tx = mx(t);
+        let _ = write!(s, r#"<line x1="{tx:.1}" y1="{bot:.1}" x2="{tx:.1}" y2="{:.1}" stroke="{c}" stroke-width="1"/>"#, bot + 5.0, c = hex("ccc"));
+        let _ = write!(s, r#"<text x="{tx:.1}" y="{:.1}" text-anchor="middle" font-size="11">{t:.1}x</text>"#, bot + 18.0);
+        t += step;
     }
-    let path = dir.join("pass_enrichment.svg");
-    let n = points.len();
-    let row_height = 26u32;
-    let height = (n as u32 * row_height + 120).max(500).min(1200);
-    let root = SVGBackend::new(&path, (900, height)).into_drawing_area();
-    root.fill(&WHITE)?;
+    let _ = write!(s, r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-size="12" fill="{c}">&gt;1.0 = overrepresented in good sequences</text>"#, left + plot_w / 2.0, bot + 38.0, c = hex("555"));
 
-    let x_max = points
-        .iter()
-        .map(|p| p.enrichment)
-        .fold(0.0f64, f64::max)
-        + 0.3;
-    let y_range = -0.5..(n as f64 + 0.5);
-
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "Pass Enrichment in Top-10% Sequences",
-            ("sans-serif", TITLE_FONT),
-        )
-        .margin(15)
-        .margin_right(30)
-        .x_label_area_size(45)
-        .y_label_area_size(200)
-        .build_cartesian_2d(0.0..x_max, y_range)?;
-
-    chart
-        .configure_mesh()
-        .disable_y_mesh()
-        .x_label_style(("sans-serif", TICK_FONT))
-        .y_label_style(("sans-serif", LABEL_FONT))
-        .y_labels(n)
-        .y_label_formatter(&|y| {
-            let idx = y.round() as usize;
-            let rev_idx = if idx < n { n - 1 - idx } else { return String::new() };
-            points
-                .get(rev_idx)
-                .map(|p| format!("{} ({:.2}x)", p.name, p.enrichment))
-                .unwrap_or_default()
-        })
-        .x_desc("Enrichment ratio (>1.0 = overrepresented in good sequences)")
-        .axis_desc_style(("sans-serif", AXIS_FONT))
-        .draw()?;
-
-    // 1.0x reference line
-    chart.draw_series(std::iter::once(PathElement::new(
-        vec![(1.0, -0.5), (1.0, n as f64 + 0.5)],
-        BLACK.stroke_width(1),
-    )))?;
-
-    let green = RGBColor(44, 160, 44);
-    let gray = RGBColor(160, 160, 160);
-
-    for (i, p) in points.iter().enumerate() {
-        let y = (n - 1 - i) as f64;
-        let color = if p.enrichment > 1.2 { green } else { gray };
-
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(0.0, y - 0.38), (p.enrichment, y + 0.38)],
-            color.mix(0.7).filled(),
-        )))?;
+    let green = hex("2ca02c");
+    let gray = hex("a0a0a0");
+    for (i, p) in pts.iter().enumerate() {
+        let cy = my(i);
+        let bh = row_h * 0.7;
+        let bw = mx(p.enrichment) - left;
+        let col = if p.enrichment > 1.2 { &green } else { &gray };
+        let _ = write!(s, r#"<rect x="{left:.1}" y="{:.1}" width="{bw:.1}" height="{bh:.1}" fill="{col}" opacity="0.7"/>"#, cy - bh / 2.0);
+        let _ = write!(s, r#"<text x="{:.1}" y="{cy:.1}" text-anchor="end" font-size="11" dominant-baseline="middle">{} ({:.2}x)</text>"#, left - 8.0, xml_escape(&p.name), p.enrichment);
     }
 
-    root.present()?;
+    svg_footer(&mut s);
+    std::fs::write(dir.join("pass_enrichment.svg"), &s)?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // 3. Distribution chart (box-plot style)
-//    Each benchmark: box = P25-P75, whiskers = P10-P90, line = median
-//    Red line = O3 baseline time
 // ---------------------------------------------------------------------------
 
-fn distribution_chart(dir: &Path, points: &[DistPoint]) -> Result<()> {
-    if points.is_empty() {
-        return Ok(());
+fn distribution_chart(dir: &Path, pts: &[DistPoint]) -> Result<()> {
+    if pts.is_empty() { return Ok(()); }
+    let n = pts.len();
+    let row_h = 26.0_f64;
+    let left = 200.0_f64;
+    let top = 50.0_f64;
+    let plot_w = 700.0_f64;
+    let width = (left + plot_w + 30.0) as u32;
+    let height = (top + n as f64 * row_h + 50.0) as u32;
+    let x_max = pts.iter().flat_map(|p| [p.p90, p.o3]).fold(0.0f64, f64::max) * 1.15;
+    let mx = |v: f64| left + v / x_max * plot_w;
+    let my = |i: usize| top + (i as f64 + 0.5) * row_h;
+
+    let mut s = String::with_capacity(8192);
+    svg_header(&mut s, width, height);
+
+    let _ = write!(s, r#"<text x="{:.0}" y="30" text-anchor="middle" font-size="18" font-weight="bold">Random Search Time Distributions vs O3</text>"#, width as f64 / 2.0);
+
+    let bot = top + n as f64 * row_h;
+    let step = nice_step(x_max, 8);
+    let mut t = 0.0;
+    let eee = hex("eee");
+    while t <= x_max {
+        let tx = mx(t);
+        let _ = write!(s, r#"<line x1="{tx:.1}" y1="{top}" x2="{tx:.1}" y2="{bot:.1}" stroke="{eee}" stroke-width="1"/>"#);
+        let _ = write!(s, r#"<text x="{tx:.1}" y="{:.1}" text-anchor="middle" font-size="11">{t:.1}</text>"#, bot + 18.0);
+        t += step;
     }
-    let path = dir.join("distributions.svg");
-    let n = points.len();
-    let row_height = 28u32;
-    let height = (n as u32 * row_height + 120).max(500).min(1400);
-    let root = SVGBackend::new(&path, (1000, height)).into_drawing_area();
-    root.fill(&WHITE)?;
+    let _ = write!(s, r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-size="12" fill="{c}">Time (ms)</text>"#, left + plot_w / 2.0, bot + 38.0, c = hex("555"));
 
-    let x_max = points
-        .iter()
-        .flat_map(|p| [p.p90, p.o3])
-        .fold(0.0f64, f64::max)
-        * 1.15;
-    let y_range = -0.5..(n as f64 + 0.5);
+    let blue = hex("1f77b4");
+    let red = hex("d62728");
 
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "Random Search Time Distributions vs O3",
-            ("sans-serif", TITLE_FONT),
-        )
-        .margin(15)
-        .margin_right(30)
-        .x_label_area_size(45)
-        .y_label_area_size(200)
-        .build_cartesian_2d(0.0..x_max, y_range)?;
+    for (i, p) in pts.iter().enumerate() {
+        let cy = my(i);
+        let bh = row_h * 0.55;
 
-    chart
-        .configure_mesh()
-        .disable_y_mesh()
-        .x_label_style(("sans-serif", TICK_FONT))
-        .y_label_style(("sans-serif", LABEL_FONT))
-        .y_labels(n)
-        .y_label_formatter(&|y| {
-            let idx = y.round() as usize;
-            let rev_idx = if idx < n { n - 1 - idx } else { return String::new() };
-            points.get(rev_idx).map(|p| p.name.clone()).unwrap_or_default()
-        })
-        .x_desc("Time (ms)")
-        .axis_desc_style(("sans-serif", AXIS_FONT))
-        .draw()?;
+        // whisker P10–P90
+        let _ = write!(s, r#"<line x1="{:.1}" y1="{cy:.1}" x2="{:.1}" y2="{cy:.1}" stroke="{blue}" stroke-width="1"/>"#, mx(p.p10), mx(p.p90));
+        for &v in &[p.p10, p.p90] {
+            let vx = mx(v);
+            let _ = write!(s, r#"<line x1="{vx:.1}" y1="{:.1}" x2="{vx:.1}" y2="{:.1}" stroke="{blue}" stroke-width="1"/>"#, cy - 4.0, cy + 4.0);
+        }
 
-    let blue = RGBColor(31, 119, 180);
-    let red = RGBColor(214, 39, 40);
+        // box P25–P75
+        let bx1 = mx(p.p25);
+        let bx2 = mx(p.p75);
+        let _ = write!(s, r#"<rect x="{bx1:.1}" y="{:.1}" width="{:.1}" height="{bh:.1}" fill="{blue}" fill-opacity="0.2" stroke="{blue}" stroke-width="1"/>"#, cy - bh / 2.0, bx2 - bx1);
 
-    for (i, p) in points.iter().enumerate() {
-        let y = (n - 1 - i) as f64;
+        // median
+        let mmx = mx(p.median);
+        let _ = write!(s, r#"<line x1="{mmx:.1}" y1="{:.1}" x2="{mmx:.1}" y2="{:.1}" stroke="{blue}" stroke-width="3"/>"#, cy - bh / 2.0, cy + bh / 2.0);
 
-        // P10-P90 whisker line
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(p.p10, y), (p.p90, y)],
-            blue.stroke_width(1),
-        )))?;
+        // O3 diamond
+        let ox = mx(p.o3);
+        let ds = 5.0;
+        let _ = write!(s, r#"<polygon points="{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} {:.1},{:.1}" fill="{red}"/>"#, ox, cy - ds, ox + ds, cy, ox, cy + ds, ox - ds, cy);
 
-        // Whisker end caps
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(p.p10, y - 0.15), (p.p10, y + 0.15)],
-            blue.stroke_width(1),
-        )))?;
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(p.p90, y - 0.15), (p.p90, y + 0.15)],
-            blue.stroke_width(1),
-        )))?;
-
-        // P25-P75 box
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(p.p25, y - 0.32), (p.p75, y + 0.32)],
-            blue.mix(0.25).filled(),
-        )))?;
-        chart.draw_series(std::iter::once(Rectangle::new(
-            [(p.p25, y - 0.32), (p.p75, y + 0.32)],
-            blue.stroke_width(1),
-        )))?;
-
-        // Median line (bold blue)
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(p.median, y - 0.32), (p.median, y + 0.32)],
-            blue.stroke_width(3),
-        )))?;
-
-        // O3 baseline — red vertical line with diamond
-        chart.draw_series(std::iter::once(PathElement::new(
-            vec![(p.o3, y - 0.38), (p.o3, y + 0.38)],
-            red.stroke_width(2),
-        )))?;
-        let dx = x_max * 0.005;
-        let dy = 0.12;
-        chart.draw_series(std::iter::once(Polygon::new(
-            vec![
-                (p.o3, y + dy),
-                (p.o3 + dx, y),
-                (p.o3, y - dy),
-                (p.o3 - dx, y),
-            ],
-            red.filled(),
-        )))?;
+        let _ = write!(s, r#"<text x="{:.1}" y="{cy:.1}" text-anchor="end" font-size="12" dominant-baseline="middle">{}</text>"#, left - 8.0, xml_escape(&p.name));
     }
 
-    // Legend
-    chart
-        .draw_series(std::iter::once(Rectangle::new(
-            [(x_max, 0.0), (x_max, 0.0)],
-            blue.mix(0.25).filled(),
-        )))?
-        .label("P25-P75 box (median = bold line)")
-        .legend(move |(x, y)| {
-            Rectangle::new([(x, y - 5), (x + 16, y + 5)], blue.mix(0.25).filled())
-        });
+    // legend
+    let lx = left + plot_w - 250.0;
+    let ly = top + 10.0;
+    let _ = write!(s, r#"<rect x="{lx:.0}" y="{ly:.0}" width="245" height="50" fill="{c1}" stroke="{c2}" rx="4"/>"#, c1 = hex("fff"), c2 = hex("ccc"));
+    let _ = write!(s, r#"<rect x="{:.0}" y="{:.0}" width="14" height="10" fill="{blue}" fill-opacity="0.2" stroke="{blue}"/>"#, lx + 8.0, ly + 8.0);
+    let _ = write!(s, r#"<text x="{:.0}" y="{:.0}" font-size="11">P25-P75 box (bold = median)</text>"#, lx + 28.0, ly + 17.0);
+    let _ = write!(s, r#"<polygon points="{:.0},{:.0} {:.0},{:.0} {:.0},{:.0} {:.0},{:.0}" fill="{red}"/>"#, lx + 15.0, ly + 26.0, lx + 20.0, ly + 31.0, lx + 15.0, ly + 36.0, lx + 10.0, ly + 31.0);
+    let _ = write!(s, r#"<text x="{:.0}" y="{:.0}" font-size="11">O3 baseline</text>"#, lx + 28.0, ly + 35.0);
 
-    chart
-        .draw_series(std::iter::once(Rectangle::new(
-            [(x_max, 0.0), (x_max, 0.0)],
-            red.filled(),
-        )))?
-        .label("O3 baseline")
-        .legend(move |(x, y)| {
-            PathElement::new(vec![(x + 3, y - 6), (x + 3, y + 6)], red.stroke_width(2))
-        });
-
-    chart
-        .configure_series_labels()
-        .position(SeriesLabelPosition::UpperRight)
-        .margin(15)
-        .label_font(("sans-serif", LEGEND_FONT))
-        .background_style(WHITE.mix(0.9))
-        .border_style(BLACK.mix(0.4))
-        .draw()?;
-
-    root.present()?;
+    svg_footer(&mut s);
+    std::fs::write(dir.join("distributions.svg"), &s)?;
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // 4. IR feature heatmap
-//    Rows = benchmarks (grouped by cluster), Columns = 18 IR features
-//    Color = z-score intensity (blue = low, white = avg, red = high)
 // ---------------------------------------------------------------------------
 
 fn ir_heatmap(dir: &Path, rows: &[FeatureRow]) -> Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let path = dir.join("ir_features_heatmap.svg");
+    if rows.is_empty() { return Ok(()); }
     let n = rows.len();
     let ndims = rows[0].values.len().min(FEATURE_NAMES.len());
+    let cw = 42.0_f64;
+    let ch = 22.0_f64;
+    let left = 180.0_f64;
+    let top = 70.0_f64;
+    let width = (left + cw * ndims as f64 + 110.0) as u32;
+    let height = (top + ch * n as f64 + 20.0) as u32;
 
-    let cell_w = 44u32;
-    let cell_h = 22u32;
-    let left_margin = 210u32;
-    let top_margin = 80u32;
-    let right_margin = 120u32;
-    let bottom_margin = 30u32;
+    let mut s = String::with_capacity(16384);
+    svg_header(&mut s, width, height);
 
-    let width = left_margin + cell_w * ndims as u32 + right_margin;
-    let height = top_margin + cell_h * n as u32 + bottom_margin;
+    let _ = write!(s, r#"<text x="{:.0}" y="28" text-anchor="middle" font-size="18" font-weight="bold">Pre-optimization IR Feature Profiles (z-score)</text>"#, width as f64 / 2.0);
 
-    let root = SVGBackend::new(&path, (width, height)).into_drawing_area();
-    root.fill(&WHITE)?;
-
-    // Title
-    root.draw(&Text::new(
-        "Pre-optimization IR Feature Profiles (z-score)",
-        (width as i32 / 2 - 200, 15),
-        ("sans-serif", TITLE_FONT).into_font().color(&BLACK),
-    ))?;
-
-    // Column headers
+    // column headers
     for (j, name) in FEATURE_NAMES.iter().enumerate().take(ndims) {
-        let x = left_margin as i32 + j as i32 * cell_w as i32 + cell_w as i32 / 2 - 8;
-        let y = top_margin as i32 - 8;
-        root.draw(&Text::new(
-            name.to_string(),
-            (x, y),
-            ("sans-serif", 11).into_font().color(&BLACK),
-        ))?;
+        let cx = left + j as f64 * cw + cw / 2.0;
+        let _ = write!(s, r#"<text x="{cx:.1}" y="{:.1}" text-anchor="middle" font-size="11">{name}</text>"#, top - 6.0);
     }
 
-    let cluster_colors = [
-        RGBColor(31, 119, 180),
-        RGBColor(255, 127, 14),
-        RGBColor(44, 160, 44),
-        RGBColor(214, 39, 40),
-        RGBColor(148, 103, 189),
-    ];
+    let cluster_colors = [hex("1f77b4"), hex("ff7f0e"), hex("2ca02c"), hex("d62728"), hex("9467bd")];
+    let ddd = hex("ddd");
 
-    // Draw cells + row labels
     for (i, row) in rows.iter().enumerate() {
-        let y_px = top_margin as i32 + i as i32 * cell_h as i32;
+        let ry = top + i as f64 * ch;
+        let cc = &cluster_colors[row.cluster % cluster_colors.len()];
 
-        let cc = cluster_colors[row.cluster % cluster_colors.len()];
+        let _ = write!(s, r#"<circle cx="12" cy="{:.1}" r="5" fill="{cc}"/>"#, ry + ch / 2.0);
+        let _ = write!(s, r#"<text x="22" y="{:.1}" font-size="12" dominant-baseline="middle">{}</text>"#, ry + ch / 2.0, xml_escape(&row.name));
 
-        // Cluster color dot
-        root.draw(&Circle::new(
-            (12, y_px + cell_h as i32 / 2),
-            5,
-            cc.filled(),
-        ))?;
-
-        // Name
-        root.draw(&Text::new(
-            row.name.clone(),
-            (22, y_px + 4),
-            ("sans-serif", LABEL_FONT - 1).into_font().color(&BLACK),
-        ))?;
-
-        // Feature cells
         for (j, &val) in row.values.iter().enumerate().take(ndims) {
-            let x_px = left_margin as i32 + j as i32 * cell_w as i32;
-            let color = zscore_color(val);
-
-            root.draw(&Rectangle::new(
-                [(x_px, y_px), (x_px + cell_w as i32, y_px + cell_h as i32)],
-                color.filled(),
-            ))?;
-            root.draw(&Rectangle::new(
-                [(x_px, y_px), (x_px + cell_w as i32, y_px + cell_h as i32)],
-                RGBColor(220, 220, 220).stroke_width(1),
-            ))?;
+            let cx = left + j as f64 * cw;
+            let fill = zscore_rgb(val);
+            let _ = write!(s, r#"<rect x="{cx:.1}" y="{ry:.1}" width="{cw}" height="{ch}" fill="{fill}" stroke="{ddd}" stroke-width="0.5"/>"#);
 
             if val.abs() > 0.5 {
-                let text_color = if val.abs() > 1.5 { WHITE } else { BLACK };
-                root.draw(&Text::new(
-                    format!("{:.1}", val),
-                    (x_px + 6, y_px + 4),
-                    ("sans-serif", 10).into_font().color(&text_color),
-                ))?;
+                let tc = if val.abs() > 1.5 { hex("fff") } else { hex("000") };
+                let _ = write!(s, r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" font-size="10" fill="{tc}" dominant-baseline="middle">{val:.1}</text>"#, cx + cw / 2.0, ry + ch / 2.0);
             }
         }
     }
 
-    // Color bar legend
-    let bar_x = (left_margin + cell_w * ndims as u32 + 20) as i32;
-    let bar_top = top_margin as i32 + 10;
-    let bar_h = (n as i32 * cell_h as i32).min(200);
-    let bar_w = 18;
-
-    for py in 0..bar_h {
-        let frac = py as f64 / bar_h as f64;
-        let z = 3.0 - 6.0 * frac;
-        let color = zscore_color(z);
-        root.draw(&Rectangle::new(
-            [(bar_x, bar_top + py), (bar_x + bar_w, bar_top + py + 1)],
-            color.filled(),
-        ))?;
+    // color bar
+    let bx = left + cw * ndims as f64 + 20.0;
+    let bt = top + 10.0;
+    let bh = (n as f64 * ch).min(200.0);
+    let bw = 16.0;
+    let steps = 40;
+    let sh = bh / steps as f64;
+    for si in 0..steps {
+        let z = 3.0 - 6.0 * si as f64 / steps as f64;
+        let fill = zscore_rgb(z);
+        let sy = bt + si as f64 * sh;
+        let _ = write!(s, r#"<rect x="{bx:.1}" y="{sy:.1}" width="{bw}" height="{:.1}" fill="{fill}"/>"#, sh + 0.5);
     }
-    root.draw(&Text::new(
-        "High (+3\u{03C3})".to_string(),
-        (bar_x + bar_w + 4, bar_top - 2),
-        ("sans-serif", 11).into_font().color(&BLACK),
-    ))?;
-    root.draw(&Text::new(
-        "Avg (0)".to_string(),
-        (bar_x + bar_w + 4, bar_top + bar_h / 2 - 5),
-        ("sans-serif", 11).into_font().color(&BLACK),
-    ))?;
-    root.draw(&Text::new(
-        "Low (-3\u{03C3})".to_string(),
-        (bar_x + bar_w + 4, bar_top + bar_h - 8),
-        ("sans-serif", 11).into_font().color(&BLACK),
-    ))?;
+    let lx = bx + bw + 6.0;
+    let _ = write!(s, r#"<text x="{lx:.1}" y="{:.1}" font-size="10">+3σ</text>"#, bt + 4.0);
+    let _ = write!(s, r#"<text x="{lx:.1}" y="{:.1}" font-size="10">0</text>"#, bt + bh / 2.0 + 3.0);
+    let _ = write!(s, r#"<text x="{lx:.1}" y="{:.1}" font-size="10">-3σ</text>"#, bt + bh);
 
-    root.present()?;
+    svg_footer(&mut s);
+    std::fs::write(dir.join("ir_features_heatmap.svg"), &s)?;
     Ok(())
-}
-
-/// Map z-score to a diverging blue-white-red color
-fn zscore_color(z: f64) -> RGBColor {
-    let z = z.clamp(-3.0, 3.0);
-    if z >= 0.0 {
-        let t = (z / 3.0).min(1.0);
-        RGBColor(
-            255,
-            (255.0 * (1.0 - t * 0.7)) as u8,
-            (255.0 * (1.0 - t * 0.85)) as u8,
-        )
-    } else {
-        let t = (-z / 3.0).min(1.0);
-        RGBColor(
-            (255.0 * (1.0 - t * 0.85)) as u8,
-            (255.0 * (1.0 - t * 0.55)) as u8,
-            255,
-        )
-    }
 }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -57,17 +57,8 @@ struct BenchmarkFeatureEntry {
     function: String,
     difficulty: String,
     cluster: usize,
-    basic_block_count: u32,
-    total_instruction_count: u32,
-    load_count: u32,
-    store_count: u32,
-    br_count: u32,
-    call_count: u32,
-    phi_count: u32,
-    gep_count: u32,
-    alloca_count: u32,
-    loop_depth_approx: u32,
-    function_count: u32,
+    #[serde(flatten)]
+    features: IrFeatures,
 }
 
 #[derive(Debug, Serialize)]
@@ -472,17 +463,7 @@ impl EdaAnalyzer {
                 function: name.clone(),
                 difficulty,
                 cluster: clusters[i],
-                basic_block_count: f.basic_block_count,
-                total_instruction_count: f.total_instruction_count,
-                load_count: f.load_count,
-                store_count: f.store_count,
-                br_count: f.br_count,
-                call_count: f.call_count,
-                phi_count: f.phi_count,
-                gep_count: f.gep_count,
-                alloca_count: f.alloca_count,
-                loop_depth_approx: f.loop_depth_approx,
-                function_count: f.function_count,
+                features: f.clone(),
             };
             paired.push((entry, feature_matrix[i].clone()));
         }
@@ -522,7 +503,6 @@ impl EdaAnalyzer {
             })
             .collect();
 
-        // Build baseline lookup for O3 times
         let baseline_map = self.build_baseline_map();
 
         let dist_pts = dist
@@ -544,7 +524,6 @@ impl EdaAnalyzer {
             })
             .collect();
 
-        // IR feature heatmap data (already z-score normalized from ir_feature_landscape)
         let ir_features: Vec<plots::FeatureRow> = features
             .iter()
             .zip(zscore_matrix.iter())
@@ -712,33 +691,41 @@ impl EdaAnalyzer {
             "  Clustered by IR similarity (k-means, k=4 on z-scored features).\n\n",
         );
         report.push_str(&format!(
-            "  {:<22} {:>3} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>9}\n",
-            "Benchmark", "C", "BB", "Inst", "Ld", "St", "Br", "Cal", "Phi", "GEP", "Alc", "Lp", "Reachable"
+            "  {:<22} {:>3} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>5} {:>9}\n",
+            "Benchmark", "C", "Add", "Mul", "Ld", "St", "Br", "Cal", "Phi", "Alc", "GEP", "Icm", "Fcm", "Ret", "Oth", "BB", "Inst", "Fn", "Lp", "Reach"
         ));
-        report.push_str(&format!("  {}\n", "-".repeat(92)));
+        report.push_str(&format!("  {}\n", "-".repeat(130)));
 
         let mut current_cluster = None;
         for f in features {
             if current_cluster != Some(f.cluster) {
                 if current_cluster.is_some() {
-                    report.push_str(&format!("  {}\n", "-".repeat(92)));
+                    report.push_str(&format!("  {}\n", "-".repeat(130)));
                 }
                 current_cluster = Some(f.cluster);
             }
+            let ir = &f.features;
             report.push_str(&format!(
-                "  {:<22} {:>3} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>9}\n",
+                "  {:<22} {:>3} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>5} {:>9}\n",
                 f.function,
                 f.cluster,
-                f.basic_block_count,
-                f.total_instruction_count,
-                f.load_count,
-                f.store_count,
-                f.br_count,
-                f.call_count,
-                f.phi_count,
-                f.gep_count,
-                f.alloca_count,
-                f.loop_depth_approx,
+                ir.add_count,
+                ir.mul_count,
+                ir.load_count,
+                ir.store_count,
+                ir.br_count,
+                ir.call_count,
+                ir.phi_count,
+                ir.alloca_count,
+                ir.gep_count,
+                ir.icmp_count,
+                ir.fcmp_count,
+                ir.ret_count,
+                ir.other_inst_count,
+                ir.basic_block_count,
+                ir.total_instruction_count,
+                ir.function_count,
+                ir.loop_depth_approx,
                 f.difficulty
             ));
         }
