@@ -4,9 +4,9 @@ mod env;
 mod evaluation;
 mod ir_features;
 mod model;
-mod ordering_study;
 mod pass_menu;
 mod pipeline;
+mod plots;
 mod ppo;
 mod rollout;
 mod training;
@@ -67,6 +67,10 @@ enum Commands {
         /// Output directory for analysis results
         #[arg(long, default_value = "eda_output")]
         output: PathBuf,
+
+        /// Benchmark directory (optional, enables IR feature extraction)
+        #[arg(long)]
+        functions: Option<PathBuf>,
     },
 
     /// Compute baselines (-O0, -O2, -O3) for all functions
@@ -136,28 +140,6 @@ enum Commands {
         file: PathBuf,
     },
 
-    /// Run pass ordering study (3 targeted experiments)
-    OrderingStudy {
-        /// Directory containing benchmark .c files
-        #[arg(long, default_value = "benchmarks")]
-        functions: PathBuf,
-
-        /// Output directory for study results
-        #[arg(long, default_value = "eda_output/ordering")]
-        output: PathBuf,
-
-        /// Which experiments to run: all, 1, 2, or 3
-        #[arg(long, default_value = "all")]
-        experiments: String,
-
-        /// Number of benchmark runs per pipeline
-        #[arg(long, default_value = "3")]
-        runs: usize,
-
-        /// Number of parallel threads (0 = use all cores)
-        #[arg(long, default_value = "0")]
-        threads: usize,
-    },
 }
 
 fn main() -> Result<()> {
@@ -201,9 +183,9 @@ fn main() -> Result<()> {
             eprintln!("Total wall time: {wall_min:.1} min ({seq_per_min:.0} sequences/min)");
         }
 
-        Commands::Eda { input, output } => {
+        Commands::Eda { input, output, functions } => {
             let analyzer = eda::EdaAnalyzer::load(&input)?;
-            analyzer.write_all(&output)?;
+            analyzer.write_all(&output, functions.as_deref())?;
         }
 
         Commands::Baseline { functions, output, baseline_runs, bench_iters } => {
@@ -283,15 +265,6 @@ fn main() -> Result<()> {
             eprintln!("  Binary size: {} bytes", result.binary_size_bytes);
         }
 
-        Commands::OrderingStudy {
-            functions,
-            output,
-            experiments,
-            runs,
-            threads,
-        } => {
-            ordering_study::run(&functions, &output, &experiments, runs, threads)?;
-        }
 
         Commands::Features { file } => {
             let features = if file.extension().is_some_and(|e| e == "ll") {
