@@ -97,6 +97,7 @@ impl Evaluator {
                 .to_string_lossy()
                 .to_string();
 
+            let base_ir = self.pipeline.emit_ir(func_path)?;
             let mut best_time = u64::MAX;
             let mut best_passes: Vec<Pass> = Vec::new();
             let mut best_size = 0u64;
@@ -109,7 +110,7 @@ impl Evaluator {
 
                 match self
                     .pipeline
-                    .full_pipeline(func_path, &passes, self.benchmark_runs)
+                    .full_pipeline(func_path, Some(&base_ir), &passes, self.benchmark_runs)
                 {
                     Ok(result) => {
                         if result.benchmark.median_ns < best_time {
@@ -150,6 +151,7 @@ impl Evaluator {
                 .to_string_lossy()
                 .to_string();
 
+            let base_ir = self.pipeline.emit_ir(func_path)?;
             let mut best_time = u64::MAX;
             let mut best_pass = Pass::Instcombine;
             let mut best_size = 0u64;
@@ -157,7 +159,7 @@ impl Evaluator {
             for &pass in transforms {
                 match self
                     .pipeline
-                    .full_pipeline(func_path, &[pass], self.benchmark_runs)
+                    .full_pipeline(func_path, Some(&base_ir), &[pass], self.benchmark_runs)
                 {
                     Ok(result) => {
                         if result.benchmark.median_ns < best_time {
@@ -202,7 +204,7 @@ impl Evaluator {
 
             let result = self
                 .pipeline
-                .full_pipeline(func_path, passes, self.benchmark_runs)?;
+                .full_pipeline(func_path, None, passes, self.benchmark_runs)?;
 
             results.push(EvalResult {
                 function: stem,

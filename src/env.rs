@@ -71,7 +71,10 @@ pub struct LlvmEnv {
     functions: Vec<PathBuf>,
     baselines: HashMap<String, BaselineTimes>,
     current_function: Option<PathBuf>,
-    current_ir: Option<PathBuf>,
+    /// Base (unoptimized) IR emitted once at reset — never modified during episode.
+    current_base_ir: Option<PathBuf>,
+    /// Current optimized IR state — updated incrementally each step.
+    current_opt_ir: Option<PathBuf>,
     current_passes: Vec<Pass>,
     previous_time_ns: Option<u64>,
     config: EnvConfig,
@@ -92,7 +95,8 @@ impl LlvmEnv {
             functions,
             baselines: HashMap::new(),
             current_function: None,
-            current_ir: None,
+            current_base_ir: None,
+            current_opt_ir: None,
             current_passes: Vec::new(),
             previous_time_ns: None,
             config,
@@ -133,11 +137,12 @@ impl LlvmEnv {
         let func = self.functions[self.rng_index % self.functions.len()].clone();
         self.rng_index += 1;
 
-        let ir = self.pipeline.emit_ir(&func)?;
-        let features = IrFeatures::from_ll_file(&ir)?;
+        let base_ir = self.pipeline.emit_ir(&func)?;
+        let features = IrFeatures::from_ll_file(&base_ir)?;
 
         self.current_function = Some(func);
-        self.current_ir = Some(ir);
+        self.current_base_ir = Some(base_ir.clone());
+        self.current_opt_ir = Some(base_ir); // no passes yet — opt IR == base IR
         self.current_passes.clear();
         self.previous_time_ns = None;
 
@@ -165,10 +170,17 @@ impl LlvmEnv {
             self.current_passes.push(pass);
         }
 
-        // Apply accumulated passes from scratch (deterministic)
-        let opt_ir = self
-            .pipeline
-            .optimize_only(&func, &self.current_passes)?;
+        // Apply only the new pass to the current optimized IR (incremental).
+        // This avoids re-running all accumulated passes from scratch each step.
+        let opt_ir = if pass != Pass::Stop {
+            self.pipeline.optimize_only(
+                &func,
+                self.current_opt_ir.as_deref(),
+                &[pass],
+            )?
+        } else {
+            self.current_opt_ir.clone().context("no current IR")?
+        };
         let features = IrFeatures::from_ll_file(&opt_ir)?;
 
         // Compute reward
@@ -197,7 +209,7 @@ impl LlvmEnv {
             }
         };
 
-        self.current_ir = Some(opt_ir);
+        self.current_opt_ir = Some(opt_ir);
 
         Ok(StepResult {
             state: State {

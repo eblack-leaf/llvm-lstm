@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -107,6 +107,9 @@ impl DataCollector {
                 let pipeline = CompilationPipeline::new(work_dir)
                     .with_bench_iters(self.bench_iters);
 
+                // Emit IR once — it's the same for every sequence of this function.
+                let base_ir = pipeline.emit_ir(func_path)?;
+
                 // Write to per-function temp file
                 let tmp_path = self.output_dir.join(format!("_tmp_{stem}.jsonl"));
                 let file = File::create(&tmp_path)?;
@@ -123,7 +126,7 @@ impl DataCollector {
                         .map(|_| transforms[rng.gen_range(0..transforms.len())])
                         .collect();
 
-                    match pipeline.full_pipeline(func_path, &passes, self.benchmark_runs) {
+                    match pipeline.full_pipeline(func_path, Some(&base_ir), &passes, self.benchmark_runs) {
                         Ok(result) => {
                             let features = IrFeatures::from_ll_file(&result.opt_ir)?;
 
@@ -167,8 +170,9 @@ impl DataCollector {
 
         for result in results {
             let tmp_path = result?;
-            let contents = fs::read_to_string(&tmp_path)?;
-            for line in contents.lines() {
+            let reader = BufReader::new(File::open(&tmp_path)?);
+            for line in reader.lines() {
+                let line = line?;
                 if !line.trim().is_empty() {
                     writeln!(out, "{line}")?;
                     total_records += 1;

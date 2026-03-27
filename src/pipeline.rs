@@ -229,10 +229,14 @@ impl CompilationPipeline {
         })
     }
 
-    /// Full pipeline: C source → IR → optimize → compile → benchmark.
+    /// Full pipeline: C source → optimize → compile → benchmark.
+    /// Accepts an optional pre-emitted IR path; if None, emits it first.
+    /// Pass a pre-emitted IR when running many sequences on the same source
+    /// to avoid redundant clang -emit-ir invocations.
     pub fn full_pipeline(
         &self,
         c_source: &Path,
+        base_ir: Option<&Path>,
         passes: &[Pass],
         runs: usize,
     ) -> Result<PipelineResult> {
@@ -242,9 +246,16 @@ impl CompilationPipeline {
             .to_string_lossy()
             .to_string();
 
-        let ir = self.emit_ir(c_source)?;
+        let ir_owned;
+        let ir: &Path = if let Some(pre) = base_ir {
+            pre
+        } else {
+            ir_owned = self.emit_ir(c_source)?;
+            &ir_owned
+        };
+
         let opt_ir = self.work_dir.join(format!("{stem}_opt.ll"));
-        self.apply_passes(&ir, passes, &opt_ir)?;
+        self.apply_passes(ir, passes, &opt_ir)?;
         let binary = self.compile_ir(&opt_ir)?;
         let benchmark = self.benchmark(&binary, runs)?;
 
@@ -257,9 +268,12 @@ impl CompilationPipeline {
     }
 
     /// Get the optimized IR path for feature extraction (without benchmarking).
+    /// Pass a pre-emitted `base_ir` to avoid redundant clang invocations when
+    /// calling this repeatedly for the same source file.
     pub fn optimize_only(
         &self,
         c_source: &Path,
+        base_ir: Option<&Path>,
         passes: &[Pass],
     ) -> Result<PathBuf> {
         let stem = c_source
@@ -268,9 +282,16 @@ impl CompilationPipeline {
             .to_string_lossy()
             .to_string();
 
-        let ir = self.emit_ir(c_source)?;
+        let ir_owned;
+        let ir: &Path = if let Some(pre) = base_ir {
+            pre
+        } else {
+            ir_owned = self.emit_ir(c_source)?;
+            &ir_owned
+        };
+
         let opt_ir = self.work_dir.join(format!("{stem}_opt.ll"));
-        self.apply_passes(&ir, passes, &opt_ir)?;
+        self.apply_passes(ir, passes, &opt_ir)?;
         Ok(opt_ir)
     }
 
