@@ -52,13 +52,48 @@ struct PassEnrichment {
     enrichment: f64,
 }
 
+/// Median speedup attributable to using a pass (with vs. without, across functions).
+#[derive(Debug, Serialize)]
+struct PassImpact {
+    pass_name: String,
+    /// Number of functions where we had enough data for both groups.
+    n_functions: usize,
+    /// Geometric mean of (median_without / median_with) across functions.
+    /// > 1.0 means the pass helps on average.
+    geo_mean_speedup: f64,
+    /// Same metric but restricted to top-10% sequences within each function.
+    geo_mean_speedup_top10: f64,
+    enrichment: f64,
+}
+
+/// Which pairs of passes co-occur in top-10% sequences and how strongly.
+#[derive(Debug, Serialize)]
+struct PassCoOccurrence {
+    pass_a: String,
+    pass_b: String,
+    /// Number of top-10% sequences that contain both.
+    count: usize,
+    /// P(A∩B | top10) / (P(A|top10) * P(B|top10)).  >1 = synergistic.
+    lift: f64,
+}
+
 #[derive(Debug, Serialize)]
 struct BenchmarkFeatureEntry {
     function: String,
     difficulty: String,
-    cluster: usize,
+    gap_vs_o3_pct: f64,
     #[serde(flatten)]
     features: IrFeatures,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FeatureCorrelation {
+    feature: String,
+    /// Pearson r with gap_vs_o3_pct.  Positive = harder benchmarks have more of this feature.
+    pearson_r: f64,
+    abs_r: f64,
+    mean_beats_o3: f64,
+    mean_hard: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +110,16 @@ struct DistributionStats {
     mean_ns: f64,
     std_ns: f64,
     cv_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct SeqLengthTier {
+    difficulty: String,
+    n_functions: usize,
+    mean_best_len: f64,
+    median_best_len: usize,
+    p25_best_len: usize,
+    p75_best_len: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,19 +216,44 @@ impl EdaAnalyzer {
         let file = File::create(output_dir.join("pass_enrichment.json"))?;
         serde_json::to_writer_pretty(file, &enrichment)?;
 
-        // 5. IR feature landscape with clustering (optional)
-        let (features, zscore_matrix): (Vec<BenchmarkFeatureEntry>, Vec<Vec<f64>>) =
-            if let Some(fdir) = functions_dir {
-                let (f, zmat) = self.ir_feature_landscape(fdir, &ceiling)?;
-                Self::write_features_section(&f, &mut report);
-                let file = File::create(output_dir.join("ir_features.json"))?;
-                serde_json::to_writer_pretty(file, &f)?;
-                (f, zmat)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+        // 5. Pass impact (median speedup with vs without)
+        let impact = self.pass_impact(&enrichment);
+        Self::write_impact_section(&impact, &mut report);
+        let file = File::create(output_dir.join("pass_impact.json"))?;
+        serde_json::to_writer_pretty(file, &impact)?;
 
-        // 6. Summary
+        // 6. Pass co-occurrence in top sequences
+        let cooccur = self.pass_cooccurrence(20);
+        Self::write_cooccurrence_section(&cooccur, &mut report);
+        let file = File::create(output_dir.join("pass_cooccurrence.json"))?;
+        serde_json::to_writer_pretty(file, &cooccur)?;
+
+        // 7. Sequence length by difficulty tier
+        let seq_tiers = Self::sequence_length_by_difficulty(&ceiling);
+        Self::write_seq_length_section(&seq_tiers, &mut report);
+        let file = File::create(output_dir.join("seq_length_tiers.json"))?;
+        serde_json::to_writer_pretty(file, &seq_tiers)?;
+
+        // 8. IR feature landscape (optional, needs source files)
+        let features: Vec<BenchmarkFeatureEntry> = if let Some(fdir) = functions_dir {
+            let f = self.ir_feature_landscape(fdir, &ceiling)?;
+            Self::write_features_section(&f, &mut report);
+            let file = File::create(output_dir.join("ir_features.json"))?;
+            serde_json::to_writer_pretty(file, &f)?;
+            f
+        } else {
+            Vec::new()
+        };
+
+        // 9. Feature-performance correlations (requires IR features)
+        if !features.is_empty() {
+            let corr = Self::feature_performance_correlation(&features);
+            Self::write_correlation_section(&corr, &mut report);
+            let file = File::create(output_dir.join("feature_correlations.json"))?;
+            serde_json::to_writer_pretty(file, &corr)?;
+        }
+
+        // 10. Summary
         Self::write_summary(&ceiling, &mut report);
 
         fs::write(output_dir.join("report.txt"), &report)?;
@@ -192,9 +262,8 @@ impl EdaAnalyzer {
             output_dir.join("report.txt").display()
         );
 
-        // 7. Generate SVG plots
-        let plot_data = self.build_plot_data(&ceiling, &enrichment, &dist, &features, &zscore_matrix);
-        plots::generate_all(output_dir, &plot_data)?;
+        // Generate plots via Python
+        plots::generate_all(output_dir)?;
 
         Ok(())
     }
@@ -268,8 +337,8 @@ impl EdaAnalyzer {
             let mut times: Vec<u64> = records.iter().map(|r| r.execution_time_ns).collect();
             times.sort();
             let n = times.len();
-            let top10_idx = (n / 10).max(1);
-            let top10_median = times[top10_idx / 2];
+            let top10_n = (n / 10).max(1);
+            let top10_median = times[top10_n / 2];
             let top10_gap =
                 (top10_median as f64 - o3_ns as f64) / o3_ns as f64 * 100.0;
 
@@ -281,7 +350,7 @@ impl EdaAnalyzer {
                 best_ns: best.execution_time_ns,
                 gap_vs_o3_pct: gap_vs_o3,
                 gap_vs_o2_pct: gap_vs_o2,
-                speedup_vs_o0: speedup_vs_o0,
+                speedup_vs_o0,
                 best_passes: best.pass_sequence.clone(),
                 best_seq_len: best.pass_sequence.len(),
                 top10_median_ns: top10_median,
@@ -391,16 +460,236 @@ impl EdaAnalyzer {
         profiles
     }
 
-    /// Returns (feature entries for report/JSON, z-score normalized matrix for heatmap)
+    /// For each pass: geometric mean of (median_without / median_with) per function.
+    /// Restricted to passes appearing in at least `min_functions` functions.
+    fn pass_impact(&self, enrichment: &[PassEnrichment]) -> Vec<PassImpact> {
+        let enrich_map: HashMap<&str, f64> = enrichment
+            .iter()
+            .map(|e| (e.pass_name.as_str(), e.enrichment))
+            .collect();
+
+        let mut by_func: HashMap<String, Vec<&DataRecord>> = HashMap::new();
+        for r in &self.records {
+            by_func.entry(r.function.clone()).or_default().push(r);
+        }
+
+        // Collect all unique pass names
+        let all_passes: HashSet<String> = self
+            .records
+            .iter()
+            .flat_map(|r| r.pass_sequence.iter().cloned())
+            .collect();
+
+        let min_functions = 2;
+
+        let mut pass_log_speedups: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut pass_log_speedups_top10: HashMap<String, Vec<f64>> = HashMap::new();
+
+        for (_func, records) in &by_func {
+            let mut sorted: Vec<&DataRecord> = records.to_vec();
+            sorted.sort_by_key(|r| r.execution_time_ns);
+            let n = sorted.len();
+            let top10_n = (n / 10).max(1);
+            let top10_set: Vec<&DataRecord> = sorted.iter().copied().take(top10_n).collect();
+
+            for pass in &all_passes {
+                // All sequences
+                let with: Vec<u64> = sorted
+                    .iter()
+                    .filter(|r| r.pass_sequence.contains(pass))
+                    .map(|r| r.execution_time_ns)
+                    .collect();
+                let without: Vec<u64> = sorted
+                    .iter()
+                    .filter(|r| !r.pass_sequence.contains(pass))
+                    .map(|r| r.execution_time_ns)
+                    .collect();
+
+                if with.len() >= 3 && without.len() >= 3 {
+                    let med_with = median_u64(&with);
+                    let med_without = median_u64(&without);
+                    if med_with > 0 {
+                        let log_sp = (med_without as f64 / med_with as f64).ln();
+                        pass_log_speedups.entry(pass.clone()).or_default().push(log_sp);
+                    }
+                }
+
+                // Top-10% sequences
+                let with_top10: Vec<u64> = top10_set
+                    .iter()
+                    .filter(|r| r.pass_sequence.contains(pass))
+                    .map(|r| r.execution_time_ns)
+                    .collect();
+                let without_top10: Vec<u64> = top10_set
+                    .iter()
+                    .filter(|r| !r.pass_sequence.contains(pass))
+                    .map(|r| r.execution_time_ns)
+                    .collect();
+
+                if with_top10.len() >= 2 && without_top10.len() >= 2 {
+                    let med_with = median_u64(&with_top10);
+                    let med_without = median_u64(&without_top10);
+                    if med_with > 0 {
+                        let log_sp = (med_without as f64 / med_with as f64).ln();
+                        pass_log_speedups_top10
+                            .entry(pass.clone())
+                            .or_default()
+                            .push(log_sp);
+                    }
+                }
+            }
+        }
+
+        let mut impacts: Vec<PassImpact> = pass_log_speedups
+            .iter()
+            .filter(|(_, v)| v.len() >= min_functions)
+            .map(|(pass, log_sps)| {
+                let geo_mean = log_sps.iter().sum::<f64>() / log_sps.len() as f64;
+                let top10_log = pass_log_speedups_top10
+                    .get(pass)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.iter().sum::<f64>() / v.len() as f64)
+                    .unwrap_or(0.0);
+                PassImpact {
+                    pass_name: pass.clone(),
+                    n_functions: log_sps.len(),
+                    geo_mean_speedup: geo_mean.exp(),
+                    geo_mean_speedup_top10: top10_log.exp(),
+                    enrichment: *enrich_map.get(pass.as_str()).unwrap_or(&1.0),
+                }
+            })
+            .collect();
+        impacts.sort_by(|a, b| b.geo_mean_speedup.partial_cmp(&a.geo_mean_speedup).unwrap());
+        impacts
+    }
+
+    /// Pairwise co-occurrence lift for the top-`top_n` enriched passes in top-10% sequences.
+    fn pass_cooccurrence(&self, top_n: usize) -> Vec<PassCoOccurrence> {
+        let mut by_func: HashMap<String, Vec<&DataRecord>> = HashMap::new();
+        for r in &self.records {
+            by_func.entry(r.function.clone()).or_default().push(r);
+        }
+
+        // Collect top-10% sequences globally (normalise by function first)
+        let mut top_sequences: Vec<HashSet<String>> = Vec::new();
+        for (_func, mut records) in by_func {
+            records.sort_by_key(|r| r.execution_time_ns);
+            let top_n_func = (records.len() / 10).max(1);
+            for r in records.into_iter().take(top_n_func) {
+                top_sequences.push(r.pass_sequence.iter().cloned().collect());
+            }
+        }
+
+        let total = top_sequences.len();
+        if total == 0 {
+            return Vec::new();
+        }
+
+        // Count individual pass presence
+        let mut single_count: HashMap<String, usize> = HashMap::new();
+        for seq in &top_sequences {
+            for p in seq {
+                *single_count.entry(p.clone()).or_default() += 1;
+            }
+        }
+
+        // Restrict to top-N enriched passes by presence
+        let mut by_count: Vec<(&String, usize)> = single_count.iter().map(|(k, &v)| (k, v)).collect();
+        by_count.sort_by(|a, b| b.1.cmp(&a.1));
+        let candidate_passes: Vec<String> = by_count
+            .into_iter()
+            .take(top_n)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // Count pairwise co-occurrence
+        let mut pair_count: HashMap<(String, String), usize> = HashMap::new();
+        for seq in &top_sequences {
+            let present: Vec<&String> = candidate_passes
+                .iter()
+                .filter(|p| seq.contains(*p))
+                .collect();
+            for i in 0..present.len() {
+                for j in (i + 1)..present.len() {
+                    let a = present[i].clone();
+                    let b = present[j].clone();
+                    let key = if a <= b { (a, b) } else { (b, a) };
+                    *pair_count.entry(key).or_default() += 1;
+                }
+            }
+        }
+
+        let total_f = total as f64;
+        let mut pairs: Vec<PassCoOccurrence> = pair_count
+            .into_iter()
+            .map(|((a, b), count)| {
+                let pa = *single_count.get(&a).unwrap_or(&0) as f64 / total_f;
+                let pb = *single_count.get(&b).unwrap_or(&0) / total;
+                let pab = count as f64 / total_f;
+                let lift = if pa > 0.0 && pb > 0 {
+                    pab / (pa * pb as f64)
+                } else {
+                    1.0
+                };
+                PassCoOccurrence {
+                    pass_a: a,
+                    pass_b: b,
+                    count,
+                    lift,
+                }
+            })
+            .collect();
+        pairs.sort_by(|a, b| b.lift.partial_cmp(&a.lift).unwrap());
+        // Return only pairs with lift > 1 (positive synergy) and at least a few occurrences
+        pairs.retain(|p| p.lift > 1.1 && p.count >= 3);
+        pairs.truncate(50);
+        pairs
+    }
+
+    fn sequence_length_by_difficulty(ceiling: &[CeilingEntry]) -> Vec<SeqLengthTier> {
+        let tiers = [
+            ("beats-O3", f64::NEG_INFINITY, 0.0),
+            ("reachable", 0.0, 20.0),
+            ("gap", 20.0, 100.0),
+            ("hard", 100.0, f64::INFINITY),
+        ];
+
+        tiers
+            .iter()
+            .filter_map(|(name, lo, hi)| {
+                let mut lens: Vec<usize> = ceiling
+                    .iter()
+                    .filter(|c| c.gap_vs_o3_pct >= *lo && c.gap_vs_o3_pct < *hi)
+                    .map(|c| c.best_seq_len)
+                    .collect();
+                if lens.is_empty() {
+                    return None;
+                }
+                lens.sort();
+                let n = lens.len();
+                let mean = lens.iter().sum::<usize>() as f64 / n as f64;
+                Some(SeqLengthTier {
+                    difficulty: name.to_string(),
+                    n_functions: n,
+                    mean_best_len: mean,
+                    median_best_len: lens[n / 2],
+                    p25_best_len: lens[n / 4],
+                    p75_best_len: lens[3 * n / 4],
+                })
+            })
+            .collect()
+    }
+
+    /// Returns features sorted by gap_vs_o3 ascending (best first).
     fn ir_feature_landscape(
         &self,
         functions_dir: &Path,
         ceiling: &[CeilingEntry],
-    ) -> Result<(Vec<BenchmarkFeatureEntry>, Vec<Vec<f64>>)> {
+    ) -> Result<Vec<BenchmarkFeatureEntry>> {
         let work_dir = std::path::PathBuf::from("/tmp/llvm-lstm-eda-features");
         let pipeline = CompilationPipeline::new(work_dir);
 
-        let difficulty_map: HashMap<String, String> = ceiling
+        let difficulty_map: HashMap<String, (String, f64)> = ceiling
             .iter()
             .map(|c| {
                 let diff = if c.gap_vs_o3_pct < 0.0 {
@@ -412,134 +701,100 @@ impl EdaAnalyzer {
                 } else {
                     "hard"
                 };
-                (c.function.clone(), diff.to_string())
+                (c.function.clone(), (diff.to_string(), c.gap_vs_o3_pct))
             })
             .collect();
 
-        // Collect raw features
-        let mut names = Vec::new();
-        let mut raw_features: Vec<IrFeatures> = Vec::new();
+        let mut entries: Vec<BenchmarkFeatureEntry> = Vec::new();
 
         for entry in fs::read_dir(functions_dir)? {
             let path = entry?.path();
             if path.extension().is_some_and(|e| e == "c") {
                 let stem = path.file_stem().unwrap().to_string_lossy().to_string();
                 let ir = pipeline.emit_ir(&path)?;
-                let f = IrFeatures::from_ll_file(&ir)?;
-                names.push(stem);
-                raw_features.push(f);
+                let features = IrFeatures::from_ll_file(&ir)?;
+                let (difficulty, gap) = difficulty_map
+                    .get(&stem)
+                    .cloned()
+                    .unwrap_or_else(|| ("unknown".into(), 0.0));
+                entries.push(BenchmarkFeatureEntry {
+                    function: stem,
+                    difficulty,
+                    gap_vs_o3_pct: gap,
+                    features,
+                });
             }
         }
 
-        // Build feature matrix and z-score normalize
-        let ndims = IrFeatures::feature_count();
-        let n = raw_features.len();
-        let mut feature_matrix: Vec<Vec<f64>> = raw_features
-            .iter()
-            .map(|f| f.to_vec().iter().map(|&v| v as f64).collect())
-            .collect();
-
-        for d in 0..ndims {
-            let col: Vec<f64> = feature_matrix.iter().map(|row| row[d]).collect();
-            let mean = col.iter().sum::<f64>() / n as f64;
-            let var = col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
-            let std = var.sqrt().max(1e-8);
-            for row in feature_matrix.iter_mut() {
-                row[d] = (row[d] - mean) / std;
-            }
-        }
-
-        // k-means clustering (k=4) on normalized features
-        let clusters = simple_kmeans(&feature_matrix, 4, 50);
-
-        // Build entries paired with z-scored rows
-        let mut paired: Vec<(BenchmarkFeatureEntry, Vec<f64>)> = Vec::new();
-        for (i, (name, f)) in names.iter().zip(raw_features.iter()).enumerate() {
-            let difficulty = difficulty_map
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| "unknown".into());
-            let entry = BenchmarkFeatureEntry {
-                function: name.clone(),
-                difficulty,
-                cluster: clusters[i],
-                features: f.clone(),
-            };
-            paired.push((entry, feature_matrix[i].clone()));
-        }
-        paired.sort_by(|a, b| a.0.cluster.cmp(&b.0.cluster).then(a.0.function.cmp(&b.0.function)));
-        let (features, zscore_matrix): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
-        Ok((features, zscore_matrix))
+        // Sort by gap ascending: beats-O3 first, hard last
+        entries.sort_by(|a, b| a.gap_vs_o3_pct.partial_cmp(&b.gap_vs_o3_pct).unwrap());
+        Ok(entries)
     }
 
-    // -----------------------------------------------------------------------
-    // Plot data construction
-    // -----------------------------------------------------------------------
-
-    fn build_plot_data(
-        &self,
-        ceiling: &[CeilingEntry],
-        enrichment: &[PassEnrichment],
-        dist: &[DistributionStats],
+    fn feature_performance_correlation(
         features: &[BenchmarkFeatureEntry],
-        zscore_matrix: &[Vec<f64>],
-    ) -> plots::PlotData {
-        let ceiling_pts = ceiling
+    ) -> Vec<FeatureCorrelation> {
+        let feature_names = [
+            "add", "mul", "load", "store", "br", "call", "phi",
+            "alloca", "gep", "icmp", "fcmp", "ret", "other",
+            "basic_blocks", "total_insts", "functions", "loops", "load_store_ratio",
+        ];
+
+        let gaps: Vec<f64> = features.iter().map(|f| f.gap_vs_o3_pct).collect();
+        let n = gaps.len();
+        if n < 3 {
+            return Vec::new();
+        }
+
+        let beats: Vec<&BenchmarkFeatureEntry> =
+            features.iter().filter(|f| f.difficulty == "beats-O3").collect();
+        let hard: Vec<&BenchmarkFeatureEntry> =
+            features.iter().filter(|f| f.difficulty == "hard").collect();
+
+        let feat_vecs: Vec<Vec<f64>> = features
             .iter()
-            .map(|c| plots::CeilingPoint {
-                name: c.function.clone(),
-                gap_vs_o3: c.gap_vs_o3_pct,
-                gap_vs_o2: c.gap_vs_o2_pct,
-            })
+            .map(|f| f.features.to_vec().iter().map(|&v| v as f64).collect())
             .collect();
 
-        let enrich_pts = enrichment
+        let beats_vecs: Vec<Vec<f64>> = beats
             .iter()
-            .map(|e| plots::EnrichPoint {
-                name: e.pass_name.clone(),
-                enrichment: e.enrichment,
-                top10_pct: e.presence_in_top10pct,
-                overall_pct: e.presence_overall,
-            })
+            .map(|f| f.features.to_vec().iter().map(|&v| v as f64).collect())
             .collect();
 
-        let baseline_map = self.build_baseline_map();
-
-        let dist_pts = dist
+        let hard_vecs: Vec<Vec<f64>> = hard
             .iter()
-            .map(|d| {
-                let o3 = baseline_map
-                    .get(&d.function)
-                    .map(|b| b.2 as f64 / 1_000_000.0)
-                    .unwrap_or(0.0);
-                plots::DistPoint {
-                    name: d.function.clone(),
-                    p10: d.p10_ns as f64 / 1_000_000.0,
-                    p25: d.p25_ns as f64 / 1_000_000.0,
-                    median: d.median_ns as f64 / 1_000_000.0,
-                    p75: d.p75_ns as f64 / 1_000_000.0,
-                    p90: d.p90_ns as f64 / 1_000_000.0,
-                    o3,
+            .map(|f| f.features.to_vec().iter().map(|&v| v as f64).collect())
+            .collect();
+
+        feature_names
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let xs: Vec<f64> = feat_vecs.iter().map(|v| v[i]).collect();
+                let r = pearson_r(&xs, &gaps);
+
+                let mean_beats = if beats_vecs.is_empty() {
+                    0.0
+                } else {
+                    beats_vecs.iter().map(|v| v[i]).sum::<f64>() / beats_vecs.len() as f64
+                };
+                let mean_hard = if hard_vecs.is_empty() {
+                    0.0
+                } else {
+                    hard_vecs.iter().map(|v| v[i]).sum::<f64>() / hard_vecs.len() as f64
+                };
+
+                FeatureCorrelation {
+                    feature: name.to_string(),
+                    pearson_r: r,
+                    abs_r: r.abs(),
+                    mean_beats_o3: mean_beats,
+                    mean_hard,
                 }
             })
-            .collect();
-
-        let ir_features: Vec<plots::FeatureRow> = features
-            .iter()
-            .zip(zscore_matrix.iter())
-            .map(|(f, zrow)| plots::FeatureRow {
-                name: f.function.clone(),
-                cluster: f.cluster,
-                values: zrow.clone(),
-            })
-            .collect();
-
-        plots::PlotData {
-            ceiling: ceiling_pts,
-            enrichment: enrich_pts,
-            distributions: dist_pts,
-            ir_features,
-        }
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -568,7 +823,7 @@ impl EdaAnalyzer {
     fn write_ceiling_section(ceiling: &[CeilingEntry], report: &mut String) {
         report.push_str("2. CEILING ANALYSIS (Best of Random Search vs Baselines)\n");
         report.push_str("--------------------------------------------------------\n");
-        report.push_str("  Best = fastest from 2000 random pass sequences.\n");
+        report.push_str("  Best = fastest from random pass sequences.\n");
         report.push_str("  vs O3/O2 = % gap (negative = beats baseline). O0x = speedup over O0.\n\n");
         report.push_str(&format!(
             "  {:<22} {:>9} {:>9} {:>8} {:>8} {:>6} {:>9} {:>8} {:>4}\n",
@@ -681,34 +936,106 @@ impl EdaAnalyzer {
         report.push('\n');
     }
 
-    fn write_features_section(features: &[BenchmarkFeatureEntry], report: &mut String) {
-        report.push_str("5. IR FEATURE LANDSCAPE (Pre-optimization)\n");
+    fn write_impact_section(impacts: &[PassImpact], report: &mut String) {
+        report.push_str("5. PASS IMPACT (median speedup with vs. without)\n");
+        report.push_str("------------------------------------------------\n");
+        report.push_str(
+            "  Geo-mean speedup = exp(mean ln(median_without / median_with)) across functions.\n",
+        );
+        report.push_str("  > 1.0 means using this pass tends to produce faster code.\n\n");
+        report.push_str(&format!(
+            "  {:<28} {:>4} {:>12} {:>14} {:>10}\n",
+            "Pass", "Fns", "GeoSpeedup", "GeoSpeedup(T10)", "Enrich"
+        ));
+        report.push_str(&format!("  {}\n", "-".repeat(72)));
+
+        for imp in impacts.iter().take(30) {
+            let marker = if imp.geo_mean_speedup > 1.05 {
+                " +"
+            } else if imp.geo_mean_speedup < 0.95 {
+                " -"
+            } else {
+                "  "
+            };
+            report.push_str(&format!(
+                "  {:<28} {:>4} {:>11.3}x {:>13.3}x {:>9.2}x{}\n",
+                imp.pass_name,
+                imp.n_functions,
+                imp.geo_mean_speedup,
+                imp.geo_mean_speedup_top10,
+                imp.enrichment,
+                marker
+            ));
+        }
+        report.push('\n');
+    }
+
+    fn write_cooccurrence_section(pairs: &[PassCoOccurrence], report: &mut String) {
+        report.push_str("6. PASS CO-OCCURRENCE IN TOP-10% SEQUENCES\n");
         report.push_str("-------------------------------------------\n");
+        report.push_str(
+            "  Lift = P(A∩B) / (P(A)*P(B)) — lift > 1 means synergistic pairing.\n",
+        );
+        report.push_str(
+            "  Only pairs with lift > 1.1 and ≥3 co-occurrences shown.\n\n",
+        );
+        report.push_str(&format!(
+            "  {:<28} {:<28} {:>6} {:>8}\n",
+            "Pass A", "Pass B", "Count", "Lift"
+        ));
+        report.push_str(&format!("  {}\n", "-".repeat(76)));
+
+        for p in pairs.iter().take(20) {
+            report.push_str(&format!(
+                "  {:<28} {:<28} {:>6} {:>7.2}x\n",
+                p.pass_a, p.pass_b, p.count, p.lift
+            ));
+        }
+        report.push('\n');
+    }
+
+    fn write_seq_length_section(tiers: &[SeqLengthTier], report: &mut String) {
+        report.push_str("7. BEST SEQUENCE LENGTH BY DIFFICULTY TIER\n");
+        report.push_str("-------------------------------------------\n");
+        report.push_str("  Length of best-found pass sequence per benchmark, grouped by difficulty.\n\n");
+        report.push_str(&format!(
+            "  {:<12} {:>4} {:>8} {:>8} {:>6} {:>6}\n",
+            "Tier", "N", "Mean", "Median", "P25", "P75"
+        ));
+        report.push_str(&format!("  {}\n", "-".repeat(50)));
+
+        for t in tiers {
+            report.push_str(&format!(
+                "  {:<12} {:>4} {:>7.1} {:>8} {:>6} {:>6}\n",
+                t.difficulty, t.n_functions, t.mean_best_len,
+                t.median_best_len, t.p25_best_len, t.p75_best_len
+            ));
+        }
+        report.push('\n');
+    }
+
+    fn write_features_section(features: &[BenchmarkFeatureEntry], report: &mut String) {
+        report.push_str("8. IR FEATURE LANDSCAPE (Pre-optimization, sorted by gap vs O3)\n");
+        report.push_str("----------------------------------------------------------------\n");
         report.push_str(
             "  Features from clang -O3 -disable-llvm-optzns (frontend-annotated, no LLVM passes).\n",
         );
-        report.push_str(
-            "  Clustered by IR similarity (k-means, k=4 on z-scored features).\n\n",
-        );
+        report.push_str("  Sorted by gap_vs_o3 ascending (best-performing first).\n\n");
         report.push_str(&format!(
-            "  {:<22} {:>3} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>5} {:>9}\n",
-            "Benchmark", "C", "Add", "Mul", "Ld", "St", "Br", "Cal", "Phi", "Alc", "GEP", "Icm", "Fcm", "Ret", "Oth", "BB", "Inst", "Fn", "Lp", "Reach"
+            "  {:<22} {:>10} {:>11} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>5}\n",
+            "Benchmark", "Difficulty", "GapVsO3%",
+            "Add", "Mul", "Ld", "St", "Br", "Cal", "Phi", "Alc", "GEP",
+            "Icm", "Fcm", "Ret", "Oth", "BB", "Inst", "Fn", "Lp", "ld/st"
         ));
-        report.push_str(&format!("  {}\n", "-".repeat(130)));
+        report.push_str(&format!("  {}\n", "-".repeat(145)));
 
-        let mut current_cluster = None;
         for f in features {
-            if current_cluster != Some(f.cluster) {
-                if current_cluster.is_some() {
-                    report.push_str(&format!("  {}\n", "-".repeat(130)));
-                }
-                current_cluster = Some(f.cluster);
-            }
             let ir = &f.features;
             report.push_str(&format!(
-                "  {:<22} {:>3} {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>5} {:>9}\n",
+                "  {:<22} {:>10} {:>+10.1}% {:>5} {:>5} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>4} {:>5.2}\n",
                 f.function,
-                f.cluster,
+                f.difficulty,
+                f.gap_vs_o3_pct,
                 ir.add_count,
                 ir.mul_count,
                 ir.load_count,
@@ -726,15 +1053,43 @@ impl EdaAnalyzer {
                 ir.total_instruction_count,
                 ir.function_count,
                 ir.loop_depth_approx,
-                f.difficulty
+                ir.load_store_ratio,
+            ));
+        }
+        report.push('\n');
+    }
+
+    fn write_correlation_section(corr: &[FeatureCorrelation], report: &mut String) {
+        let mut sorted = corr.to_vec();
+        sorted.sort_by(|a, b| b.abs_r.partial_cmp(&a.abs_r).unwrap());
+
+        report.push_str("9. FEATURE-PERFORMANCE CORRELATIONS\n");
+        report.push_str("------------------------------------\n");
+        report.push_str(
+            "  Pearson r between raw IR feature and gap_vs_o3_pct.\n",
+        );
+        report.push_str(
+            "  Positive r = harder benchmarks have more of this feature.\n\n",
+        );
+        report.push_str(&format!(
+            "  {:<20} {:>10} {:>16} {:>12}\n",
+            "Feature", "Pearson r", "Mean(beats-O3)", "Mean(hard)"
+        ));
+        report.push_str(&format!("  {}\n", "-".repeat(62)));
+
+        for c in &sorted {
+            let bar = bar_str(c.pearson_r, 12);
+            report.push_str(&format!(
+                "  {:<20} {:>+9.3} {:>15.1} {:>12.1}  {}\n",
+                c.feature, c.pearson_r, c.mean_beats_o3, c.mean_hard, bar
             ));
         }
         report.push('\n');
     }
 
     fn write_summary(ceiling: &[CeilingEntry], report: &mut String) {
-        report.push_str("6. ACTIONABLE SUMMARY\n");
-        report.push_str("---------------------\n");
+        report.push_str("10. ACTIONABLE SUMMARY\n");
+        report.push_str("----------------------\n");
 
         let beats: Vec<&CeilingEntry> = ceiling.iter().filter(|c| c.gap_vs_o3_pct < 0.0).collect();
         let reachable: Vec<&CeilingEntry> = ceiling
@@ -805,68 +1160,42 @@ impl EdaAnalyzer {
 }
 
 // ---------------------------------------------------------------------------
-// Simple k-means (no external dep)
+// Math helpers
 // ---------------------------------------------------------------------------
 
-fn simple_kmeans(data: &[Vec<f64>], k: usize, max_iter: usize) -> Vec<usize> {
-    let n = data.len();
-    let dims = data[0].len();
-    if n <= k {
-        return (0..n).collect();
+fn median_u64(sorted: &[u64]) -> u64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0;
     }
+    sorted[n / 2]
+}
 
-    // Initialize centroids with evenly spaced indices
-    let mut centroids: Vec<Vec<f64>> = (0..k)
-        .map(|i| data[i * n / k].clone())
-        .collect();
-
-    let mut assignments = vec![0usize; n];
-
-    for _ in 0..max_iter {
-        // Assign each point to nearest centroid
-        let mut changed = false;
-        for (i, point) in data.iter().enumerate() {
-            let mut best_c = 0;
-            let mut best_dist = f64::MAX;
-            for (c, centroid) in centroids.iter().enumerate() {
-                let dist: f64 = point
-                    .iter()
-                    .zip(centroid.iter())
-                    .map(|(a, b)| (a - b).powi(2))
-                    .sum();
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_c = c;
-                }
-            }
-            if assignments[i] != best_c {
-                assignments[i] = best_c;
-                changed = true;
-            }
-        }
-
-        if !changed {
-            break;
-        }
-
-        // Recompute centroids
-        let mut sums = vec![vec![0.0f64; dims]; k];
-        let mut counts = vec![0usize; k];
-        for (i, point) in data.iter().enumerate() {
-            let c = assignments[i];
-            counts[c] += 1;
-            for (d, &v) in point.iter().enumerate() {
-                sums[c][d] += v;
-            }
-        }
-        for c in 0..k {
-            if counts[c] > 0 {
-                for d in 0..dims {
-                    centroids[c][d] = sums[c][d] / counts[c] as f64;
-                }
-            }
-        }
+fn pearson_r(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len().min(ys.len()) as f64;
+    if n < 2.0 {
+        return 0.0;
     }
+    let mx = xs.iter().sum::<f64>() / n;
+    let my = ys.iter().sum::<f64>() / n;
+    let num: f64 = xs.iter().zip(ys.iter()).map(|(x, y)| (x - mx) * (y - my)).sum();
+    let dx: f64 = xs.iter().map(|x| (x - mx).powi(2)).sum::<f64>().sqrt();
+    let dy: f64 = ys.iter().map(|y| (y - my).powi(2)).sum::<f64>().sqrt();
+    if dx * dy < 1e-10 {
+        0.0
+    } else {
+        num / (dx * dy)
+    }
+}
 
-    assignments
+/// ASCII bar for report legibility (range -1..+1 → width chars).
+fn bar_str(r: f64, width: usize) -> String {
+    let half = width / 2;
+    let filled = ((r.abs() * half as f64).round() as usize).min(half);
+    if r >= 0.0 {
+        format!("{}{}", " ".repeat(half), "+".repeat(filled))
+    } else {
+        let pad = half - filled;
+        format!("{}{}{}", " ".repeat(pad), "-".repeat(filled), " ".repeat(half))
+    }
 }
