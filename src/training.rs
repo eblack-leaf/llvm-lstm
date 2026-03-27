@@ -15,34 +15,33 @@
 // - Checkpoint strategy
 // - Curriculum learning (start with easy functions?)
 
-use serde::{Deserialize, Serialize};
-
+use burn::config::Config;
 use crate::env::EnvConfig;
 use crate::ppo::PpoConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Config, Debug)]
 pub struct TrainConfig {
+    /// Environment settings (benchmark paths, episode length, reward mode).
+    /// Required — contains PathBuf fields that have no Config literal default.
     pub env: EnvConfig,
+    /// PPO hyperparameters. Defaults to PpoConfig::new() if not overridden.
+    #[config(default = "PpoConfig::new()")]
     pub ppo: PpoConfig,
+    /// Total number of rollout-collect + PPO-update iterations.
+    #[config(default = 1000)]
     pub total_iterations: usize,
+    /// Number of environment steps collected per rollout batch.
+    #[config(default = 128)]
     pub rollout_steps: usize,
+    /// Run full evaluation every N iterations.
+    #[config(default = 50)]
     pub eval_interval: usize,
+    /// Directory to write model checkpoints.
+    /// Required — String defaults aren't supported as Config literals.
     pub checkpoint_dir: String,
+    /// Print training stats every N iterations.
+    #[config(default = 10)]
     pub log_interval: usize,
-}
-
-impl Default for TrainConfig {
-    fn default() -> Self {
-        Self {
-            env: EnvConfig::default(),
-            ppo: PpoConfig::default(),
-            total_iterations: 1000,
-            rollout_steps: 128,
-            eval_interval: 50,
-            checkpoint_dir: "checkpoints".to_string(),
-            log_interval: 10,
-        }
-    }
 }
 
 // TODO: Implement training loop

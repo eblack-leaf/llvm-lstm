@@ -9,35 +9,37 @@
 // 4. Mini-batch updates over collected rollouts
 // 5. Advantage normalization
 
-use serde::{Deserialize, Serialize};
+use burn::config::Config;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Config, Debug)]
 pub struct PpoConfig {
+    /// Clipped surrogate objective epsilon.
+    #[config(default = 0.2)]
     pub clip_epsilon: f32,
+    /// Weight of the value function loss term.
+    #[config(default = 0.5)]
     pub value_loss_coef: f32,
+    /// Entropy bonus coefficient — encourages exploration.
+    #[config(default = 0.01)]
     pub entropy_coef: f32,
+    /// Adam learning rate.
+    #[config(default = 3e-4)]
     pub learning_rate: f64,
+    /// Discount factor.
+    #[config(default = 0.99)]
     pub gamma: f32,
+    /// GAE lambda for advantage estimation.
+    #[config(default = 0.95)]
     pub gae_lambda: f32,
+    /// Number of PPO epochs per rollout batch.
+    #[config(default = 4)]
     pub num_epochs: usize,
+    /// Mini-batch size for each PPO update step.
+    #[config(default = 64)]
     pub mini_batch_size: usize,
+    /// Maximum gradient norm for clipping.
+    #[config(default = 0.5)]
     pub max_grad_norm: f32,
-}
-
-impl Default for PpoConfig {
-    fn default() -> Self {
-        Self {
-            clip_epsilon: 0.2,
-            value_loss_coef: 0.5,
-            entropy_coef: 0.01,
-            learning_rate: 3e-4,
-            gamma: 0.99,
-            gae_lambda: 0.95,
-            num_epochs: 4,
-            mini_batch_size: 64,
-            max_grad_norm: 0.5,
-        }
-    }
 }
 
 // TODO: Implement PPO update step

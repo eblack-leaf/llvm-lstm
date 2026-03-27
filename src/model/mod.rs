@@ -1,2 +1,1 @@
-pub mod policy;
-pub mod value;
+pub mod actor_critic;

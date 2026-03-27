@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use burn::config::Config;
 use serde::{Deserialize, Serialize};
 
 use crate::ir_features::IrFeatures;
@@ -16,24 +17,32 @@ pub enum RewardMode {
     PerStep,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Config, Debug)]
 pub struct EnvConfig {
+    /// Directory containing .c benchmark files.
+    /// No inline default — PathBuf can't be expressed as a Config literal.
     pub functions_dir: PathBuf,
+    /// Working directory for compiled IR and binaries.
     pub work_dir: PathBuf,
+    /// Maximum number of passes per episode before forced termination.
+    #[config(default = 40)]
     pub max_seq_length: usize,
+    /// Whether to give reward at every step or only at episode end.
+    /// No inline default — enum variants aren't Config literals.
     pub reward_mode: RewardMode,
+    /// Number of benchmark process invocations to average per timing call.
+    #[config(default = 3)]
     pub benchmark_runs: usize,
 }
 
-impl Default for EnvConfig {
-    fn default() -> Self {
-        Self {
-            functions_dir: PathBuf::from("benchmarks"),
-            work_dir: PathBuf::from("/tmp/llvm-lstm-env"),
-            max_seq_length: 40,
-            reward_mode: RewardMode::Sparse,
-            benchmark_runs: 3,
-        }
+impl EnvConfig {
+    /// Convenience constructor with the standard project defaults.
+    pub fn default_paths() -> Self {
+        Self::new(
+            PathBuf::from("benchmarks"),
+            PathBuf::from("/tmp/llvm-lstm-env"),
+            RewardMode::Sparse,
+        )
     }
 }
 
@@ -239,23 +248,31 @@ impl LlvmEnv {
 
     fn compute_reward(&self, function: &str, time_ns: u64) -> f32 {
         if let Some(baselines) = self.baselines.get(function) {
-            // Reward = speedup over O0, normalized by O3
-            // Positive if faster than O0, bonus if faster than O3
-            let o0 = baselines.o0_ns as f64;
-            let o3 = baselines.o3_ns as f64;
+            // Tiered reward: scaled points for beating each baseline tier,
+            // plus a continuous gradient for margin above O3.
+            //
+            //   r = w0 * 1[t < O0] + w2 * 1[t < O2] + w3 * 1[t < O3]
+            //       + s3 * (O3 - t) / O3
+            //
+            // Weights chosen so that beating O3 dominates, but the agent
+            // receives positive signal even when it only beats O0.
+            const W0: f64 = 0.1;   // points for beating -O0
+            const W2: f64 = 0.3;   // points for beating -O2
+            const W3: f64 = 0.5;   // points for beating -O3
+            const S3: f64 = 1.0;   // scale for continuous O3 margin
+
             let t = time_ns as f64;
+            let o0 = baselines.o0_ns as f64;
+            let o2 = baselines.o2_ns as f64;
+            let o3 = baselines.o3_ns as f64;
 
-            // Speedup ratio: how much faster than O0
-            let speedup = (o0 - t) / o0;
+            let tier = if t < o0 { W0 } else { 0.0 }
+                     + if t < o2 { W2 } else { 0.0 }
+                     + if t < o3 { W3 } else { 0.0 };
 
-            // Bonus for beating O3
-            let o3_bonus = if t < o3 as u64 as f64 {
-                0.5 * ((o3 - t) / o3)
-            } else {
-                0.0
-            };
+            let margin = S3 * (o3 - t) / o3; // positive when faster than O3
 
-            (speedup + o3_bonus) as f32
+            (tier + margin) as f32
         } else {
             0.0
         }
