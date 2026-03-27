@@ -1,6 +1,7 @@
 /target
 .claude
 .idea
+.venv
 
 # Generated data and results
 data/
