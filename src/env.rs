@@ -34,6 +34,9 @@ pub struct EnvConfig {
     /// Number of benchmark process invocations to average per timing call.
     #[config(default = 3)]
     pub benchmark_runs: usize,
+    /// Internal timing iterations inside each benchmark binary (passed as argv[1]).
+    #[config(default = 51)]
+    pub bench_iters: usize,
 }
 
 
@@ -87,7 +90,8 @@ impl LlvmEnv {
             bail!("No .c files found in {}", config.functions_dir.display());
         }
 
-        let pipeline = CompilationPipeline::new(config.work_dir.clone());
+        let pipeline = CompilationPipeline::new(config.work_dir.clone())
+            .with_bench_iters(config.bench_iters);
 
         Ok(Self {
             pipeline,
@@ -109,7 +113,8 @@ impl LlvmEnv {
         if functions.is_empty() {
             bail!("No .c files found in {}", config.functions_dir.display());
         }
-        let pipeline = CompilationPipeline::new(config.work_dir.clone());
+        let pipeline = CompilationPipeline::new(config.work_dir.clone())
+            .with_bench_iters(config.bench_iters);
         Ok(Self {
             pipeline,
             functions,

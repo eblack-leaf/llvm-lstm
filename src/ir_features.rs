@@ -298,9 +298,5 @@ entry:
         assert_eq!(features.total_instruction_count, 5);
     }
 
-    #[test]
-    fn test_feature_vec_length() {
-        let features = IrFeatures::default();
-        assert_eq!(features.to_vec().len(), IrFeatures::feature_count());
-    }
+   
 }

@@ -109,6 +109,18 @@ enum Commands {
         /// Complete episodes to collect per iteration
         #[arg(long, default_value = "6")]
         episodes: usize,
+        /// Entropy bonus coefficient (higher = more exploration)
+        #[arg(long, default_value = "0.02")]
+        entropy_coef: f32,
+        /// Benchmark invocations per episode final step (1 is enough for training)
+        #[arg(long, default_value = "1")]
+        benchmark_runs: usize,
+        /// Internal timing iterations inside each benchmark binary
+        #[arg(long, default_value = "51")]
+        bench_iters: usize,
+        /// Max pass sequence length per episode
+        #[arg(long, default_value = "40")]
+        max_seq_length: usize,
     },
 
     /// Evaluate agent against baselines
@@ -206,16 +218,21 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length } => {
             use env::{EnvConfig, RewardMode};
+            use ppo::PpoConfig;
             use training::{TrainConfig, train};
 
             let config = TrainConfig::new(
-                EnvConfig::new(functions, work_dir, RewardMode::Sparse),
+                EnvConfig::new(functions, work_dir, RewardMode::Sparse)
+                    .with_benchmark_runs(benchmark_runs)
+                    .with_bench_iters(bench_iters)
+                    .with_max_seq_length(max_seq_length),
                 checkpoint_dir,
             )
             .with_total_iterations(iterations)
-            .with_episodes_per_iteration(episodes);
+            .with_episodes_per_iteration(episodes)
+            .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef));
 
             train(config)?;
         }

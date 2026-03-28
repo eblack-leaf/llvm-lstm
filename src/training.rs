@@ -139,7 +139,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 let mut rollout       = Rollout::new();
                 let mut hidden: Option<Tensor<NdArray, 2>> = None;
                 let mut prev_action: i64 = 0;
-                let mut step_idx: usize  = 0;
                 let mut episode_reward   = 0.0f32;
 
                 loop {
@@ -183,7 +182,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
                     hidden = Some(new_hidden);
                     prev_action = action as i64;
-                    step_idx += 1;
                     state = step.state;
                 }
 
