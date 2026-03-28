@@ -7,13 +7,16 @@ use anyhow::Result;
 use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
 use burn::config::Config;
 use burn::module::AutodiffModule;
+use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::AdamConfig;
+use burn::prelude::Module as _;
+use burn::record::CompactRecorder;
 use burn::prelude::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 
-use crate::actor_critic::{Actor, ActorConfig, Critic, CriticConfig};
+use crate::actor_critic::{ActorCritic, ActorCriticConfig};
 use crate::env::{EnvConfig, LlvmEnv};
 use crate::ppo::{PpoConfig, ppo_update};
 use crate::rollout::Rollout;
@@ -31,9 +34,10 @@ pub struct TrainConfig {
     /// Total number of rollout-collect + PPO-update iterations.
     #[config(default = 1000)]
     pub total_iterations: usize,
-    /// Number of complete episodes to collect per iteration (one per env cycle).
-    #[config(default = 6)]
-    pub episodes_per_iteration: usize,
+    /// Number of episodes to collect per function per iteration.
+    /// Total episodes per iteration = episodes_per_function * num_functions.
+    #[config(default = 4)]
+    pub episodes_per_function: usize,
     /// Run full evaluation every N iterations.
     #[config(default = 50)]
     pub eval_interval: usize,
@@ -57,10 +61,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let mut env = LlvmEnv::new(config.env)?;
     env.compute_baselines()?;
 
-    let mut actor        = ActorConfig::new().init::<B>(&device);
-    let mut critic       = CriticConfig::new().init::<B>(&device);
-    let mut actor_optim  = AdamConfig::new().init::<B, Actor<B>>();
-    let mut critic_optim = AdamConfig::new().init::<B, Critic<B>>();
+    let mut model = ActorCriticConfig::new().init::<B>(&device);
+    let grad_clip = Some(GradientClippingConfig::Norm(0.5));
+    let mut optim = AdamConfig::new().with_grad_clipping(grad_clip).init::<B, ActorCritic<B>>();
 
     // ── Progress bars ─────────────────────────────────────────────────────────
     let multi = MultiProgress::new();
@@ -72,7 +75,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             .unwrap(),
     );
 
-    let ep_pb = multi.add(ProgressBar::new(config.episodes_per_iteration as u64));
+    let ep_pb = multi.add(ProgressBar::new(0)); // length set each iteration after n_funcs is known
     ep_pb.set_style(
         ProgressStyle::default_bar()
             .template("  episode   {bar:20.cyan}   {pos}/{len}  {msg}")
@@ -89,6 +92,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
     // Exponential moving average of episode reward per function (α=0.1).
     let mut fn_ema: HashMap<String, f32> = HashMap::new();
+    // Best mean EMA reward seen — tracked every log interval, only saves when positive.
+    let mut best_mean_ema: f32 = 0.0;
 
     // Previous logged stats for computing deltas.
     let mut prev_ev:  Option<f32> = None;
@@ -96,13 +101,16 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let mut prev_kl:  Option<f32> = None;
 
     // Maximum entropy for the action space — used to normalise entropy to [0,1].
-    let max_entropy = (ActorConfig::new().num_actions as f32).ln();
+    let max_entropy = (ActorCriticConfig::new().num_actions as f32).ln();
 
     // Pre-computed baselines shared (read-only) across parallel workers.
     let baselines = env.baselines().clone();
     let n_funcs   = env.num_functions();
 
     // ── Training loop ─────────────────────────────────────────────────────────
+    let total_episodes = n_funcs * config.episodes_per_function;
+    ep_pb.set_length(total_episodes as u64);
+
     for iteration in 0..config.total_iterations {
         let iter_start = Instant::now();
         ep_pb.set_position(0);
@@ -110,8 +118,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // ── Collect episodes in parallel ──────────────────────────────────────
         // Each episode gets its own LlvmEnv with a unique work dir so that
         // simultaneous compilations of the same function don't clobber each other.
-        let actor_inf  = actor.valid();
-        let critic_inf = critic.valid();
+        let model_inf = model.valid();
         let base_work_dir  = &worker_work_dir;
         // Clear the IR cache each iteration — stochastic exploration means cross-
         // iteration cache hits are near-zero after the first few steps, and the
@@ -126,12 +133,13 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // Actor<NdArray> contains OnceCell which is !Sync, so par_iter().map() won't
         // compile (closure needs Sync). map_with() side-steps this: the models live
         // in per-thread state (T: Send+Clone only, not Sync).
-        let episode_results: Vec<(Rollout, String, f32)> = (0..config.episodes_per_iteration)
+        let episode_results: Vec<(Rollout, String, f32)> = (0..total_episodes)
             .into_par_iter()
             .map_with(
-                (actor_inf, critic_inf),
-                |(actor_s, critic_s), ep| -> anyhow::Result<(Rollout, String, f32)> {
-                let func_index = (iteration * config.episodes_per_iteration + ep) % n_funcs;
+                model_inf,
+                |model_s, ep| -> anyhow::Result<(Rollout, String, f32)> {
+                // Round-robin: all functions covered before any gets a second episode.
+                let func_index = ep % n_funcs;
 
                 // Unique scratch directory — avoids file races between parallel episodes.
                 let worker_dir = base_work_dir.join(format!("worker-{ep}"));
@@ -151,9 +159,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 let device  = NdArrayDevice::default();
                 let mut rng = rand::thread_rng();
 
-                let mut rollout        = Rollout::new();
-                let mut hidden: Option<Tensor<NdArray, 2>>        = None;
-                let mut critic_hidden: Option<Tensor<NdArray, 2>> = None;
+                let mut rollout     = Rollout::new();
+                let mut hidden: Option<Tensor<NdArray, 2>> = None;
                 let mut prev_action: i64 = 0;
                 let mut episode_reward   = 0.0f32;
 
@@ -167,10 +174,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
                         &device,
                     );
 
-                    let (logits, new_hidden) =
-                        actor_s.forward(features.clone(), prev_act.clone(), hidden);
-                    let (value_tensor, new_critic_hidden) =
-                        critic_s.forward(features, prev_act, critic_hidden);
+                    let (logits, value_tensor, new_hidden) =
+                        model_s.forward(features, prev_act, hidden);
                     let value_scalar: f32 = value_tensor
                         .reshape([1])
                         .into_scalar()
@@ -197,10 +202,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
                         break;
                     }
 
-                    hidden        = Some(new_hidden);
-                    critic_hidden = Some(new_critic_hidden);
-                    prev_action   = action as i64;
-                    state         = step.state;
+                    hidden      = Some(new_hidden);
+                    prev_action = action as i64;
+                    state       = step.state;
                 }
 
                 Ok((rollout, func_name, episode_reward))
@@ -208,8 +212,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         // Collect rollouts and update per-function EMA (sequential — no races).
-        let mut rollouts: Vec<Rollout> = Vec::with_capacity(config.episodes_per_iteration);
-        let mut rollout_funcs: Vec<String> = Vec::with_capacity(config.episodes_per_iteration);
+        let mut rollouts: Vec<Rollout> = Vec::with_capacity(total_episodes);
+        let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
         for (rollout, func_name, episode_reward) in episode_results {
             let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
             *ema = 0.9 * *ema + 0.1 * episode_reward;
@@ -250,11 +254,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let ev = explained_variance(&all_returns, &combined.values);
 
         let stats;
-        (actor, critic, stats) = ppo_update(
-            actor,
-            critic,
-            &mut actor_optim,
-            &mut critic_optim,
+        (model, stats) = ppo_update(
+            model,
+            &mut optim,
             &combined,
             &all_advantages,
             &all_returns,
@@ -273,68 +275,82 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let kl       = stats.approx_kl;
             let clip     = stats.clip_fraction;
 
-            // Delta indicators vs previous log point (↑↓ with sign).
+            // Small delta arrows — green up, red down, blank if negligible.
             let delta = |cur: f32, prev: Option<f32>| -> String {
                 match prev {
-                    None => "     ".to_string(),
+                    None => "    ".to_string(),
                     Some(p) => {
                         let d = cur - p;
-                        if d.abs() < 0.005 { "     ".to_string() }
+                        if d.abs() < 0.005 { "    ".to_string() }
                         else if d > 0.0    { format!(" \x1b[32m↑{:.2}\x1b[0m", d.abs()) }
                         else               { format!(" \x1b[31m↓{:.2}\x1b[0m", d.abs()) }
                     }
                 }
             };
 
-            // Color a value based on healthy/warning/bad thresholds.
-            // good_range: (lo, hi) where the value is "healthy".
-            let color = |s: String, good: bool, warn: bool| -> String {
-                if good      { format!("\x1b[32m{s}\x1b[0m") }   // green
-                else if warn { format!("\x1b[33m{s}\x1b[0m") }   // yellow
-                else         { format!("\x1b[31m{s}\x1b[0m") }   // red
-            };
+            // ev: cyan (good) → yellow → red
+            let ev_s = if ev > 0.3      { format!("\x1b[36m{ev:+.2}\x1b[0m") }
+                       else if ev > 0.0 { format!("\x1b[33m{ev:+.2}\x1b[0m") }
+                       else             { format!("\x1b[31m{ev:+.2}\x1b[0m") };
 
-            let ev_s = color(
-                format!("{ev:+.2}"),
-                ev > 0.3,
-                ev > 0.0,
-            );
-            let ent_s = color(
-                format!("{ent_frac:.2}"),
-                ent_frac > 0.4,
-                ent_frac > 0.2,
-            );
-            let kl_s = color(
-                format!("{kl:.4}"),
-                kl < 0.05,
-                kl < 0.1,
-            );
-            let clip_s = color(
-                format!("{clip:.2}"),
-                clip < 0.3,
-                clip < 0.5,
-            );
+            // ent: magenta (high/exploring) → yellow → red (collapsed)
+            let ent_s = if ent_frac > 0.4      { format!("\x1b[35m{ent_frac:.2}\x1b[0m") }
+                        else if ent_frac > 0.2 { format!("\x1b[33m{ent_frac:.2}\x1b[0m") }
+                        else                   { format!("\x1b[31m{ent_frac:.2}\x1b[0m") };
+
+            // kl: dim/white (low=healthy) → yellow → red (too high)
+            let kl_s = if kl < 0.05     { format!("\x1b[2m{kl:.4}\x1b[0m") }
+                       else if kl < 0.1 { format!("\x1b[33m{kl:.4}\x1b[0m") }
+                       else             { format!("\x1b[31m{kl:.4}\x1b[0m") };
+
+            // clip: dim/white (low=healthy) → yellow → red
+            let clip_s = if clip < 0.2      { format!("\x1b[2m{clip:.2}\x1b[0m") }
+                         else if clip < 0.4 { format!("\x1b[33m{clip:.2}\x1b[0m") }
+                         else               { format!("\x1b[31m{clip:.2}\x1b[0m") };
 
             let dev  = delta(ev,       prev_ev);
             let dent = delta(ent_frac, prev_ent);
             let dkl  = delta(kl,       prev_kl);
 
-            // Per-function EMA summary: color positive green, negative red.
+            // Mean EMA across all functions — bold cyan when positive, yellow when near 0, red when negative.
+            let mean_ema = if fn_ema.is_empty() { 0.0 }
+                           else { fn_ema.values().sum::<f32>() / fn_ema.len() as f32 };
+            let ema_s = if mean_ema > 0.05       { format!("\x1b[1;36m{mean_ema:+.3}\x1b[0m") }
+                        else if mean_ema > -0.05 { format!("\x1b[33m{mean_ema:+.3}\x1b[0m") }
+                        else                     { format!("\x1b[31m{mean_ema:+.3}\x1b[0m") };
+
+            // Per-function EMA: cyan positive, yellow near-zero, red negative.
             let mut fn_summary: Vec<(&str, f32)> = fn_ema
                 .iter()
                 .map(|(k, &v)| (k.as_str(), v))
                 .collect();
             fn_summary.sort_by_key(|(k, _)| *k);
+
             train_pb.println(format!(
-                "  [{iteration:>4}] steps={:>4}  ev={ev_s}{dev}  ent={ent_s}{dent}  kl={kl_s}{dkl}  clip={clip_s}",
+                "  [{iteration:>4}] steps={:>4}  ev={ev_s}{dev}  ent={ent_s}{dent}  kl={kl_s}{dkl}  clip={clip_s}  ema={ema_s}",
                 combined.len(),
             ));
             for (k, v) in &fn_summary {
                 let s = format!("         {k:>24} = {v:+.3}");
-                let colored = if *v > 0.05       { format!("\x1b[32m{s}\x1b[0m") }
+                let colored = if *v > 0.05       { format!("\x1b[36m{s}\x1b[0m") }
                               else if *v > -0.05 { format!("\x1b[33m{s}\x1b[0m") }
                               else               { format!("\x1b[31m{s}\x1b[0m") };
                 train_pb.println(colored);
+            }
+
+            // Best checkpoint: checked every log interval, saved only when
+            // mean EMA is positive (policy beating baselines on average) and improving.
+            if mean_ema > best_mean_ema {
+                best_mean_ema = mean_ema;
+                std::fs::create_dir_all(&config.checkpoint_dir).ok();
+                let best = format!("{}/best", config.checkpoint_dir);
+                if let Err(e) = model.valid().save_file(&best, &CompactRecorder::new()) {
+                    train_pb.println(format!("  warn: best checkpoint save failed: {e}"));
+                } else {
+                    train_pb.println(format!(
+                        "  \x1b[1;36m★ new best\x1b[0m  mean_ema={mean_ema:+.3}  → {best}.mpk"
+                    ));
+                }
             }
 
             prev_ev  = Some(ev);
@@ -342,9 +358,13 @@ pub fn train(config: TrainConfig) -> Result<()> {
             prev_kl  = Some(kl);
         }
 
-        // ── Checkpoint ────────────────────────────────────────────────────────
+        // ── Periodic checkpoint ───────────────────────────────────────────────
         if iteration % config.eval_interval == 0 && iteration > 0 {
-            // TODO: actor.save_file / critic.save_file
+            std::fs::create_dir_all(&config.checkpoint_dir).ok();
+            let ckpt = format!("{}/iter_{:04}", config.checkpoint_dir, iteration);
+            if let Err(e) = model.valid().save_file(&ckpt, &CompactRecorder::new()) {
+                train_pb.println(format!("  warn: checkpoint save failed: {e}"));
+            }
         }
     }
 

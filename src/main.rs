@@ -106,8 +106,8 @@ enum Commands {
         /// Total number of collect+update iterations
         #[arg(long, default_value = "1000")]
         iterations: usize,
-        /// Complete episodes to collect per iteration
-        #[arg(long, default_value = "6")]
+        /// Episodes to collect per function per iteration (total = episodes * num_functions)
+        #[arg(long, default_value = "4")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.02")]
@@ -162,6 +162,16 @@ enum Commands {
         /// Source file (.c or .ll)
         #[arg(long)]
         file: PathBuf,
+    },
+
+    /// Extract IR features for all functions in a directory and generate heatmap PNG
+    PlotFeatures {
+        /// Directory containing benchmark .c files
+        #[arg(long, default_value = "benchmarks")]
+        functions: PathBuf,
+        /// Output directory for ir_features.json and PNG
+        #[arg(long, default_value = "eda_output")]
+        output: PathBuf,
     },
 
 }
@@ -231,7 +241,7 @@ fn main() -> Result<()> {
                 checkpoint_dir,
             )
             .with_total_iterations(iterations)
-            .with_episodes_per_iteration(episodes)
+            .with_episodes_per_function(episodes)
             .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef));
 
             train(config)?;
@@ -248,13 +258,92 @@ fn main() -> Result<()> {
             let evaluator = evaluation::Evaluator::new(&functions, &work_dir, 3)?;
 
             let agent_results = if let Some(model_path) = model {
-                // TODO: Load trained model and generate pass sequences
-                // 1. Load checkpoint from model_path
-                // 2. For each function, run inference to produce Vec<Pass>
-                // 3. Call evaluator.eval_sequence(&passes)
+                use burn::backend::{NdArray, ndarray::NdArrayDevice};
+                use burn::record::CompactRecorder;
+                use burn::tensor::{Int, Tensor, TensorData};
+                use evaluation::EvalResult;
+                use env::{EnvConfig, LlvmEnv, RewardMode};
+                use actor_critic::{ActorCritic, ActorCriticConfig};
+                use burn::prelude::Module as _;
+
                 eprintln!("Loading model from {}...", model_path.display());
-                eprintln!("TODO: Implement model loading + inference");
-                None
+                let device = NdArrayDevice::default();
+                let model: ActorCritic<NdArray> = ActorCriticConfig::new()
+                    .init::<NdArray>(&device)
+                    .load_file(&model_path, &CompactRecorder::new(), &device)?;
+
+                let inf_config = EnvConfig::new(
+                    functions.clone(),
+                    work_dir.join("inference"),
+                    RewardMode::Sparse,
+                );
+                let mut env = LlvmEnv::new(inf_config)?;
+                eprintln!("Computing baselines for inference...");
+                env.compute_baselines()?;
+                let baselines = env.baselines().clone();
+
+                let mut results: Vec<EvalResult> = Vec::new();
+                for func_idx in 0..env.num_functions() {
+                    let mut state = env.reset_to(func_idx)?;
+                    let func_name = env.current_function_name().unwrap_or_else(|| "?".into());
+                    eprintln!("  inference: {func_name}");
+
+                    let mut hidden: Option<Tensor<NdArray, 2>> = None;
+                    let mut prev_action: i64 = 0;
+                    let mut passes: Vec<Pass> = Vec::new();
+
+                    let (time_ns, size_bytes) = loop {
+                        let feat = Tensor::<NdArray, 2>::from_data(
+                            TensorData::new(state.features.clone(), [1, state.features.len()]),
+                            &device,
+                        );
+                        let prev_act = Tensor::<NdArray, 1, Int>::from_data(
+                            TensorData::new(vec![prev_action], [1]),
+                            &device,
+                        );
+
+                        let (logits, _value, new_hidden) = model.forward(feat, prev_act, hidden);
+                        let logits_vec: Vec<f32> = logits.into_data().to_vec::<f32>()?;
+
+                        // Greedy: argmax instead of sampling
+                        let action = logits_vec
+                            .iter()
+                            .enumerate()
+                            .max_by(|(_, a): &(usize, &f32), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+
+                        let pass = Pass::from_index(action);
+                        let step = env.step(action)?;
+
+                        if pass != Pass::Stop {
+                            passes.push(pass);
+                        }
+
+                        if step.done {
+                            break (
+                                step.info.execution_time_ns.unwrap_or(u64::MAX),
+                                step.info.binary_size_bytes.unwrap_or(0),
+                            );
+                        }
+
+                        hidden = Some(new_hidden);
+                        prev_action = action as i64;
+                        state = step.state;
+                    };
+
+                    let bl = baselines.get(&func_name);
+                    results.push(EvalResult {
+                        function: func_name,
+                        method: "agent_greedy".to_string(),
+                        pass_sequence: passes.iter().map(|p| p.opt_name().to_string()).collect(),
+                        execution_time_ns: time_ns,
+                        binary_size_bytes: size_bytes,
+                        speedup_vs_o0: bl.map_or(0.0, |b| b.o0_ns as f64 / time_ns.max(1) as f64),
+                        speedup_vs_o3: bl.map_or(0.0, |b| b.o3_ns as f64 / time_ns.max(1) as f64),
+                    });
+                }
+                Some(results)
             } else {
                 None
             };
@@ -302,6 +391,51 @@ fn main() -> Result<()> {
             eprintln!("  Binary size: {} bytes", result.binary_size_bytes);
         }
 
+
+        Commands::PlotFeatures { functions, output } => {
+            use serde_json::{json, Value};
+
+            std::fs::create_dir_all(&output)?;
+            let work_dir = output.join("_work");
+            let pipe = pipeline::CompilationPipeline::new(work_dir);
+
+            let mut paths: Vec<_> = std::fs::read_dir(&functions)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "c"))
+                .collect();
+            paths.sort();
+
+            let mut entries: Vec<Value> = Vec::new();
+            for path in &paths {
+                let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+                eprint!("  {stem}...");
+                let ir = pipe.emit_ir(path)?;
+                let feats = ir_features::IrFeatures::from_ll_file(&ir)?;
+                let mut v = serde_json::to_value(&feats)?;
+                v["function"]      = json!(stem);
+                v["difficulty"]    = json!("unknown");
+                v["gap_vs_o3_pct"] = json!(0.0f64);
+                entries.push(v);
+                eprintln!(" ok");
+            }
+
+            let json_path = output.join("ir_features.json");
+            let file = std::fs::File::create(&json_path)?;
+            serde_json::to_writer_pretty(file, &entries)?;
+            eprintln!("Wrote {}", json_path.display());
+
+            // Call the existing plot script
+            let status = std::process::Command::new("python3")
+                .arg("scripts/plot_eda.py")
+                .arg(&output)
+                .status();
+            match status {
+                Ok(s) if s.success() => eprintln!("PNG written to {}/ir_features_heatmap.png", output.display()),
+                Ok(s) => eprintln!("plot script exited {s} — run manually: python3 scripts/plot_eda.py {}", output.display()),
+                Err(e) => eprintln!("could not run plot script ({e}) — run manually: python3 scripts/plot_eda.py {}", output.display()),
+            }
+        }
 
         Commands::Features { file } => {
             let features = if file.extension().is_some_and(|e| e == "ll") {

@@ -4,7 +4,7 @@ use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData, activation};
 
-use crate::actor_critic::{Actor, Critic};
+use crate::actor_critic::ActorCritic;
 use crate::rollout::Rollout;
 
 type B = Autodiff<NdArray>;
@@ -32,9 +32,8 @@ pub struct PpoConfig {
     /// Number of PPO epochs per rollout batch.
     #[config(default = 8)]
     pub num_epochs: usize,
-    /// Stop actor updates when approx KL exceeds this threshold.
-    /// Critic continues updating every epoch regardless.
-    #[config(default = 0.01)]
+    /// Stop updates when approx KL exceeds this threshold.
+    #[config(default = 0.05)]
     pub target_kl: f32,
 }
 
@@ -49,27 +48,22 @@ pub struct PpoStats {
 
 /// PPO update over one full rollout batch.
 ///
-/// Actor and critic are trained with separate backward passes.
-///
-/// For the actor, each episode is re-rolled as a full sequence through the GRU
-/// (starting from hidden=None, matching collection), so log_probs_new are exact.
-///
-/// For the critic (MLP), all steps are processed in one flat batch — no hidden
-/// state, no episode splitting needed.
-pub fn ppo_update<OA, OC>(
-    mut actor: Actor<B>,
-    mut critic: Critic<B>,
-    actor_optim: &mut OA,
-    critic_optim: &mut OC,
+/// Actor and critic share a GRU trunk; a single forward pass produces both
+/// logits and values, and a single combined backward pass updates all weights.
+/// The combined loss is `policy_loss - entropy_coef*entropy + value_loss_coef*value_loss`.
+/// Updates are gated by `target_kl`: if the approximate KL divergence from the
+/// old policy exceeds the threshold, the epoch is skipped entirely.
+pub fn ppo_update<O>(
+    mut model: ActorCritic<B>,
+    optim: &mut O,
     rollout: &Rollout,
     advantages: &[f32],
     returns: &[f32],
     config: &PpoConfig,
     device: &NdArrayDevice,
-) -> (Actor<B>, Critic<B>, PpoStats)
+) -> (ActorCritic<B>, PpoStats)
 where
-    OA: Optimizer<Actor<B>, B>,
-    OC: Optimizer<Critic<B>, B>,
+    O: Optimizer<ActorCritic<B>, B>,
 {
     let n = rollout.len();
     let feat_dim = rollout.states[0].len();
@@ -77,13 +71,7 @@ where
     let mut stats = PpoStats::default();
 
     for epoch in 0..config.num_epochs {
-        // ── Actor: single batched GRU forward over all episodes ───────────────
-        //
-        // Pad all episodes to max_T and run one GRU call instead of n_ep separate
-        // calls. Padding positions are zero-filled and masked out after the forward.
-        // Real steps have identical hidden states to the sequential version —
-        // same inputs, same GRU from hidden=None, so gradients are exact.
-        //
+        // ── Build padded episode buffers for batched GRU forward ──────────────
         let n_ep  = episodes.len();
         let max_t = episodes.iter().map(|r| r.len()).max().unwrap_or(1);
 
@@ -115,13 +103,18 @@ where
             device,
         );
 
-        // [n_ep, max_T, num_actions] → flatten → select real rows → [n, num_actions]
-        let logits_3d = actor.forward_batch(features_pad.clone(), prev_pad.clone());
-        let n_act = logits_3d.shape().dims[2];
+        // ── Single forward pass — shared trunk returns logits + values ─────────
+        let (logits_3d, values_3d) = model.forward_batch(features_pad, prev_pad);
+
+        let n_act       = logits_3d.shape().dims[2];
         let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);
+        let values_flat = values_3d.reshape([n_ep * max_t, 1]);
 
         let idx = Tensor::<B, 1, Int>::from_data(TensorData::new(real_idx, [n]), device);
         let logits = logits_flat.gather(0, idx.clone().unsqueeze_dim::<2>(1).expand([n, n_act]));
+        let values = values_flat
+            .gather(0, idx.unsqueeze_dim::<2>(1).expand([n, 1]))
+            .reshape([n]);
 
         let log_probs_all = activation::log_softmax(logits.clone(), 1);
         let probs_all     = activation::softmax(logits, 1);
@@ -145,23 +138,20 @@ where
             device,
         );
 
-        // Normalize advantages
+        // Scale advantages — per-function mean centering already done in training.rs,
+        // so only divide by global std here to standardize the scale.
         let adv = Tensor::<B, 1>::from_data(
             TensorData::new(advantages.to_vec(), [n]),
             device,
         );
-        let adv_mean = adv.clone().mean();
-        let adv_std  = (adv.clone() - adv_mean.clone())
-            .powf_scalar(2.0f32)
-            .mean()
-            .sqrt();
-        let adv = (adv - adv_mean) / (adv_std + 1e-8);
+        let adv_std = adv.clone().powf_scalar(2.0f32).mean().sqrt();
+        let adv = adv / (adv_std + 1e-8);
 
         // Probability ratio and clipped surrogate objective
         let log_ratio = log_probs_new - log_probs_old;
         let ratio     = log_ratio.clone().exp();
 
-        // Extract ratio values for clip_fraction before ratio is consumed.
+        // Extract ratio values for clip_fraction on the final epoch.
         let ratio_vec: Vec<f32> = if epoch + 1 == config.num_epochs {
             ratio.clone().into_data().to_vec().unwrap_or_default()
         } else {
@@ -178,12 +168,6 @@ where
         let policy_loss =
             -((obj1.clone() + obj2.clone() - (obj1 - obj2).abs()) / 2.0).mean();
 
-        // ── Critic: same padded-batch forward as actor ────────────────────────
-        let values_3d  = critic.forward_batch(features_pad, prev_pad); // [n_ep, max_T, 1]
-        let values_flat = values_3d.reshape([n_ep * max_t, 1]);
-        let values = values_flat
-            .gather(0, idx.unsqueeze_dim::<2>(1).expand([n, 1]))
-            .reshape([n]);
         let ret = Tensor::<B, 1>::from_data(
             TensorData::new(returns.to_vec(), [n]),
             device,
@@ -209,20 +193,17 @@ where
         }
 
         if approx_kl_now.abs() <= config.target_kl {
-            // ── Actor backward ────────────────────────────────────────────────
-            let actor_loss = policy_loss - entropy.mul_scalar(config.entropy_coef);
-            let actor_grads = actor_loss.backward();
-            let actor_grads = GradientsParams::from_grads(actor_grads, &actor);
-            actor = actor_optim.step(config.learning_rate, actor, actor_grads);
+            // Combined loss: policy gradient + entropy bonus + value function
+            let total_loss = policy_loss
+                - entropy.mul_scalar(config.entropy_coef)
+                + value_loss.mul_scalar(config.value_loss_coef);
+            let grads = total_loss.backward();
+            let grads = GradientsParams::from_grads(grads, &model);
+            model = optim.step(config.learning_rate, model, grads);
         }
-
-        // ── Critic backward (always) ──────────────────────────────────────────
-        let critic_grads = value_loss.backward();
-        let critic_grads = GradientsParams::from_grads(critic_grads, &critic);
-        critic = critic_optim.step(config.learning_rate, critic, critic_grads);
     }
 
-    (actor, critic, stats)
+    (model, stats)
 }
 
 /// Returns index ranges for each episode in the flat rollout buffer.
