@@ -1,150 +1,195 @@
-// TODO: Implement training loop
-//
-// High-level flow:
-// 1. Initialize environment, policy, value network
-// 2. For each iteration:
-//    a. Collect rollouts by running policy in environment
-//    b. Compute advantages (GAE)
-//    c. Run PPO update for K epochs
-//    d. Log metrics
-//    e. Periodically evaluate and save checkpoints
-//
-// Key decisions for the human:
-// - Number of parallel environments (if any)
-// - Rollout length vs episode length
-// - Checkpoint strategy
-// - Curriculum learning (start with easy functions?)
-
+use anyhow::Result;
+use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
 use burn::config::Config;
-use crate::env::EnvConfig;
-use crate::ppo::PpoConfig;
+use burn::module::AutodiffModule;
+use burn::optim::AdamConfig;
+use burn::prelude::ElementConversion;
+use burn::tensor::{Int, Tensor, TensorData};
+use rand::Rng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
+use crate::actor_critic::{Actor, ActorConfig, Critic, CriticConfig};
+use crate::env::{EnvConfig, LlvmEnv};
+use crate::ppo::{PpoConfig, ppo_update};
+use crate::rollout::Rollout;
+
+/// The autodiff-enabled backend used for training.
+type B = Autodiff<NdArray>;
 
 #[derive(Config, Debug)]
 pub struct TrainConfig {
     /// Environment settings (benchmark paths, episode length, reward mode).
-    /// Required — contains PathBuf fields that have no Config literal default.
     pub env: EnvConfig,
-    /// PPO hyperparameters. Defaults to PpoConfig::new() if not overridden.
+    /// PPO hyperparameters.
     #[config(default = "PpoConfig::new()")]
     pub ppo: PpoConfig,
     /// Total number of rollout-collect + PPO-update iterations.
     #[config(default = 1000)]
     pub total_iterations: usize,
-    /// Number of environment steps collected per rollout batch.
-    #[config(default = 128)]
-    pub rollout_steps: usize,
+    /// Number of complete episodes to collect per iteration (one per env cycle).
+    /// Each episode runs until done, so advantages are always clean.
+    #[config(default = 6)]
+    pub episodes_per_iteration: usize,
     /// Run full evaluation every N iterations.
     #[config(default = 50)]
     pub eval_interval: usize,
     /// Directory to write model checkpoints.
-    /// Required — String defaults aren't supported as Config literals.
     pub checkpoint_dir: String,
     /// Print training stats every N iterations.
     #[config(default = 10)]
     pub log_interval: usize,
 }
 
-// pub fn train(config: TrainConfig) -> Result<()> {
-//
-//     // ── 1. One env per benchmark, all sharing the same model ─────────────
-//     //
-//     //   Each worker owns its LlvmEnv (separate compile/benchmark state).
-//     //   Baselines are computed once up front — expensive but only done once.
-//     //
-//     let benchmarks: Vec<PathBuf> = vec![...]; // the 6 selected benchmarks
-//     let mut envs: Vec<LlvmEnv> = benchmarks
-//         .iter()
-//         .map(|b| {
-//             let cfg = EnvConfig::new(b.clone(), work_dir.clone(), RewardMode::Sparse);
-//             let mut env = LlvmEnv::new(cfg)?;
-//             env.compute_baselines()?;
-//             Ok(env)
-//         })
-//         .collect::<Result<_>>()?;
-//
-//     // ── 2. Single model, one optimizer ───────────────────────────────────
-//     let device = Default::default(); // NdArray CPU device
-//     let model = ActorCriticConfig::new().init::<NdArray>(&device);
-//     let mut optim = AdamConfig::new().init::<NdArray, ActorCritic<NdArray>>(&model);
-//
-//     // ── 3. Training loop ─────────────────────────────────────────────────
-//     for iteration in 0..config.total_iterations {
-//
-//         // ── 3a. Collect rollouts across all envs ──────────────────────────
-//         //
-//         //   Each env runs episodes until the combined buffer reaches
-//         //   rollout_steps total steps.  Workers step sequentially here;
-//         //   the expensive part (compile + benchmark) could be parallelised
-//         //   with rayon later.
-//         //
-//         //   Per step we need: state features, action, log_prob, reward, value, done.
-//         //   hidden state is threaded through within each episode and reset on done.
-//         //
-//         let mut rollout = Rollout::new();
-//         let mut hiddens: Vec<Option<Tensor<NdArray, 2>>> = vec![None; envs.len()];
-//         let mut states: Vec<State> = envs.iter_mut().map(|e| e.reset()).collect::<Result<_>>()?;
-//
-//         while rollout.len() < config.rollout_steps {
-//             for (i, env) in envs.iter_mut().enumerate() {
-//                 let features = Tensor::from_data(..., &device); // state.features → tensor
-//                 let prev_action = ...; // last action taken in this env (0 at start)
-//
-//                 let (logits, value, new_hidden) =
-//                     model.forward(features, prev_action, hiddens[i].take());
-//
-//                 let action = sample_action(&logits);   // categorical sample
-//                 let log_prob = log_prob_of(&logits, action);
-//
-//                 let step = env.step(action)?;
-//
-//                 rollout.push(
-//                     states[i].features.clone(),
-//                     action,
-//                     log_prob,
-//                     step.reward,
-//                     value.into_scalar(),
-//                     step.done,
-//                 );
-//
-//                 if step.done {
-//                     hiddens[i] = None;          // reset hidden on episode end
-//                     states[i] = env.reset()?;
-//                 } else {
-//                     hiddens[i] = Some(new_hidden);
-//                     states[i] = step.state;
-//                 }
-//             }
-//         }
-//
-//         // ── 3b. Compute advantages (GAE) ──────────────────────────────────
-//         let (advantages, returns) = rollout.compute_advantages(
-//             config.ppo.gamma,
-//             config.ppo.gae_lambda,
-//         );
-//
-//         // ── 3c. PPO update — K epochs over minibatches ────────────────────
-//         //
-//         //   NOTE: recurrent PPO needs to re-roll the GRU from the start of
-//         //   each episode to get valid hidden states for the loss computation.
-//         //   For simplicity in the first version, treat each step independently
-//         //   (feed zeros as hidden) — this loses some sequence information but
-//         //   is much simpler to implement and still works reasonably well.
-//         //
-//         let stats = ppo_update(&mut model, &mut optim, &rollout, &advantages, &returns, &config.ppo, &device);
-//
-//         // ── 3d. Log ───────────────────────────────────────────────────────
-//         if iteration % config.log_interval == 0 {
-//             eprintln!(
-//                 "[{iteration}] policy_loss={:.4} value_loss={:.4} entropy={:.4} kl={:.4}",
-//                 stats.policy_loss, stats.value_loss, stats.entropy, stats.approx_kl,
-//             );
-//         }
-//
-//         // ── 3e. Checkpoint ────────────────────────────────────────────────
-//         if iteration % config.eval_interval == 0 {
-//             model.save_file(format!("{}/model_{iteration}.bin", config.checkpoint_dir), &recorder)?;
-//         }
-//     }
-//
-//     Ok(())
-// }
+pub fn train(config: TrainConfig) -> Result<()> {
+    let device = NdArrayDevice::default();
+    let mut rng = StdRng::from_entropy();
+
+    // Single env — cycles through all benchmark functions round-robin.
+    // Baselines are computed once up front (slow, but only done once).
+    let mut env = LlvmEnv::new(config.env)?;
+    eprintln!("Computing baselines for all benchmark functions...");
+    env.compute_baselines()?;
+    eprintln!("Baselines ready. Starting training.");
+
+    let mut actor  = ActorConfig::new().init::<B>(&device);
+    let mut critic = CriticConfig::new().init::<B>(&device);
+    let mut actor_optim  = AdamConfig::new().init::<B, Actor<B>>();
+    let mut critic_optim = AdamConfig::new().init::<B, Critic<B>>();
+
+    for iteration in 0..config.total_iterations {
+        // ── Collect episodes ──────────────────────────────────────────────────
+        //
+        // Each episode runs to completion (done=true) in its own Rollout.
+        // .valid() gives the NdArray (non-autodiff) model — no graph built.
+        //
+        let mut rollouts: Vec<Rollout> = Vec::new();
+
+        for _ in 0..config.episodes_per_iteration {
+            let actor_inf  = actor.valid();
+            let critic_inf = critic.valid();
+            let mut rollout = Rollout::new();
+            let mut state = env.reset()?;
+            let mut hidden: Option<Tensor<NdArray, 2>> = None;
+            let mut prev_action: i64 = 0;
+
+            loop {
+                let features = Tensor::<NdArray, 2>::from_data(
+                    TensorData::new(state.features.clone(), [1, state.features.len()]),
+                    &device,
+                );
+                let prev_act = Tensor::<NdArray, 1, Int>::from_data(
+                    TensorData::new(vec![prev_action], [1]),
+                    &device,
+                );
+
+                let (logits, new_hidden) = actor_inf.forward(features.clone(), prev_act, hidden);
+                let value_scalar: f32 = critic_inf
+                    .forward(features)
+                    .into_scalar()
+                    .elem();
+
+                let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
+                let action   = sample_categorical(&logits_vec, &mut rng);
+                let log_prob = log_softmax_at(&logits_vec, action);
+
+                let step = env.step(action)?;
+
+                rollout.push(
+                    state.features.clone(),
+                    action,
+                    log_prob,
+                    step.reward,
+                    value_scalar,
+                    step.done,
+                );
+
+                if step.done {
+                    break;
+                }
+
+                hidden = Some(new_hidden);
+                prev_action = action as i64;
+                state = step.state;
+            }
+
+            rollouts.push(rollout);
+        }
+
+        // ── Compute advantages per episode, then flatten ──────────────────────
+        //
+        // last_value=0.0 is always correct here because every episode ends with
+        // done=true — there is no future reward to bootstrap from.
+        //
+        let mut all_advantages: Vec<f32> = Vec::new();
+        let mut all_returns: Vec<f32> = Vec::new();
+
+        for rollout in &rollouts {
+            let (adv, ret) =
+                rollout.compute_advantages(config.ppo.gamma, config.ppo.gae_lambda, 0.0);
+            all_advantages.extend(adv);
+            all_returns.extend(ret);
+        }
+
+        let combined = Rollout::merge(&rollouts);
+
+        // ── PPO update ────────────────────────────────────────────────────────
+        let stats;
+        (actor, critic, stats) = ppo_update(
+            actor,
+            critic,
+            &mut actor_optim,
+            &mut critic_optim,
+            &combined,
+            &all_advantages,
+            &all_returns,
+            &config.ppo,
+            &device,
+        );
+
+        // ── Logging ───────────────────────────────────────────────────────────
+        if iteration % config.log_interval == 0 {
+            eprintln!(
+                "[{iteration:>4}] steps={:>4}  policy={:.4}  value={:.4}  entropy={:.4}  kl={:.4}",
+                combined.len(),
+                stats.policy_loss,
+                stats.value_loss,
+                stats.entropy,
+                stats.approx_kl,
+            );
+        }
+
+        // ── Checkpoint ────────────────────────────────────────────────────────
+        if iteration % config.eval_interval == 0 && iteration > 0 {
+            // TODO: actor.save_file / critic.save_file
+        }
+    }
+
+    Ok(())
+}
+
+/// Sample an action index from a categorical distribution defined by `logits`.
+fn sample_categorical(logits: &[f32], rng: &mut impl Rng) -> usize {
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exp: Vec<f32> = logits.iter().map(|x| (x - max).exp()).collect();
+    let sum: f32 = exp.iter().sum();
+
+    let u: f32 = rng.r#gen();
+    let mut cumsum = 0.0f32;
+    for (i, e) in exp.iter().enumerate() {
+        cumsum += e / sum;
+        if u <= cumsum {
+            return i;
+        }
+    }
+    logits.len() - 1 // fallback for floating-point edge cases
+}
+
+/// Log-probability of `action` under the softmax distribution defined by `logits`.
+///
+/// Uses the log-sum-exp trick for numerical stability.
+fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let log_sum_exp = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;
+    logits[action] - log_sum_exp
+}

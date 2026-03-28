@@ -1,15 +1,13 @@
-// TODO: Implement PPO (Proximal Policy Optimization) algorithm
-//
-// Reference: Schulman et al., "Proximal Policy Optimization Algorithms" (2017)
-//
-// Key components to implement:
-// 1. Clipped surrogate objective
-// 2. Value function loss (clipped or unclipped)
-// 3. Entropy bonus for exploration
-// 4. Mini-batch updates over collected rollouts
-// 5. Advantage normalization
-
+use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
 use burn::config::Config;
+use burn::optim::{GradientsParams, Optimizer};
+use burn::prelude::ElementConversion;
+use burn::tensor::{Int, Tensor, TensorData, activation};
+
+use crate::actor_critic::{Actor, Critic};
+use crate::rollout::Rollout;
+
+type B = Autodiff<NdArray>;
 
 #[derive(Config, Debug)]
 pub struct PpoConfig {
@@ -34,21 +32,10 @@ pub struct PpoConfig {
     /// Number of PPO epochs per rollout batch.
     #[config(default = 4)]
     pub num_epochs: usize,
-    /// Mini-batch size for each PPO update step.
-    #[config(default = 64)]
-    pub mini_batch_size: usize,
     /// Maximum gradient norm for clipping.
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
 }
-
-// TODO: Implement PPO update step
-// pub fn ppo_update<B: Backend>(
-//     policy: &mut LstmPolicy,
-//     value_net: &mut ValueNetwork,
-//     rollout: &Rollout,
-//     config: &PpoConfig,
-// ) -> PpoStats { ... }
 
 #[derive(Debug, Clone, Default)]
 pub struct PpoStats {
@@ -57,4 +44,167 @@ pub struct PpoStats {
     pub entropy: f32,
     pub approx_kl: f32,
     pub clip_fraction: f32,
+}
+
+/// PPO update over one full rollout batch.
+///
+/// Actor and critic are trained with separate backward passes.
+///
+/// For the actor, each episode is re-rolled as a full sequence through the GRU
+/// (starting from hidden=None, matching collection), so log_probs_new are exact.
+///
+/// For the critic (MLP), all steps are processed in one flat batch — no hidden
+/// state, no episode splitting needed.
+pub fn ppo_update<OA, OC>(
+    mut actor: Actor<B>,
+    mut critic: Critic<B>,
+    actor_optim: &mut OA,
+    critic_optim: &mut OC,
+    rollout: &Rollout,
+    advantages: &[f32],
+    returns: &[f32],
+    config: &PpoConfig,
+    device: &NdArrayDevice,
+) -> (Actor<B>, Critic<B>, PpoStats)
+where
+    OA: Optimizer<Actor<B>, B>,
+    OC: Optimizer<Critic<B>, B>,
+{
+    let n = rollout.len();
+    let feat_dim = rollout.states[0].len();
+    let episodes = episode_ranges(&rollout.dones);
+    let mut stats = PpoStats::default();
+
+    for epoch in 0..config.num_epochs {
+        // ── Actor: re-roll each episode as a sequence ─────────────────────────
+        //
+        // For each episode, build (features [T, F], prev_actions [T]) and run
+        // forward_sequence. Concatenate the resulting logits across episodes to
+        // get a flat [n, num_actions] tensor aligned with the rollout.
+        //
+        let mut episode_logits: Vec<Tensor<B, 2>> = Vec::with_capacity(episodes.len());
+
+        for range in &episodes {
+            let ep_len = range.len();
+            let flat: Vec<f32> = rollout.states[range.clone()]
+                .iter()
+                .flatten()
+                .cloned()
+                .collect();
+            let features = Tensor::<B, 2>::from_data(
+                TensorData::new(flat, [ep_len, feat_dim]),
+                device,
+            );
+            // prev_actions[t] = action[t-1], 0 for t=0
+            let prev: Vec<i64> = std::iter::once(0i64)
+                .chain(rollout.actions[range.clone()].iter().map(|&a| a as i64))
+                .take(ep_len)
+                .collect();
+            let prev_actions = Tensor::<B, 1, Int>::from_data(
+                TensorData::new(prev, [ep_len]),
+                device,
+            );
+            episode_logits.push(actor.forward_sequence(features, prev_actions));
+        }
+
+        // [n, num_actions] — one row per rollout step, in order
+        let logits = Tensor::cat(episode_logits, 0);
+
+        let log_probs_all = activation::log_softmax(logits.clone(), 1);
+        let probs_all     = activation::softmax(logits, 1);
+
+        // Gather log_prob at the taken action for each step
+        let action_idx = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(
+                rollout.actions.iter().map(|&a| a as i64).collect::<Vec<_>>(),
+                [n, 1],
+            ),
+            device,
+        );
+        let log_probs_new = log_probs_all.clone().gather(1, action_idx).squeeze::<1>();
+
+        // Entropy: H = -Σ_a p(a)*log_p(a), mean over batch
+        let entropy = -(probs_all * log_probs_all).sum_dim(1).squeeze::<1>().mean();
+
+        // Old log probs stored during collection
+        let log_probs_old = Tensor::<B, 1>::from_data(
+            TensorData::new(rollout.log_probs.clone(), [n]),
+            device,
+        );
+
+        // Normalize advantages
+        let adv = Tensor::<B, 1>::from_data(
+            TensorData::new(advantages.to_vec(), [n]),
+            device,
+        );
+        let adv_mean = adv.clone().mean();
+        let adv_std  = (adv.clone() - adv_mean.clone())
+            .powf_scalar(2.0f32)
+            .mean()
+            .sqrt();
+        let adv = (adv - adv_mean) / (adv_std + 1e-8);
+
+        // Probability ratio and clipped surrogate objective
+        let ratio   = (log_probs_new - log_probs_old).exp();
+        let clipped = ratio.clone().clamp(
+            1.0 - config.clip_epsilon,
+            1.0 + config.clip_epsilon,
+        );
+        // min(ratio*A, clipped*A) via (a + b - |a - b|) / 2
+        let obj1 = ratio   * adv.clone();
+        let obj2 = clipped * adv;
+        let policy_loss =
+            -((obj1.clone() + obj2.clone() - (obj1 - obj2).abs()) / 2.0).mean();
+
+        // ── Critic: flat batch, no episode splitting ───────────────────────────
+        let flat_states: Vec<f32> = rollout.states.iter().flatten().cloned().collect();
+        let features = Tensor::<B, 2>::from_data(
+            TensorData::new(flat_states, [n, feat_dim]),
+            device,
+        );
+        let values = critic.forward(features).squeeze::<1>(); // [n]
+        let ret = Tensor::<B, 1>::from_data(
+            TensorData::new(returns.to_vec(), [n]),
+            device,
+        );
+        let value_loss = (values - ret).powf_scalar(2.0f32).mean();
+
+        // Save stats from final epoch
+        if epoch + 1 == config.num_epochs {
+            stats.policy_loss = policy_loss.clone().into_scalar().elem();
+            stats.value_loss  = value_loss.clone().into_scalar().elem();
+            stats.entropy     = entropy.clone().into_scalar().elem();
+        }
+
+        // ── Actor backward ────────────────────────────────────────────────────
+        let actor_loss = policy_loss - entropy.mul_scalar(config.entropy_coef);
+        let actor_grads = actor_loss.backward();
+        let actor_grads = GradientsParams::from_grads(actor_grads, &actor);
+        actor = actor_optim.step(config.learning_rate, actor, actor_grads);
+
+        // ── Critic backward ───────────────────────────────────────────────────
+        let critic_grads = value_loss.backward();
+        let critic_grads = GradientsParams::from_grads(critic_grads, &critic);
+        critic = critic_optim.step(config.learning_rate, critic, critic_grads);
+    }
+
+    (actor, critic, stats)
+}
+
+/// Returns index ranges for each episode in the flat rollout buffer.
+/// Episodes end at steps where `done == true`.
+fn episode_ranges(dones: &[bool]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (i, &done) in dones.iter().enumerate() {
+        if done {
+            ranges.push(start..i + 1);
+            start = i + 1;
+        }
+    }
+    // Partial episode at the end (shouldn't occur when collection always runs to done)
+    if start < dones.len() {
+        ranges.push(start..dones.len());
+    }
+    ranges
 }

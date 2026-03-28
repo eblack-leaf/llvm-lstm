@@ -3,7 +3,7 @@ mod eda;
 mod env;
 mod evaluation;
 mod ir_features;
-mod model;
+mod actor_critic;
 mod pass_menu;
 mod pipeline;
 mod plots;

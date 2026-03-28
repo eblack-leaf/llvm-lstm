@@ -41,7 +41,7 @@ impl EnvConfig {
         Self::new(
             PathBuf::from("benchmarks"),
             PathBuf::from("/tmp/llvm-lstm-env"),
-            RewardMode::Sparse,
+            RewardMode::PerStep,
         )
     }
 }
@@ -211,7 +211,7 @@ impl LlvmEnv {
                     let result = self
                         .pipeline
                         .benchmark(&binary, self.config.benchmark_runs)?;
-                    let reward = self.compute_step_reward(result.median_ns);
+                    let reward = self.compute_step_reward(&stem, result.median_ns);
                     self.previous_time_ns = Some(result.median_ns);
                     (reward, Some(result.median_ns), Some(result.binary_size_bytes))
                 }
@@ -278,10 +278,14 @@ impl LlvmEnv {
         }
     }
 
-    fn compute_step_reward(&self, time_ns: u64) -> f32 {
-        if let Some(prev) = self.previous_time_ns {
-            // Reward proportional to improvement from previous step
-            let improvement = (prev as f64 - time_ns as f64) / prev as f64;
+    fn compute_step_reward(&self, function: &str, time_ns: u64) -> f32 {
+        // Compare against the previous step's time, or the O0 baseline on the
+        // first step so the agent gets a real signal immediately rather than 0.
+        let prev = self.previous_time_ns.or_else(|| {
+            self.baselines.get(function).map(|b| b.o0_ns)
+        });
+        if let Some(prev_ns) = prev {
+            let improvement = (prev_ns as f64 - time_ns as f64) / prev_ns as f64;
             improvement as f32
         } else {
             0.0
