@@ -119,37 +119,90 @@ impl<B: Backend> Actor<B> {
 pub struct CriticConfig {
     #[config(default = 24)]
     pub input_dim: usize,
-    /// Hidden layer width for both MLP layers.
-    #[config(default = 64)]
+    #[config(default = 128)]
     pub hidden_size: usize,
+    #[config(default = 29)]
+    pub num_actions: usize,
+    #[config(default = 32)]
+    pub action_embed_dim: usize,
 }
 
 impl CriticConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> Critic<B> {
+        let gru_input_size = self.hidden_size + self.action_embed_dim;
         Critic {
-            fc1:        LinearConfig::new(self.input_dim, self.hidden_size).init(device),
-            fc2:        LinearConfig::new(self.hidden_size, self.hidden_size).init(device),
-            value_head: LinearConfig::new(self.hidden_size, 1).init(device),
+            input_proj:   LinearConfig::new(self.input_dim, self.hidden_size).init(device),
+            action_embed: EmbeddingConfig::new(self.num_actions, self.action_embed_dim).init(device),
+            gru:          GruConfig::new(gru_input_size, self.hidden_size, true).init(device),
+            value_head:   LinearConfig::new(self.hidden_size, 1).init(device),
         }
     }
 }
 
-/// Feedforward critic: maps current IR features → scalar state-value estimate V(s).
+/// GRU critic: maps the full sequence of (IR features, actions) → scalar V(s).
 ///
-/// No hidden state — the IR features already encode the result of all passes applied.
-/// This lets the value loss be computed exactly during PPO updates.
+/// Mirrors the actor architecture but outputs a scalar value instead of action
+/// logits. The GRU hidden state lets the critic condition on pass history, which
+/// is necessary because the value of a state depends on what has already been
+/// applied — the MLP critic couldn't distinguish those cases.
 #[derive(Module, Debug)]
 pub struct Critic<B: Backend> {
-    fc1:        Linear<B>,
-    fc2:        Linear<B>,
-    value_head: Linear<B>,
+    input_proj:   Linear<B>,
+    action_embed: Embedding<B>,
+    gru:          Gru<B>,
+    value_head:   Linear<B>,
 }
 
 impl<B: Backend> Critic<B> {
-    /// Returns `value [batch, 1]`.
-    pub fn forward(&self, features: Tensor<B, 2>) -> Tensor<B, 2> {
-        let x = activation::relu(self.fc1.forward(features));
-        let x = activation::relu(self.fc2.forward(x));
-        self.value_head.forward(x)
+    /// Single-step forward. Used during rollout collection.
+    ///
+    /// Returns `(value [batch, 1], new_hidden [batch, hidden_size])`.
+    pub fn forward(
+        &self,
+        features:    Tensor<B, 2>,         // [batch, input_dim]
+        prev_action: Tensor<B, 1, Int>,    // [batch]
+        hidden:      Option<Tensor<B, 2>>, // [batch, hidden_size] or None
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        let x = self.input_proj.forward(features);
+
+        let e_raw = self.action_embed.forward(prev_action.unsqueeze_dim(1));
+        let ed = e_raw.shape().dims;
+        let e = e_raw.reshape([ed[0], ed[2]]);
+
+        let inp = Tensor::cat(vec![x, e], 1).unsqueeze_dim(1);
+        let out = self.gru.forward(inp, hidden);
+        let od = out.shape().dims;
+        let h = out.reshape([od[0], od[2]]);
+
+        let value = self.value_head.forward(h.clone());
+        (value, h)
+    }
+
+    /// Batched multi-episode forward. Used during PPO updates.
+    ///
+    /// Returns `values [n_ep, max_T, 1]`. Caller selects real steps.
+    pub fn forward_batch(
+        &self,
+        features:     Tensor<B, 3>,        // [n_ep, max_T, feat_dim]
+        prev_actions: Tensor<B, 2, Int>,   // [n_ep, max_T]
+    ) -> Tensor<B, 3> {                    // [n_ep, max_T, 1]
+        let dims = features.shape().dims;
+        let (n_ep, max_t, feat_dim) = (dims[0], dims[1], dims[2]);
+
+        let x_flat = self.input_proj.forward(features.reshape([n_ep * max_t, feat_dim]));
+        let hidden_size = x_flat.shape().dims[1];
+        let x = x_flat.reshape([n_ep, max_t, hidden_size]);
+
+        let e_raw = self.action_embed
+            .forward(prev_actions.reshape([n_ep * max_t]).unsqueeze_dim::<2>(1));
+        let embed_dim = e_raw.shape().dims[2];
+        let e = e_raw.reshape([n_ep, max_t, embed_dim]);
+
+        let gru_inp = Tensor::cat(vec![x, e], 2);
+        let out = self.gru.forward(gru_inp, None);
+        let h = out.shape().dims[2];
+
+        let val_flat = self.value_head.forward(out.reshape([n_ep * max_t, h]));
+        val_flat.reshape([n_ep, max_t, 1])
     }
 }

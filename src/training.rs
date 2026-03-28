@@ -113,7 +113,15 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let actor_inf  = actor.valid();
         let critic_inf = critic.valid();
         let base_work_dir  = &worker_work_dir;
-        let ir_cache_dir   = worker_work_dir.join("ir_cache");
+        // Clear the IR cache each iteration — stochastic exploration means cross-
+        // iteration cache hits are near-zero after the first few steps, and the
+        // cache grows unboundedly otherwise.  Within-iteration parallel workers
+        // still benefit from sharing early-step IR.
+        let ir_cache_dir = worker_work_dir.join("ir_cache");
+        if ir_cache_dir.exists() {
+            std::fs::remove_dir_all(&ir_cache_dir).ok();
+        }
+        std::fs::create_dir_all(&ir_cache_dir).ok();
 
         // Actor<NdArray> contains OnceCell which is !Sync, so par_iter().map() won't
         // compile (closure needs Sync). map_with() side-steps this: the models live
@@ -143,8 +151,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 let device  = NdArrayDevice::default();
                 let mut rng = rand::thread_rng();
 
-                let mut rollout       = Rollout::new();
-                let mut hidden: Option<Tensor<NdArray, 2>> = None;
+                let mut rollout        = Rollout::new();
+                let mut hidden: Option<Tensor<NdArray, 2>>        = None;
+                let mut critic_hidden: Option<Tensor<NdArray, 2>> = None;
                 let mut prev_action: i64 = 0;
                 let mut episode_reward   = 0.0f32;
 
@@ -159,9 +168,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     );
 
                     let (logits, new_hidden) =
-                        actor_s.forward(features.clone(), prev_act, hidden);
-                    let value_scalar: f32 = critic_s
-                        .forward(features)
+                        actor_s.forward(features.clone(), prev_act.clone(), hidden);
+                    let (value_tensor, new_critic_hidden) =
+                        critic_s.forward(features, prev_act, critic_hidden);
+                    let value_scalar: f32 = value_tensor
                         .reshape([1])
                         .into_scalar()
                         .elem();
@@ -187,9 +197,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
                         break;
                     }
 
-                    hidden = Some(new_hidden);
-                    prev_action = action as i64;
-                    state = step.state;
+                    hidden        = Some(new_hidden);
+                    critic_hidden = Some(new_critic_hidden);
+                    prev_action   = action as i64;
+                    state         = step.state;
                 }
 
                 Ok((rollout, func_name, episode_reward))
@@ -198,41 +209,46 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // Collect rollouts and update per-function EMA (sequential — no races).
         let mut rollouts: Vec<Rollout> = Vec::with_capacity(config.episodes_per_iteration);
+        let mut rollout_funcs: Vec<String> = Vec::with_capacity(config.episodes_per_iteration);
         for (rollout, func_name, episode_reward) in episode_results {
-            let ema = fn_ema.entry(func_name).or_insert(episode_reward);
+            let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
             *ema = 0.9 * *ema + 0.1 * episode_reward;
+            rollout_funcs.push(func_name);
             rollouts.push(rollout);
         }
 
         // ── Compute advantages ────────────────────────────────────────────────
         step_pb.set_message("computing advantages");
-        let mut all_advantages: Vec<f32> = Vec::new();
+        let mut raw_advantages: Vec<Vec<f32>> = Vec::new();
         let mut all_returns: Vec<f32> = Vec::new();
 
         for rollout in &rollouts {
             let (adv, ret) =
                 rollout.compute_advantages(config.ppo.gamma, config.ppo.gae_lambda, 0.0);
-            all_advantages.extend(adv);
+            raw_advantages.push(adv);
             all_returns.extend(ret);
         }
 
-        // Normalize returns so the critic learns from a stable target distribution.
-        // Without this the raw PerStep returns vary wildly in scale and the critic
-        // diverges early (value loss explodes).
-        let ret_mean = all_returns.iter().sum::<f32>() / all_returns.len() as f32;
-        let ret_std  = (all_returns.iter()
-            .map(|r| (r - ret_mean).powi(2))
-            .sum::<f32>()
-            / all_returns.len() as f32)
-            .sqrt();
-        let norm_returns: Vec<f32> = all_returns.iter()
-            .map(|r| (r - ret_mean) / (ret_std + 1e-8))
-            .collect();
+        let mut fn_adv_sum: HashMap<String, f32> = HashMap::new();
+        let mut fn_adv_cnt: HashMap<String, usize> = HashMap::new();
+        for (adv, func) in raw_advantages.iter().zip(rollout_funcs.iter()) {
+            *fn_adv_sum.entry(func.clone()).or_insert(0.0) += adv.iter().sum::<f32>();
+            *fn_adv_cnt.entry(func.clone()).or_insert(0)   += adv.len();
+        }
+
+        let mut all_advantages: Vec<f32> = Vec::new();
+        for (adv, func) in raw_advantages.iter().zip(rollout_funcs.iter()) {
+            let mean = fn_adv_sum[func] / fn_adv_cnt[func] as f32;
+            all_advantages.extend(adv.iter().map(|&a| a - mean));
+        }
 
         let combined = Rollout::merge(&rollouts);
 
         // ── PPO update ────────────────────────────────────────────────────────
         step_pb.set_message("ppo update");
+        // Compute explained variance before the update (old values vs. raw returns).
+        let ev = explained_variance(&all_returns, &combined.values);
+
         let stats;
         (actor, critic, stats) = ppo_update(
             actor,
@@ -241,7 +257,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &mut critic_optim,
             &combined,
             &all_advantages,
-            &norm_returns,
+            &all_returns,
             &config.ppo,
             &device,
         );
@@ -253,7 +269,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // ── Logging ───────────────────────────────────────────────────────────
         if iteration % config.log_interval == 0 {
-            let ev       = 1.0 - stats.value_loss;
             let ent_frac = stats.entropy / max_entropy;
             let kl       = stats.approx_kl;
             let clip     = stats.clip_fraction;
@@ -361,4 +376,19 @@ fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let log_sum_exp = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;
     logits[action] - log_sum_exp
+}
+
+/// Explained variance: 1 - Var(returns - values) / Var(returns).
+/// Returns 0 when Var(returns) is near zero (constant target).
+fn explained_variance(returns: &[f32], values: &[f32]) -> f32 {
+    let n = returns.len() as f32;
+    let ret_mean = returns.iter().sum::<f32>() / n;
+    let ret_var  = returns.iter().map(|r| (r - ret_mean).powi(2)).sum::<f32>() / n;
+    if ret_var < 1e-8 {
+        return 0.0;
+    }
+    let residuals: Vec<f32> = returns.iter().zip(values.iter()).map(|(r, v)| r - v).collect();
+    let res_mean = residuals.iter().sum::<f32>() / n;
+    let res_var  = residuals.iter().map(|r| (r - res_mean).powi(2)).sum::<f32>() / n;
+    1.0 - res_var / ret_var
 }

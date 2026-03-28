@@ -18,7 +18,7 @@ pub struct PpoConfig {
     #[config(default = 0.5)]
     pub value_loss_coef: f32,
     /// Entropy bonus coefficient — encourages exploration.
-    #[config(default = 0.02)]
+    #[config(default = 0.01)]
     pub entropy_coef: f32,
     /// Adam learning rate.
     #[config(default = 3e-4)]
@@ -30,8 +30,12 @@ pub struct PpoConfig {
     #[config(default = 0.95)]
     pub gae_lambda: f32,
     /// Number of PPO epochs per rollout batch.
-    #[config(default = 2)]
+    #[config(default = 8)]
     pub num_epochs: usize,
+    /// Stop actor updates when approx KL exceeds this threshold.
+    /// Critic continues updating every epoch regardless.
+    #[config(default = 0.01)]
+    pub target_kl: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,12 +116,12 @@ where
         );
 
         // [n_ep, max_T, num_actions] → flatten → select real rows → [n, num_actions]
-        let logits_3d = actor.forward_batch(features_pad, prev_pad);
+        let logits_3d = actor.forward_batch(features_pad.clone(), prev_pad.clone());
         let n_act = logits_3d.shape().dims[2];
         let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);
 
         let idx = Tensor::<B, 1, Int>::from_data(TensorData::new(real_idx, [n]), device);
-        let logits = logits_flat.gather(0, idx.unsqueeze_dim::<2>(1).expand([n, n_act]));
+        let logits = logits_flat.gather(0, idx.clone().unsqueeze_dim::<2>(1).expand([n, n_act]));
 
         let log_probs_all = activation::log_softmax(logits.clone(), 1);
         let probs_all     = activation::softmax(logits, 1);
@@ -174,30 +178,28 @@ where
         let policy_loss =
             -((obj1.clone() + obj2.clone() - (obj1 - obj2).abs()) / 2.0).mean();
 
-        // ── Critic: flat batch, no episode splitting ───────────────────────────
-        let flat_states: Vec<f32> = rollout.states.iter().flatten().cloned().collect();
-        let features = Tensor::<B, 2>::from_data(
-            TensorData::new(flat_states, [n, feat_dim]),
-            device,
-        );
-        let values = critic.forward(features).reshape([n]); // [n, 1] → [n]
+        // ── Critic: same padded-batch forward as actor ────────────────────────
+        let values_3d  = critic.forward_batch(features_pad, prev_pad); // [n_ep, max_T, 1]
+        let values_flat = values_3d.reshape([n_ep * max_t, 1]);
+        let values = values_flat
+            .gather(0, idx.unsqueeze_dim::<2>(1).expand([n, 1]))
+            .reshape([n]);
         let ret = Tensor::<B, 1>::from_data(
             TensorData::new(returns.to_vec(), [n]),
             device,
         );
         let value_loss = (values - ret).powf_scalar(2.0f32).mean();
 
+        // Compute KL for early stopping and (on final epoch) stats
+        let log_ratio_vec: Vec<f32> = log_ratio.into_data().to_vec().unwrap_or_default();
+        let approx_kl_now: f32 = log_ratio_vec.iter().map(|&x| -x).sum::<f32>() / n as f32;
+
         // Save stats from final epoch
         if epoch + 1 == config.num_epochs {
             stats.policy_loss = policy_loss.clone().into_scalar().elem();
             stats.value_loss  = value_loss.clone().into_scalar().elem();
             stats.entropy     = entropy.clone().into_scalar().elem();
-
-            // approx KL ≈ mean(-log_ratio) = mean(log_old - log_new)
-            let log_ratio_vec: Vec<f32> =
-                log_ratio.into_data().to_vec().unwrap_or_default();
-            stats.approx_kl = log_ratio_vec.iter().map(|&x| -x).sum::<f32>()
-                / n as f32;
+            stats.approx_kl   = approx_kl_now;
 
             stats.clip_fraction = ratio_vec
                 .iter()
@@ -206,13 +208,15 @@ where
                 / ratio_vec.len().max(1) as f32;
         }
 
-        // ── Actor backward ────────────────────────────────────────────────────
-        let actor_loss = policy_loss - entropy.mul_scalar(config.entropy_coef);
-        let actor_grads = actor_loss.backward();
-        let actor_grads = GradientsParams::from_grads(actor_grads, &actor);
-        actor = actor_optim.step(config.learning_rate, actor, actor_grads);
+        if approx_kl_now.abs() <= config.target_kl {
+            // ── Actor backward ────────────────────────────────────────────────
+            let actor_loss = policy_loss - entropy.mul_scalar(config.entropy_coef);
+            let actor_grads = actor_loss.backward();
+            let actor_grads = GradientsParams::from_grads(actor_grads, &actor);
+            actor = actor_optim.step(config.learning_rate, actor, actor_grads);
+        }
 
-        // ── Critic backward ───────────────────────────────────────────────────
+        // ── Critic backward (always) ──────────────────────────────────────────
         let critic_grads = value_loss.backward();
         let critic_grads = GradientsParams::from_grads(critic_grads, &critic);
         critic = critic_optim.step(config.learning_rate, critic, critic_grads);
