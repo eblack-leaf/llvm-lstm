@@ -32,9 +32,6 @@ pub struct PpoConfig {
     /// Number of PPO epochs per rollout batch.
     #[config(default = 4)]
     pub num_epochs: usize,
-    /// Maximum gradient norm for clipping.
-    #[config(default = 0.5)]
-    pub max_grad_norm: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -145,7 +142,16 @@ where
         let adv = (adv - adv_mean) / (adv_std + 1e-8);
 
         // Probability ratio and clipped surrogate objective
-        let ratio   = (log_probs_new - log_probs_old).exp();
+        let log_ratio = log_probs_new - log_probs_old;
+        let ratio     = log_ratio.clone().exp();
+
+        // Extract ratio values for clip_fraction before ratio is consumed.
+        let ratio_vec: Vec<f32> = if epoch + 1 == config.num_epochs {
+            ratio.clone().into_data().to_vec().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let clipped = ratio.clone().clamp(
             1.0 - config.clip_epsilon,
             1.0 + config.clip_epsilon,
@@ -174,6 +180,18 @@ where
             stats.policy_loss = policy_loss.clone().into_scalar().elem();
             stats.value_loss  = value_loss.clone().into_scalar().elem();
             stats.entropy     = entropy.clone().into_scalar().elem();
+
+            // approx KL ≈ mean(-log_ratio) = mean(log_old - log_new)
+            let log_ratio_vec: Vec<f32> =
+                log_ratio.into_data().to_vec().unwrap_or_default();
+            stats.approx_kl = log_ratio_vec.iter().map(|&x| -x).sum::<f32>()
+                / n as f32;
+
+            stats.clip_fraction = ratio_vec
+                .iter()
+                .filter(|&&r| (r - 1.0).abs() > config.clip_epsilon)
+                .count() as f32
+                / ratio_vec.len().max(1) as f32;
         }
 
         // ── Actor backward ────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ use burn::tensor::{Int, Tensor};
 
 #[derive(Config, Debug)]
 pub struct ActorConfig {
-    #[config(default = 18)]
+    #[config(default = 24)]
     pub input_dim: usize,
     #[config(default = 29)]
     pub num_actions: usize,
@@ -107,7 +107,7 @@ impl<B: Backend> Actor<B> {
 
 #[derive(Config, Debug)]
 pub struct CriticConfig {
-    #[config(default = 18)]
+    #[config(default = 24)]
     pub input_dim: usize,
     /// Hidden layer width for both MLP layers.
     #[config(default = 64)]

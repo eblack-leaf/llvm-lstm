@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -81,6 +82,12 @@ pub fn train(config: TrainConfig) -> Result<()> {
     );
     step_pb.enable_steady_tick(Duration::from_millis(120));
 
+    // Exponential moving average of episode reward per function (α=0.1).
+    let mut fn_ema: HashMap<String, f32> = HashMap::new();
+
+    // Maximum entropy for the action space — used to normalise entropy to [0,1].
+    let max_entropy = (ActorConfig::new().num_actions as f32).ln();
+
     // ── Training loop ─────────────────────────────────────────────────────────
     for iteration in 0..config.total_iterations {
         let iter_start = Instant::now();
@@ -146,6 +153,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     train_pb.println(format!(
                         "    [{func_name}]  steps={step_idx}  reward={episode_reward:+.4}",
                     ));
+                    let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
+                    *ema = 0.9 * *ema + 0.1 * episode_reward;
                     break;
                 }
 
@@ -208,13 +217,30 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // ── Logging ───────────────────────────────────────────────────────────
         if iteration % config.log_interval == 0 {
+            let ev = 1.0 - stats.value_loss;   // explained variance: 0=no skill, 1=perfect
+            let ent_frac = stats.entropy / max_entropy; // 1=uniform, 0=deterministic
+
+            // Per-function EMA summary, sorted by name
+            let mut fn_summary: Vec<(&str, f32)> = fn_ema
+                .iter()
+                .map(|(k, &v)| (k.as_str(), v))
+                .collect();
+            fn_summary.sort_by_key(|(k, _)| *k);
+            let fn_str: String = fn_summary
+                .iter()
+                .map(|(k, v)| format!("{k}={v:+.2}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+
             train_pb.println(format!(
-                "  [{iteration:>4}] steps={:>3}  policy={:+.4}  value={:.4}  entropy={:.4}",
+                "  [{iteration:>4}] steps={:>3}  ev={ev:+.2}  ent={ent_frac:.2}  kl={:.4}  clip={:.2}",
                 combined.len(),
-                stats.policy_loss,
-                stats.value_loss,
-                stats.entropy,
+                stats.approx_kl,
+                stats.clip_fraction,
             ));
+            if !fn_str.is_empty() {
+                train_pb.println(format!("         {fn_str}"));
+            }
         }
 
         // ── Checkpoint ────────────────────────────────────────────────────────

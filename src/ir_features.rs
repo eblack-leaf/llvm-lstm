@@ -20,13 +20,20 @@ pub struct IrFeatures {
     pub icmp_count: u32,
     pub fcmp_count: u32,
     pub ret_count: u32,
+    pub select_count: u32,   // if-conversion / conditional-move opportunities
+    pub bitwise_count: u32,  // and, or, xor, shl, lshr, ashr — instcombine targets
+    pub cast_count: u32,     // zext, sext, trunc, bitcast, fp* conversions
     pub other_inst_count: u32,
     // Structural features
     pub basic_block_count: u32,
     pub total_instruction_count: u32,
     pub function_count: u32,
     pub loop_depth_approx: u32,
-    pub load_store_ratio: f32,
+    // Derived ratios — scale-invariant signals
+    pub load_store_ratio: f32,  // load / store (memory read vs write balance)
+    pub mem_ratio: f32,         // (load+store) / total_inst (memory pressure)
+    pub call_ratio: f32,        // call / total_inst (inlining opportunity signal)
+    pub avg_bb_size: f32,       // total_inst / bb_count (block granularity)
 }
 
 impl IrFeatures {
@@ -123,12 +130,17 @@ impl IrFeatures {
                     "icmp" => f.icmp_count += 1,
                     "fcmp" => f.fcmp_count += 1,
                     "ret" => f.ret_count += 1,
+                    "select" => f.select_count += 1,
+                    "and" | "or" | "xor" | "shl" | "lshr" | "ashr" => f.bitwise_count += 1,
+                    "zext" | "sext" | "trunc" | "bitcast" | "fpext" | "fptrunc"
+                    | "fptosi" | "fptoui" | "sitofp" | "uitofp"
+                    | "ptrtoint" | "inttoptr" | "addrspacecast" => f.cast_count += 1,
                     _ => f.other_inst_count += 1,
                 }
             }
         }
 
-        // Compute ratios
+        // Compute derived ratios
         f.load_store_ratio = if f.store_count > 0 {
             f.load_count as f32 / f.store_count as f32
         } else if f.load_count > 0 {
@@ -136,37 +148,59 @@ impl IrFeatures {
         } else {
             0.0
         };
+        let total = f.total_instruction_count as f32;
+        f.mem_ratio  = if total > 0.0 { (f.load_count + f.store_count) as f32 / total } else { 0.0 };
+        f.call_ratio = if total > 0.0 { f.call_count as f32 / total } else { 0.0 };
+        f.avg_bb_size = if f.basic_block_count > 0 {
+            total / f.basic_block_count as f32
+        } else {
+            0.0
+        };
 
         Ok(f)
     }
 
-    /// Convert to fixed-size feature vector for LSTM input.
+    /// Convert to fixed-size feature vector for model input.
+    ///
+    /// Raw counts are log-transformed (ln(1+x)) so large and small functions
+    /// land on a comparable scale. Derived ratios are already in [0, ∞) and
+    /// left as-is (they're bounded or near-bounded in practice).
     pub fn to_vec(&self) -> Vec<f32> {
+        let ln = |x: u32| (1.0 + x as f32).ln();
         vec![
-            self.add_count as f32,
-            self.mul_count as f32,
-            self.load_count as f32,
-            self.store_count as f32,
-            self.br_count as f32,
-            self.call_count as f32,
-            self.phi_count as f32,
-            self.alloca_count as f32,
-            self.gep_count as f32,
-            self.icmp_count as f32,
-            self.fcmp_count as f32,
-            self.ret_count as f32,
-            self.other_inst_count as f32,
-            self.basic_block_count as f32,
-            self.total_instruction_count as f32,
-            self.function_count as f32,
-            self.loop_depth_approx as f32,
+            // Log-transformed instruction counts
+            ln(self.add_count),
+            ln(self.mul_count),
+            ln(self.load_count),
+            ln(self.store_count),
+            ln(self.br_count),
+            ln(self.call_count),
+            ln(self.phi_count),
+            ln(self.alloca_count),
+            ln(self.gep_count),
+            ln(self.icmp_count),
+            ln(self.fcmp_count),
+            ln(self.ret_count),
+            ln(self.select_count),
+            ln(self.bitwise_count),
+            ln(self.cast_count),
+            ln(self.other_inst_count),
+            // Log-transformed structural counts
+            ln(self.basic_block_count),
+            ln(self.total_instruction_count),
+            ln(self.function_count),
+            ln(self.loop_depth_approx),
+            // Derived ratios (scale-invariant)
             self.load_store_ratio,
+            self.mem_ratio,
+            self.call_ratio,
+            self.avg_bb_size,
         ]
     }
 
     /// Number of features in the vector representation.
     pub fn feature_count() -> usize {
-        18
+        24
     }
 }
 
