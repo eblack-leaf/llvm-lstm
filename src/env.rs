@@ -42,7 +42,7 @@ impl EnvConfig {
         Self::new(
             PathBuf::from("benchmarks"),
             PathBuf::from("/tmp/llvm-lstm-env"),
-            RewardMode::PerStep,
+            RewardMode::Sparse,
         )
     }
 }

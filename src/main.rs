@@ -211,7 +211,7 @@ fn main() -> Result<()> {
             use training::{TrainConfig, train};
 
             let config = TrainConfig::new(
-                EnvConfig::new(functions, work_dir, RewardMode::PerStep),
+                EnvConfig::new(functions, work_dir, RewardMode::Sparse),
                 checkpoint_dir,
             )
             .with_total_iterations(iterations)
