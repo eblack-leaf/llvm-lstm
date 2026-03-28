@@ -38,10 +38,6 @@ impl Rollout {
         self.states.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
-    }
-
     /// Concatenate multiple rollouts into one flat buffer.
     /// Used to combine per-episode rollouts into a single batch for the PPO update.
     pub fn merge(rollouts: &[Rollout]) -> Self {
@@ -55,15 +51,6 @@ impl Rollout {
             out.dones.extend_from_slice(&r.dones);
         }
         out
-    }
-
-    pub fn clear(&mut self) {
-        self.states.clear();
-        self.actions.clear();
-        self.log_probs.clear();
-        self.rewards.clear();
-        self.values.clear();
-        self.dones.clear();
     }
 
     /// Compute GAE advantages and discounted returns.

@@ -188,38 +188,6 @@ impl Evaluator {
         Ok(results)
     }
 
-    /// Evaluate a specific pass sequence (e.g., from a trained agent).
-    pub fn eval_sequence(
-        &self,
-        passes: &[Pass],
-    ) -> Result<Vec<EvalResult>> {
-        let mut results = Vec::new();
-
-        for func_path in &self.functions {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-
-            let result = self
-                .pipeline
-                .full_pipeline(func_path, None, passes, self.benchmark_runs)?;
-
-            results.push(EvalResult {
-                function: stem,
-                method: "agent".to_string(),
-                pass_sequence: passes.iter().map(|p| p.opt_name().to_string()).collect(),
-                execution_time_ns: result.benchmark.median_ns,
-                binary_size_bytes: result.benchmark.binary_size_bytes,
-                speedup_vs_o0: 0.0,
-                speedup_vs_o3: 0.0,
-            });
-        }
-
-        Ok(results)
-    }
-
     /// Run full evaluation and compute speedups.
     /// `agent_results` can be passed in from model inference; they get included in the summary.
     pub fn full_evaluation(

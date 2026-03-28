@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use rayon::prelude::*;
+
 use anyhow::Result;
 use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
 use burn::config::Config;
@@ -10,12 +12,9 @@ use burn::prelude::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 
 use crate::actor_critic::{Actor, ActorConfig, Critic, CriticConfig};
 use crate::env::{EnvConfig, LlvmEnv};
-use crate::pass_menu::Pass;
 use crate::ppo::{PpoConfig, ppo_update};
 use crate::rollout::Rollout;
 
@@ -47,7 +46,13 @@ pub struct TrainConfig {
 
 pub fn train(config: TrainConfig) -> Result<()> {
     let device = NdArrayDevice::default();
-    let mut rng = StdRng::from_entropy();
+
+    // Save fields needed by parallel workers — config.env is moved into LlvmEnv::new below.
+    let worker_functions_dir  = config.env.functions_dir.clone();
+    let worker_work_dir       = config.env.work_dir.clone();
+    let worker_reward_mode    = config.env.reward_mode.clone();
+    let worker_max_seq_length = config.env.max_seq_length;
+    let worker_benchmark_runs = config.env.benchmark_runs;
 
     let mut env = LlvmEnv::new(config.env)?;
     env.compute_baselines()?;
@@ -88,83 +93,112 @@ pub fn train(config: TrainConfig) -> Result<()> {
     // Maximum entropy for the action space — used to normalise entropy to [0,1].
     let max_entropy = (ActorConfig::new().num_actions as f32).ln();
 
+    // Pre-computed baselines shared (read-only) across parallel workers.
+    let baselines = env.baselines().clone();
+    let n_funcs   = env.num_functions();
+
     // ── Training loop ─────────────────────────────────────────────────────────
     for iteration in 0..config.total_iterations {
         let iter_start = Instant::now();
         ep_pb.set_position(0);
-        let mut rollouts: Vec<Rollout> = Vec::new();
 
-        // ── Collect episodes ──────────────────────────────────────────────────
-        for ep in 0..config.episodes_per_iteration {
-            let actor_inf  = actor.valid();
-            let critic_inf = critic.valid();
-            let mut rollout = Rollout::new();
-            let mut state = env.reset()?;
-            let func_name = env.current_function_name().unwrap_or_else(|| "?".into());
+        // ── Collect episodes in parallel ──────────────────────────────────────
+        // Each episode gets its own LlvmEnv with a unique work dir so that
+        // simultaneous compilations of the same function don't clobber each other.
+        let actor_inf  = actor.valid();
+        let critic_inf = critic.valid();
+        let base_work_dir = &worker_work_dir;
 
-            ep_pb.set_message(format!(
-                "[{func_name}]  ep {}/{}",
-                ep + 1, config.episodes_per_iteration,
-            ));
+        // Actor<NdArray> contains OnceCell which is !Sync, so par_iter().map() won't
+        // compile (closure needs Sync). map_with() side-steps this: the models live
+        // in per-thread state (T: Send+Clone only, not Sync).
+        let episode_results: Vec<(Rollout, String, f32)> = (0..config.episodes_per_iteration)
+            .into_par_iter()
+            .map_with(
+                (actor_inf, critic_inf),
+                |(actor_s, critic_s), ep| -> anyhow::Result<(Rollout, String, f32)> {
+                let func_index = (iteration * config.episodes_per_iteration + ep) % n_funcs;
 
-            let mut hidden: Option<Tensor<NdArray, 2>> = None;
-            let mut prev_action: i64 = 0;
-            let mut step_idx: usize = 0;
-            let mut episode_reward = 0.0f32;
+                // Unique scratch directory — avoids file races between parallel episodes.
+                let worker_dir = base_work_dir.join(format!("worker-{ep}"));
+                let worker_config = EnvConfig::new(
+                    worker_functions_dir.clone(),
+                    worker_dir,
+                    worker_reward_mode.clone(),
+                )
+                .with_max_seq_length(worker_max_seq_length)
+                .with_benchmark_runs(worker_benchmark_runs);
 
-            loop {
-                let features = Tensor::<NdArray, 2>::from_data(
-                    TensorData::new(state.features.clone(), [1, state.features.len()]),
-                    &device,
-                );
-                let prev_act = Tensor::<NdArray, 1, Int>::from_data(
-                    TensorData::new(vec![prev_action], [1]),
-                    &device,
-                );
+                let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
+                let mut state      = worker_env.reset_to(func_index)?;
+                let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
 
-                let (logits, new_hidden) =
-                    actor_inf.forward(features.clone(), prev_act, hidden);
-                let value_scalar: f32 = critic_inf
-                    .forward(features)
-                    .reshape([1])
-                    .into_scalar()
-                    .elem();
+                let device  = NdArrayDevice::default();
+                let mut rng = rand::thread_rng();
 
-                let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
-                let action   = sample_categorical(&logits_vec, &mut rng);
-                let log_prob = log_softmax_at(&logits_vec, action);
+                let mut rollout       = Rollout::new();
+                let mut hidden: Option<Tensor<NdArray, 2>> = None;
+                let mut prev_action: i64 = 0;
+                let mut step_idx: usize  = 0;
+                let mut episode_reward   = 0.0f32;
 
-                let pass = Pass::from_index(action);
-                step_pb.set_message(format!("step {step_idx}  {}", pass.opt_name()));
+                loop {
+                    let features = Tensor::<NdArray, 2>::from_data(
+                        TensorData::new(state.features.clone(), [1, state.features.len()]),
+                        &device,
+                    );
+                    let prev_act = Tensor::<NdArray, 1, Int>::from_data(
+                        TensorData::new(vec![prev_action], [1]),
+                        &device,
+                    );
 
-                let step = env.step(action)?;
-                episode_reward += step.reward;
+                    let (logits, new_hidden) =
+                        actor_s.forward(features.clone(), prev_act, hidden);
+                    let value_scalar: f32 = critic_s
+                        .forward(features)
+                        .reshape([1])
+                        .into_scalar()
+                        .elem();
 
-                rollout.push(
-                    state.features.clone(),
-                    action,
-                    log_prob,
-                    step.reward,
-                    value_scalar,
-                    step.done,
-                );
+                    let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
+                    let action   = sample_categorical(&logits_vec, &mut rng);
+                    let log_prob = log_softmax_at(&logits_vec, action);
 
-                if step.done {
-                    train_pb.println(format!(
-                        "    [{func_name}]  steps={step_idx}  reward={episode_reward:+.4}",
-                    ));
-                    let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
-                    *ema = 0.9 * *ema + 0.1 * episode_reward;
-                    break;
+                    let step = worker_env.step(action)?;
+                    episode_reward += step.reward;
+
+                    rollout.push(
+                        state.features.clone(),
+                        action,
+                        log_prob,
+                        step.reward,
+                        value_scalar,
+                        step.done,
+                    );
+
+                    if step.done {
+                        train_pb.println(format!(
+                            "    [{func_name}]  steps={step_idx}  reward={episode_reward:+.4}",
+                        ));
+                        ep_pb.inc(1);
+                        break;
+                    }
+
+                    hidden = Some(new_hidden);
+                    prev_action = action as i64;
+                    step_idx += 1;
+                    state = step.state;
                 }
 
-                hidden = Some(new_hidden);
-                prev_action = action as i64;
-                step_idx += 1;
-                state = step.state;
-            }
+                Ok((rollout, func_name, episode_reward))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-            ep_pb.inc(1);
+        // Collect rollouts and update per-function EMA (sequential — no races).
+        let mut rollouts: Vec<Rollout> = Vec::with_capacity(config.episodes_per_iteration);
+        for (rollout, func_name, episode_reward) in episode_results {
+            let ema = fn_ema.entry(func_name).or_insert(episode_reward);
+            *ema = 0.9 * *ema + 0.1 * episode_reward;
             rollouts.push(rollout);
         }
 

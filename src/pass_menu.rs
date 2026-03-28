@@ -734,14 +734,6 @@ impl Pass {
         }
     }
 
-    /// Total number of actions (transforms + Stop).
-    pub fn count() -> usize {
-        #[cfg(not(feature = "secondary_passes"))]
-        { 29 }
-        #[cfg(feature = "secondary_passes")]
-        { 72 }
-    }
-
     /// All transform passes (excludes Stop).
     pub fn all_transforms() -> &'static [Pass] {
         #[cfg(not(feature = "secondary_passes"))]

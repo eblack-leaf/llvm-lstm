@@ -45,18 +45,9 @@ impl CompilationPipeline {
         }
     }
 
-    pub fn with_timeout(mut self, secs: u64) -> Self {
-        self.timeout_secs = secs;
-        self
-    }
-
     pub fn with_bench_iters(mut self, iters: usize) -> Self {
         self.bench_iters = iters;
         self
-    }
-
-    pub fn work_dir(&self) -> &Path {
-        &self.work_dir
     }
 
     /// Emit metadata-rich, unoptimized LLVM IR from C source.

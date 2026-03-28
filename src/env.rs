@@ -36,16 +36,6 @@ pub struct EnvConfig {
     pub benchmark_runs: usize,
 }
 
-impl EnvConfig {
-    /// Convenience constructor with the standard project defaults.
-    pub fn default_paths() -> Self {
-        Self::new(
-            PathBuf::from("benchmarks"),
-            PathBuf::from("/tmp/llvm-lstm-env"),
-            RewardMode::Sparse,
-        )
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineTimes {
@@ -88,7 +78,6 @@ pub struct LlvmEnv {
     current_passes: Vec<Pass>,
     previous_time_ns: Option<u64>,
     config: EnvConfig,
-    rng_index: usize,
 }
 
 impl LlvmEnv {
@@ -110,8 +99,36 @@ impl LlvmEnv {
             current_passes: Vec::new(),
             previous_time_ns: None,
             config,
-            rng_index: 0,
         })
+    }
+
+    /// Construct a worker env with pre-computed baselines (skips baseline computation).
+    /// Use a unique `config.work_dir` per worker to avoid file collisions.
+    pub fn new_with_baselines(config: EnvConfig, baselines: HashMap<String, BaselineTimes>) -> Result<Self> {
+        let functions = Self::discover_functions(&config.functions_dir)?;
+        if functions.is_empty() {
+            bail!("No .c files found in {}", config.functions_dir.display());
+        }
+        let pipeline = CompilationPipeline::new(config.work_dir.clone());
+        Ok(Self {
+            pipeline,
+            functions,
+            baselines,
+            current_function: None,
+            current_base_ir: None,
+            current_opt_ir: None,
+            current_passes: Vec::new(),
+            previous_time_ns: None,
+            config,
+        })
+    }
+
+    pub fn baselines(&self) -> &HashMap<String, BaselineTimes> {
+        &self.baselines
+    }
+
+    pub fn num_functions(&self) -> usize {
+        self.functions.len()
     }
 
     /// Compute baselines for all functions. Call once before training.
@@ -150,18 +167,15 @@ impl LlvmEnv {
         Ok(())
     }
 
-    /// Reset environment: pick a function, extract initial IR features.
-    pub fn reset(&mut self) -> Result<State> {
-        // Round-robin function selection
-        let func = self.functions[self.rng_index % self.functions.len()].clone();
-        self.rng_index += 1;
-
+    /// Reset to a specific function by index.
+    pub fn reset_to(&mut self, func_index: usize) -> Result<State> {
+        let func = self.functions[func_index % self.functions.len()].clone();
         let base_ir = self.pipeline.emit_ir(&func)?;
         let features = IrFeatures::from_ll_file(&base_ir)?;
 
         self.current_function = Some(func);
         self.current_base_ir = Some(base_ir.clone());
-        self.current_opt_ir = Some(base_ir); // no passes yet — opt IR == base IR
+        self.current_opt_ir = Some(base_ir);
         self.current_passes.clear();
         self.previous_time_ns = None;
 
@@ -244,10 +258,6 @@ impl LlvmEnv {
                 sequence_length: self.current_passes.len(),
             },
         })
-    }
-
-    pub fn baseline_time(&self, function: &str) -> Option<&BaselineTimes> {
-        self.baselines.get(function)
     }
 
     pub fn current_function_name(&self) -> Option<String> {

@@ -74,33 +74,43 @@ impl<B: Backend> Actor<B> {
         (logits, h)
     }
 
-    /// Full-episode sequence forward. Used during PPO updates.
+    /// Batched multi-episode forward. Used during PPO updates instead of
+    /// calling `forward_sequence` once per episode.
     ///
-    /// Runs the GRU over the whole episode from a clean hidden state (None),
-    /// matching the episode-start condition during collection — no approximation.
+    /// Episodes are zero-padded to `max_T` so the GRU processes all of them
+    /// in one call. Only real (non-padding) logits are used in the loss.
     ///
-    /// `prev_actions[t]` = action taken at step t-1; 0 for t=0 (episode start).
-    ///
-    /// Returns `logits [seq_len, num_actions]`.
-    pub fn forward_sequence(
+    /// Returns `logits [n_ep, max_T, num_actions]`. Caller selects real steps.
+    pub fn forward_batch(
         &self,
-        features:     Tensor<B, 2>,        // [seq_len, input_dim]
-        prev_actions: Tensor<B, 1, Int>,   // [seq_len]
-    ) -> Tensor<B, 2> {                    // [seq_len, num_actions]
-        let x = self.input_proj.forward(features);              // [seq_len, hidden_size]
+        features:     Tensor<B, 3>,         // [n_ep, max_T, feat_dim]
+        prev_actions: Tensor<B, 2, Int>,     // [n_ep, max_T]
+    ) -> Tensor<B, 3> {                      // [n_ep, max_T, num_actions]
+        let dims = features.shape().dims;
+        let (n_ep, max_t, feat_dim) = (dims[0], dims[1], dims[2]);
 
-        let e_raw = self.action_embed.forward(prev_actions.unsqueeze_dim(1));
-        let ed = e_raw.shape().dims;
-        let e = e_raw.reshape([ed[0], ed[2]]);                  // [seq_len, embed_dim]
+        // Linear on last dim: flatten to [n_ep*max_T, feat_dim], project, unflatten.
+        let x_flat = self.input_proj.forward(features.reshape([n_ep * max_t, feat_dim]));
+        let hidden_size = x_flat.shape().dims[1];
+        let x = x_flat.reshape([n_ep, max_t, hidden_size]);  // [n_ep, max_T, hidden]
 
-        // Add batch dim=1 so the GRU sees [1, seq_len, hidden+embed].
-        let inp = Tensor::cat(vec![x, e], 1).unsqueeze_dim(0); // [1, seq_len, hidden+embed]
-        let out = self.gru.forward(inp, None);                  // [1, seq_len, hidden_size]
-        let od = out.shape().dims;
-        let h = out.reshape([od[1], od[2]]);                    // [seq_len, hidden_size]
+        // Embedding: reshape [n_ep, max_T] → [n_ep*max_T, 1] → embed → [n_ep, max_T, embed_dim]
+        let e_raw = self.action_embed
+            .forward(prev_actions.reshape([n_ep * max_t]).unsqueeze_dim::<2>(1));
+        let embed_dim = e_raw.shape().dims[2];
+        let e = e_raw.reshape([n_ep, max_t, embed_dim]);     // [n_ep, max_T, embed_dim]
 
-        self.policy_head.forward(h)                             // [seq_len, num_actions]
+        // GRU takes [batch, seq, input] — already in that shape, no unsqueeze needed.
+        let gru_inp = Tensor::cat(vec![x, e], 2);            // [n_ep, max_T, hidden+embed]
+        let out = self.gru.forward(gru_inp, None);           // [n_ep, max_T, hidden_size]
+        let h = out.shape().dims[2];
+
+        // Policy head: flatten, project, unflatten.
+        let logits_flat = self.policy_head.forward(out.reshape([n_ep * max_t, h]));
+        let n_act = logits_flat.shape().dims[1];
+        logits_flat.reshape([n_ep, max_t, n_act])
     }
+
 }
 
 // ── Critic ───────────────────────────────────────────────────────────────────

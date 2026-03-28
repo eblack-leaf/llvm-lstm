@@ -198,10 +198,6 @@ impl IrFeatures {
         ]
     }
 
-    /// Number of features in the vector representation.
-    pub fn feature_count() -> usize {
-        24
-    }
 }
 
 /// Extract the opcode from an LLVM IR instruction line.

@@ -30,7 +30,7 @@ pub struct PpoConfig {
     #[config(default = 0.95)]
     pub gae_lambda: f32,
     /// Number of PPO epochs per rollout batch.
-    #[config(default = 4)]
+    #[config(default = 2)]
     pub num_epochs: usize,
 }
 
@@ -73,39 +73,51 @@ where
     let mut stats = PpoStats::default();
 
     for epoch in 0..config.num_epochs {
-        // ── Actor: re-roll each episode as a sequence ─────────────────────────
+        // ── Actor: single batched GRU forward over all episodes ───────────────
         //
-        // For each episode, build (features [T, F], prev_actions [T]) and run
-        // forward_sequence. Concatenate the resulting logits across episodes to
-        // get a flat [n, num_actions] tensor aligned with the rollout.
+        // Pad all episodes to max_T and run one GRU call instead of n_ep separate
+        // calls. Padding positions are zero-filled and masked out after the forward.
+        // Real steps have identical hidden states to the sequential version —
+        // same inputs, same GRU from hidden=None, so gradients are exact.
         //
-        let mut episode_logits: Vec<Tensor<B, 2>> = Vec::with_capacity(episodes.len());
+        let n_ep  = episodes.len();
+        let max_t = episodes.iter().map(|r| r.len()).max().unwrap_or(1);
 
-        for range in &episodes {
-            let ep_len = range.len();
-            let flat: Vec<f32> = rollout.states[range.clone()]
-                .iter()
-                .flatten()
-                .cloned()
-                .collect();
-            let features = Tensor::<B, 2>::from_data(
-                TensorData::new(flat, [ep_len, feat_dim]),
-                device,
-            );
-            // prev_actions[t] = action[t-1], 0 for t=0
-            let prev: Vec<i64> = std::iter::once(0i64)
-                .chain(rollout.actions[range.clone()].iter().map(|&a| a as i64))
-                .take(ep_len)
-                .collect();
-            let prev_actions = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(prev, [ep_len]),
-                device,
-            );
-            episode_logits.push(actor.forward_sequence(features, prev_actions));
+        let mut feat_buf = vec![0.0f32; n_ep * max_t * feat_dim];
+        let mut prev_buf = vec![0i64;   n_ep * max_t];
+        // For each rollout step, its row in the flat [n_ep * max_t] layout.
+        let mut real_idx: Vec<i64> = Vec::with_capacity(n);
+
+        for (ei, range) in episodes.iter().enumerate() {
+            for (t, state) in rollout.states[range.clone()].iter().enumerate() {
+                let fi = (ei * max_t + t) * feat_dim;
+                feat_buf[fi..fi + feat_dim].copy_from_slice(state);
+                real_idx.push((ei * max_t + t) as i64);
+            }
+            // prev_actions[ep][t] = action[t-1], already 0 at t=0 from vec init
+            for (t, &a) in rollout.actions[range.clone()].iter().enumerate() {
+                if t + 1 < range.len() {
+                    prev_buf[ei * max_t + t + 1] = a as i64;
+                }
+            }
         }
 
-        // [n, num_actions] — one row per rollout step, in order
-        let logits = Tensor::cat(episode_logits, 0);
+        let features_pad = Tensor::<B, 3>::from_data(
+            TensorData::new(feat_buf, [n_ep, max_t, feat_dim]),
+            device,
+        );
+        let prev_pad = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(prev_buf, [n_ep, max_t]),
+            device,
+        );
+
+        // [n_ep, max_T, num_actions] → flatten → select real rows → [n, num_actions]
+        let logits_3d = actor.forward_batch(features_pad, prev_pad);
+        let n_act = logits_3d.shape().dims[2];
+        let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);
+
+        let idx = Tensor::<B, 1, Int>::from_data(TensorData::new(real_idx, [n]), device);
+        let logits = logits_flat.gather(0, idx.unsqueeze_dim::<2>(1).expand([n, n_act]));
 
         let log_probs_all = activation::log_softmax(logits.clone(), 1);
         let probs_all     = activation::softmax(logits, 1);
