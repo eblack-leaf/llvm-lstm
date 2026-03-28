@@ -112,7 +112,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // simultaneous compilations of the same function don't clobber each other.
         let actor_inf  = actor.valid();
         let critic_inf = critic.valid();
-        let base_work_dir = &worker_work_dir;
+        let base_work_dir  = &worker_work_dir;
+        let ir_cache_dir   = worker_work_dir.join("ir_cache");
 
         // Actor<NdArray> contains OnceCell which is !Sync, so par_iter().map() won't
         // compile (closure needs Sync). map_with() side-steps this: the models live
@@ -134,7 +135,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 .with_max_seq_length(worker_max_seq_length)
                 .with_benchmark_runs(worker_benchmark_runs);
 
-                let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
+                let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?
+                    .with_ir_cache(ir_cache_dir.clone());
                 let mut state      = worker_env.reset_to(func_index)?;
                 let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
 

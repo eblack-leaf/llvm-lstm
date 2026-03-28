@@ -60,25 +60,28 @@ impl CompilationPipeline {
             .to_string_lossy();
         let ll_path = self.work_dir.join(format!("{stem}.ll"));
 
-        let output = Command::new(&self.clang)
-            .args([
-                "-O3",
-                "-Xclang",
-                "-disable-llvm-optzns",
-                "-emit-llvm",
-                "-S",
-            ])
-            .arg(c_source)
-            .arg("-o")
-            .arg(&ll_path)
-            .output()
-            .context("failed to run clang")?;
+        // Skip clang if the IR already exists — base IR for a given source is deterministic.
+        if !ll_path.exists() {
+            let output = Command::new(&self.clang)
+                .args([
+                    "-O3",
+                    "-Xclang",
+                    "-disable-llvm-optzns",
+                    "-emit-llvm",
+                    "-S",
+                ])
+                .arg(c_source)
+                .arg("-o")
+                .arg(&ll_path)
+                .output()
+                .context("failed to run clang")?;
 
-        if !output.status.success() {
-            bail!(
-                "clang emit-ir failed:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            if !output.status.success() {
+                bail!(
+                    "clang emit-ir failed:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         }
 
         Ok(ll_path)
@@ -187,7 +190,7 @@ impl CompilationPipeline {
                             child.kill().ok();
                             bail!("benchmark binary timed out after {}s", self.timeout_secs);
                         }
-                        std::thread::sleep(Duration::from_millis(100));
+                        std::thread::sleep(Duration::from_millis(5));
                     }
                     Err(e) => bail!("failed to wait on benchmark: {e}"),
                 }

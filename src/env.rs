@@ -81,6 +81,8 @@ pub struct LlvmEnv {
     current_passes: Vec<Pass>,
     previous_time_ns: Option<u64>,
     config: EnvConfig,
+    /// Shared directory for caching IR by pass sequence. None = no caching.
+    ir_cache_dir: Option<PathBuf>,
 }
 
 impl LlvmEnv {
@@ -103,6 +105,7 @@ impl LlvmEnv {
             current_passes: Vec::new(),
             previous_time_ns: None,
             config,
+            ir_cache_dir: None,
         })
     }
 
@@ -125,7 +128,16 @@ impl LlvmEnv {
             current_passes: Vec::new(),
             previous_time_ns: None,
             config,
+            ir_cache_dir: None,
         })
+    }
+
+    /// Enable the shared IR cache. Call before the first episode.
+    /// `dir` should be the same path for all parallel workers (e.g. `work/ir_cache`).
+    pub fn with_ir_cache(mut self, dir: PathBuf) -> Self {
+        std::fs::create_dir_all(&dir).ok();
+        self.ir_cache_dir = Some(dir);
+        self
     }
 
     pub fn baselines(&self) -> &HashMap<String, BaselineTimes> {
@@ -209,13 +221,33 @@ impl LlvmEnv {
         }
 
         // Apply only the new pass to the current optimized IR (incremental).
-        // This avoids re-running all accumulated passes from scratch each step.
+        // Check the shared IR cache first; on miss, run opt and populate the cache.
         let opt_ir = if pass != Pass::Stop {
-            self.pipeline.optimize_only(
-                &func,
-                self.current_opt_ir.as_deref(),
-                &[pass],
-            )?
+            let cache_path = self.ir_cache_path(&stem);
+            if let Some(ref cp) = cache_path {
+                if cp.exists() {
+                    cp.clone()
+                } else {
+                    let result = self.pipeline.optimize_only(
+                        &func,
+                        self.current_opt_ir.as_deref(),
+                        &[pass],
+                    )?;
+                    // Atomic write: copy to .tmp then rename so concurrent workers
+                    // never see a half-written file.
+                    let tmp = cp.with_extension("ll.tmp");
+                    if std::fs::copy(&result, &tmp).is_ok() {
+                        std::fs::rename(&tmp, cp).ok();
+                    }
+                    result
+                }
+            } else {
+                self.pipeline.optimize_only(
+                    &func,
+                    self.current_opt_ir.as_deref(),
+                    &[pass],
+                )?
+            }
         } else {
             self.current_opt_ir.clone().context("no current IR")?
         };
@@ -262,6 +294,19 @@ impl LlvmEnv {
                 pass_applied: pass.opt_name().to_string(),
                 sequence_length: self.current_passes.len(),
             },
+        })
+    }
+
+    /// Path where the IR for the current accumulated pass sequence should be cached.
+    /// Returns None if caching is disabled or no function is set.
+    fn ir_cache_path(&self, func_stem: &str) -> Option<PathBuf> {
+        self.ir_cache_dir.as_ref().map(|dir| {
+            let key: String = self.current_passes
+                .iter()
+                .map(|p| p.to_index().to_string())
+                .collect::<Vec<_>>()
+                .join("-");
+            dir.join(format!("{func_stem}__{key}.ll"))
         })
     }
 
