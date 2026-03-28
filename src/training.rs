@@ -177,9 +177,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     );
 
                     if step.done {
-                        train_pb.println(format!(
-                            "    [{func_name}]  steps={step_idx}  reward={episode_reward:+.4}",
-                        ));
                         ep_pb.inc(1);
                         break;
                     }
