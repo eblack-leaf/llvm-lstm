@@ -121,10 +121,10 @@ where
             ),
             device,
         );
-        let log_probs_new = log_probs_all.clone().gather(1, action_idx).squeeze::<1>();
+        let log_probs_new = log_probs_all.clone().gather(1, action_idx).reshape([n]);
 
         // Entropy: H = -Σ_a p(a)*log_p(a), mean over batch
-        let entropy = -(probs_all * log_probs_all).sum_dim(1).squeeze::<1>().mean();
+        let entropy = -(probs_all * log_probs_all).sum_dim(1).reshape([n]).mean();
 
         // Old log probs stored during collection
         let log_probs_old = Tensor::<B, 1>::from_data(
@@ -162,7 +162,7 @@ where
             TensorData::new(flat_states, [n, feat_dim]),
             device,
         );
-        let values = critic.forward(features).squeeze::<1>(); // [n]
+        let values = critic.forward(features).reshape([n]); // [n, 1] → [n]
         let ret = Tensor::<B, 1>::from_data(
             TensorData::new(returns.to_vec(), [n]),
             device,

@@ -86,6 +86,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 let (logits, new_hidden) = actor_inf.forward(features.clone(), prev_act, hidden);
                 let value_scalar: f32 = critic_inf
                     .forward(features)
+                    .reshape([1])   // [1,1] → [1] so into_scalar() works
                     .into_scalar()
                     .elem();
 

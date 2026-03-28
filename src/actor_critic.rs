@@ -57,14 +57,20 @@ impl<B: Backend> Actor<B> {
         prev_action: Tensor<B, 1, Int>,    // [batch]
         hidden:      Option<Tensor<B, 2>>, // [batch, hidden_size] or None
     ) -> (Tensor<B, 2>, Tensor<B, 2>) {
-        let x = self.input_proj.forward(features);              // [batch, hidden_size]
-        let e = self.action_embed
-            .forward(prev_action.unsqueeze_dim(1))              // [batch, 1, embed_dim]
-            .squeeze::<2>();                                    // [batch, embed_dim]
+        let x = self.input_proj.forward(features);             // [batch, hidden_size]
+
+        // Embedding returns [batch, 1, embed_dim]; reshape to [batch, embed_dim].
+        // Can't use squeeze — if batch=1 both dims are size-1 and squeeze panics.
+        let e_raw = self.action_embed.forward(prev_action.unsqueeze_dim(1));
+        let ed = e_raw.shape().dims;
+        let e = e_raw.reshape([ed[0], ed[2]]);                 // [batch, embed_dim]
+
         let inp = Tensor::cat(vec![x, e], 1).unsqueeze_dim(1); // [batch, 1, hidden+embed]
-        let out = self.gru.forward(inp, hidden);                // [batch, 1, hidden_size]
-        let h   = out.squeeze::<2>();                           // [batch, hidden_size]
-        let logits = self.policy_head.forward(h.clone());       // [batch, num_actions]
+        let out = self.gru.forward(inp, hidden);               // [batch, 1, hidden_size]
+        let od = out.shape().dims;
+        let h = out.reshape([od[0], od[2]]);                   // [batch, hidden_size]
+
+        let logits = self.policy_head.forward(h.clone());      // [batch, num_actions]
         (logits, h)
     }
 
@@ -81,15 +87,19 @@ impl<B: Backend> Actor<B> {
         features:     Tensor<B, 2>,        // [seq_len, input_dim]
         prev_actions: Tensor<B, 1, Int>,   // [seq_len]
     ) -> Tensor<B, 2> {                    // [seq_len, num_actions]
-        let x = self.input_proj.forward(features);               // [seq_len, hidden_size]
-        let e = self.action_embed
-            .forward(prev_actions.unsqueeze_dim(1))              // [seq_len, 1, embed_dim]
-            .squeeze::<2>();                                     // [seq_len, embed_dim]
+        let x = self.input_proj.forward(features);              // [seq_len, hidden_size]
+
+        let e_raw = self.action_embed.forward(prev_actions.unsqueeze_dim(1));
+        let ed = e_raw.shape().dims;
+        let e = e_raw.reshape([ed[0], ed[2]]);                  // [seq_len, embed_dim]
+
         // Add batch dim=1 so the GRU sees [1, seq_len, hidden+embed].
-        let inp = Tensor::cat(vec![x, e], 1).unsqueeze_dim(0);  // [1, seq_len, hidden+embed]
-        let out = self.gru.forward(inp, None);                   // [1, seq_len, hidden_size]
-        let h   = out.squeeze::<2>();                            // [seq_len, hidden_size]
-        self.policy_head.forward(h)                              // [seq_len, num_actions]
+        let inp = Tensor::cat(vec![x, e], 1).unsqueeze_dim(0); // [1, seq_len, hidden+embed]
+        let out = self.gru.forward(inp, None);                  // [1, seq_len, hidden_size]
+        let od = out.shape().dims;
+        let h = out.reshape([od[1], od[2]]);                    // [seq_len, hidden_size]
+
+        self.policy_head.forward(h)                             // [seq_len, num_actions]
     }
 }
 

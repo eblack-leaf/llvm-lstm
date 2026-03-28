@@ -92,11 +92,23 @@ enum Commands {
         bench_iters: usize,
     },
 
-    /// Train the LSTM+PPO agent
+    /// Train the actor-critic PPO agent
     Train {
-        /// Training config file (TOML)
-        #[arg(long, default_value = "configs/train.toml")]
-        config: PathBuf,
+        /// Directory containing benchmark .c files
+        #[arg(long, default_value = "benchmarks")]
+        functions: PathBuf,
+        /// Working directory for compiled IR and binaries
+        #[arg(long, default_value = "/tmp/llvm-lstm-env")]
+        work_dir: PathBuf,
+        /// Directory to write model checkpoints
+        #[arg(long, default_value = "checkpoints")]
+        checkpoint_dir: String,
+        /// Total number of collect+update iterations
+        #[arg(long, default_value = "1000")]
+        iterations: usize,
+        /// Complete episodes to collect per iteration
+        #[arg(long, default_value = "6")]
+        episodes: usize,
     },
 
     /// Evaluate agent against baselines
@@ -194,10 +206,18 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { config } => {
-            eprintln!("Training not yet implemented.");
-            eprintln!("Config file: {}", config.display());
-            eprintln!("TODO: Human implements LSTM policy + PPO training loop");
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes } => {
+            use env::{EnvConfig, RewardMode};
+            use training::{TrainConfig, train};
+
+            let config = TrainConfig::new(
+                EnvConfig::new(functions, work_dir, RewardMode::PerStep),
+                checkpoint_dir,
+            )
+            .with_total_iterations(iterations)
+            .with_episodes_per_iteration(episodes);
+
+            train(config)?;
         }
 
         Commands::Evaluate {
