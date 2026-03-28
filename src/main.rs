@@ -98,7 +98,7 @@ enum Commands {
         #[arg(long, default_value = "benchmarks")]
         functions: PathBuf,
         /// Working directory for compiled IR and binaries
-        #[arg(long, default_value = "/tmp/llvm-lstm-env")]
+        #[arg(long, default_value = "work")]
         work_dir: PathBuf,
         /// Directory to write model checkpoints
         #[arg(long, default_value = "checkpoints")]

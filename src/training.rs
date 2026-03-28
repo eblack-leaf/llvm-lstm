@@ -90,6 +90,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
     // Exponential moving average of episode reward per function (α=0.1).
     let mut fn_ema: HashMap<String, f32> = HashMap::new();
 
+    // Previous logged stats for computing deltas.
+    let mut prev_ev:  Option<f32> = None;
+    let mut prev_ent: Option<f32> = None;
+    let mut prev_kl:  Option<f32> = None;
+
     // Maximum entropy for the action space — used to normalise entropy to [0,1].
     let max_entropy = (ActorConfig::new().num_actions as f32).ln();
 
@@ -246,30 +251,78 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // ── Logging ───────────────────────────────────────────────────────────
         if iteration % config.log_interval == 0 {
-            let ev = 1.0 - stats.value_loss;   // explained variance: 0=no skill, 1=perfect
-            let ent_frac = stats.entropy / max_entropy; // 1=uniform, 0=deterministic
+            let ev       = 1.0 - stats.value_loss;
+            let ent_frac = stats.entropy / max_entropy;
+            let kl       = stats.approx_kl;
+            let clip     = stats.clip_fraction;
 
-            // Per-function EMA summary, sorted by name
+            // Delta indicators vs previous log point (↑↓ with sign).
+            let delta = |cur: f32, prev: Option<f32>| -> String {
+                match prev {
+                    None => "     ".to_string(),
+                    Some(p) => {
+                        let d = cur - p;
+                        if d.abs() < 0.005 { "     ".to_string() }
+                        else if d > 0.0    { format!(" \x1b[32m↑{:.2}\x1b[0m", d.abs()) }
+                        else               { format!(" \x1b[31m↓{:.2}\x1b[0m", d.abs()) }
+                    }
+                }
+            };
+
+            // Color a value based on healthy/warning/bad thresholds.
+            // good_range: (lo, hi) where the value is "healthy".
+            let color = |s: String, good: bool, warn: bool| -> String {
+                if good      { format!("\x1b[32m{s}\x1b[0m") }   // green
+                else if warn { format!("\x1b[33m{s}\x1b[0m") }   // yellow
+                else         { format!("\x1b[31m{s}\x1b[0m") }   // red
+            };
+
+            let ev_s = color(
+                format!("{ev:+.2}"),
+                ev > 0.3,
+                ev > 0.0,
+            );
+            let ent_s = color(
+                format!("{ent_frac:.2}"),
+                ent_frac > 0.4,
+                ent_frac > 0.2,
+            );
+            let kl_s = color(
+                format!("{kl:.4}"),
+                kl < 0.05,
+                kl < 0.1,
+            );
+            let clip_s = color(
+                format!("{clip:.2}"),
+                clip < 0.3,
+                clip < 0.5,
+            );
+
+            let dev  = delta(ev,       prev_ev);
+            let dent = delta(ent_frac, prev_ent);
+            let dkl  = delta(kl,       prev_kl);
+
+            // Per-function EMA summary: color positive green, negative red.
             let mut fn_summary: Vec<(&str, f32)> = fn_ema
                 .iter()
                 .map(|(k, &v)| (k.as_str(), v))
                 .collect();
             fn_summary.sort_by_key(|(k, _)| *k);
-            let fn_str: String = fn_summary
-                .iter()
-                .map(|(k, v)| format!("{k}={v:+.2}"))
-                .collect::<Vec<_>>()
-                .join("  ");
-
             train_pb.println(format!(
-                "  [{iteration:>4}] steps={:>3}  ev={ev:+.2}  ent={ent_frac:.2}  kl={:.4}  clip={:.2}",
+                "  [{iteration:>4}] steps={:>4}  ev={ev_s}{dev}  ent={ent_s}{dent}  kl={kl_s}{dkl}  clip={clip_s}",
                 combined.len(),
-                stats.approx_kl,
-                stats.clip_fraction,
             ));
-            if !fn_str.is_empty() {
-                train_pb.println(format!("         {fn_str}"));
+            for (k, v) in &fn_summary {
+                let s = format!("         {k:>24} = {v:+.3}");
+                let colored = if *v > 0.05       { format!("\x1b[32m{s}\x1b[0m") }
+                              else if *v > -0.05 { format!("\x1b[33m{s}\x1b[0m") }
+                              else               { format!("\x1b[31m{s}\x1b[0m") };
+                train_pb.println(colored);
             }
+
+            prev_ev  = Some(ev);
+            prev_ent = Some(ent_frac);
+            prev_kl  = Some(kl);
         }
 
         // ── Checkpoint ────────────────────────────────────────────────────────

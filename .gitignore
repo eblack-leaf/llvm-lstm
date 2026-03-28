@@ -9,6 +9,9 @@ eda_output/
 results/
 checkpoints/
 
+# Training work directory (compiled IR, binaries, cached baselines)
+work/
+
 # Pipeline working directories
 *.o
 *.bin
