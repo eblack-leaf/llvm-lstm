@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
 use burn::config::Config;
@@ -5,12 +7,14 @@ use burn::module::AutodiffModule;
 use burn::optim::AdamConfig;
 use burn::prelude::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 use crate::actor_critic::{Actor, ActorConfig, Critic, CriticConfig};
 use crate::env::{EnvConfig, LlvmEnv};
+use crate::pass_menu::Pass;
 use crate::ppo::{PpoConfig, ppo_update};
 use crate::rollout::Rollout;
 
@@ -28,7 +32,6 @@ pub struct TrainConfig {
     #[config(default = 1000)]
     pub total_iterations: usize,
     /// Number of complete episodes to collect per iteration (one per env cycle).
-    /// Each episode runs until done, so advantages are always clean.
     #[config(default = 6)]
     pub episodes_per_iteration: usize,
     /// Run full evaluation every N iterations.
@@ -45,33 +48,62 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let device = NdArrayDevice::default();
     let mut rng = StdRng::from_entropy();
 
-    // Single env — cycles through all benchmark functions round-robin.
-    // Baselines are computed once up front (slow, but only done once).
     let mut env = LlvmEnv::new(config.env)?;
-    eprintln!("Computing baselines for all benchmark functions...");
     env.compute_baselines()?;
-    eprintln!("Baselines ready. Starting training.");
 
-    let mut actor  = ActorConfig::new().init::<B>(&device);
-    let mut critic = CriticConfig::new().init::<B>(&device);
+    let mut actor        = ActorConfig::new().init::<B>(&device);
+    let mut critic       = CriticConfig::new().init::<B>(&device);
     let mut actor_optim  = AdamConfig::new().init::<B, Actor<B>>();
     let mut critic_optim = AdamConfig::new().init::<B, Critic<B>>();
 
+    // ── Progress bars ─────────────────────────────────────────────────────────
+    let multi = MultiProgress::new();
+
+    let train_pb = multi.add(ProgressBar::new(config.total_iterations as u64));
+    train_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("  training  {bar:30.green}  {pos:>4}/{len}  {elapsed}  {msg}")
+            .unwrap(),
+    );
+
+    let ep_pb = multi.add(ProgressBar::new(config.episodes_per_iteration as u64));
+    ep_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("  episode   {bar:20.cyan}   {pos}/{len}  {msg}")
+            .unwrap(),
+    );
+
+    let step_pb = multi.add(ProgressBar::new_spinner());
+    step_pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("  {spinner:.yellow}  {msg}")
+            .unwrap(),
+    );
+    step_pb.enable_steady_tick(Duration::from_millis(120));
+
+    // ── Training loop ─────────────────────────────────────────────────────────
     for iteration in 0..config.total_iterations {
-        // ── Collect episodes ──────────────────────────────────────────────────
-        //
-        // Each episode runs to completion (done=true) in its own Rollout.
-        // .valid() gives the NdArray (non-autodiff) model — no graph built.
-        //
+        let iter_start = Instant::now();
+        ep_pb.set_position(0);
         let mut rollouts: Vec<Rollout> = Vec::new();
 
-        for _ in 0..config.episodes_per_iteration {
+        // ── Collect episodes ──────────────────────────────────────────────────
+        for ep in 0..config.episodes_per_iteration {
             let actor_inf  = actor.valid();
             let critic_inf = critic.valid();
             let mut rollout = Rollout::new();
             let mut state = env.reset()?;
+            let func_name = env.current_function_name().unwrap_or_else(|| "?".into());
+
+            ep_pb.set_message(format!(
+                "[{func_name}]  ep {}/{}",
+                ep + 1, config.episodes_per_iteration,
+            ));
+
             let mut hidden: Option<Tensor<NdArray, 2>> = None;
             let mut prev_action: i64 = 0;
+            let mut step_idx: usize = 0;
+            let mut episode_reward = 0.0f32;
 
             loop {
                 let features = Tensor::<NdArray, 2>::from_data(
@@ -83,10 +115,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     &device,
                 );
 
-                let (logits, new_hidden) = actor_inf.forward(features.clone(), prev_act, hidden);
+                let (logits, new_hidden) =
+                    actor_inf.forward(features.clone(), prev_act, hidden);
                 let value_scalar: f32 = critic_inf
                     .forward(features)
-                    .reshape([1])   // [1,1] → [1] so into_scalar() works
+                    .reshape([1])
                     .into_scalar()
                     .elem();
 
@@ -94,7 +127,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 let action   = sample_categorical(&logits_vec, &mut rng);
                 let log_prob = log_softmax_at(&logits_vec, action);
 
+                let pass = Pass::from_index(action);
+                step_pb.set_message(format!("step {step_idx}  {}", pass.opt_name()));
+
                 let step = env.step(action)?;
+                episode_reward += step.reward;
 
                 rollout.push(
                     state.features.clone(),
@@ -106,22 +143,24 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 );
 
                 if step.done {
+                    train_pb.println(format!(
+                        "    [{func_name}]  steps={step_idx}  reward={episode_reward:+.4}",
+                    ));
                     break;
                 }
 
                 hidden = Some(new_hidden);
                 prev_action = action as i64;
+                step_idx += 1;
                 state = step.state;
             }
 
+            ep_pb.inc(1);
             rollouts.push(rollout);
         }
 
-        // ── Compute advantages per episode, then flatten ──────────────────────
-        //
-        // last_value=0.0 is always correct here because every episode ends with
-        // done=true — there is no future reward to bootstrap from.
-        //
+        // ── Compute advantages ────────────────────────────────────────────────
+        step_pb.set_message("computing advantages");
         let mut all_advantages: Vec<f32> = Vec::new();
         let mut all_returns: Vec<f32> = Vec::new();
 
@@ -132,9 +171,23 @@ pub fn train(config: TrainConfig) -> Result<()> {
             all_returns.extend(ret);
         }
 
+        // Normalize returns so the critic learns from a stable target distribution.
+        // Without this the raw PerStep returns vary wildly in scale and the critic
+        // diverges early (value loss explodes).
+        let ret_mean = all_returns.iter().sum::<f32>() / all_returns.len() as f32;
+        let ret_std  = (all_returns.iter()
+            .map(|r| (r - ret_mean).powi(2))
+            .sum::<f32>()
+            / all_returns.len() as f32)
+            .sqrt();
+        let norm_returns: Vec<f32> = all_returns.iter()
+            .map(|r| (r - ret_mean) / (ret_std + 1e-8))
+            .collect();
+
         let combined = Rollout::merge(&rollouts);
 
         // ── PPO update ────────────────────────────────────────────────────────
+        step_pb.set_message("ppo update");
         let stats;
         (actor, critic, stats) = ppo_update(
             actor,
@@ -143,21 +196,25 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &mut critic_optim,
             &combined,
             &all_advantages,
-            &all_returns,
+            &norm_returns,
             &config.ppo,
             &device,
         );
 
+        let iter_secs = iter_start.elapsed().as_secs_f32();
+        train_pb.inc(1);
+        train_pb.set_message(format!("last {iter_secs:.0}s"));
+        step_pb.set_message("—");
+
         // ── Logging ───────────────────────────────────────────────────────────
         if iteration % config.log_interval == 0 {
-            eprintln!(
-                "[{iteration:>4}] steps={:>4}  policy={:.4}  value={:.4}  entropy={:.4}  kl={:.4}",
+            train_pb.println(format!(
+                "  [{iteration:>4}] steps={:>3}  policy={:+.4}  value={:.4}  entropy={:.4}",
                 combined.len(),
                 stats.policy_loss,
                 stats.value_loss,
                 stats.entropy,
-                stats.approx_kl,
-            );
+            ));
         }
 
         // ── Checkpoint ────────────────────────────────────────────────────────
@@ -166,6 +223,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
         }
     }
 
+    train_pb.finish_with_message("complete");
+    ep_pb.finish_and_clear();
+    step_pb.finish_and_clear();
     Ok(())
 }
 
@@ -183,12 +243,10 @@ fn sample_categorical(logits: &[f32], rng: &mut impl Rng) -> usize {
             return i;
         }
     }
-    logits.len() - 1 // fallback for floating-point edge cases
+    logits.len() - 1
 }
 
 /// Log-probability of `action` under the softmax distribution defined by `logits`.
-///
-/// Uses the log-sum-exp trick for numerical stability.
 fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let log_sum_exp = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;

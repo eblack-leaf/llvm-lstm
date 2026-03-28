@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use burn::config::Config;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 
 use crate::ir_features::IrFeatures;
@@ -115,6 +116,13 @@ impl LlvmEnv {
 
     /// Compute baselines for all functions. Call once before training.
     pub fn compute_baselines(&mut self) -> Result<()> {
+        let pb = ProgressBar::new(self.functions.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("  baselines  {bar:30.cyan}  {pos}/{len}  {elapsed}  {msg}")
+                .unwrap(),
+        );
+
         for func_path in &self.functions.clone() {
             let stem = func_path
                 .file_stem()
@@ -122,7 +130,7 @@ impl LlvmEnv {
                 .to_string_lossy()
                 .to_string();
 
-            eprintln!("Computing baselines for {stem}...");
+            pb.set_message(stem.clone());
 
             let o0 = self.pipeline.baseline(func_path, "-O0", 5)?;
             let o2 = self.pipeline.baseline(func_path, "-O2", 5)?;
@@ -136,7 +144,9 @@ impl LlvmEnv {
                     o3_ns: o3.median_ns,
                 },
             );
+            pb.inc(1);
         }
+        pb.finish_with_message("done");
         Ok(())
     }
 
