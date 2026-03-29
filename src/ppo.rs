@@ -28,9 +28,11 @@ pub struct PpoConfig {
     /// Discount factor.
     #[config(default = 0.99)]
     pub gamma: f32,
-    /// GAE lambda for advantage estimation. 0.95 = standard PPO balance between
-    /// bias (low lambda) and variance (high lambda).
-    #[config(default = 0.95)]
+    /// GAE lambda for advantage estimation.
+    /// Low lambda = TD-like (low variance, higher bias) — better when terminal
+    /// reward dominates and the value function has a long horizon to predict.
+    /// High lambda = MC-like (high variance, lower bias).
+    #[config(default = 0.8)]
     pub gae_lambda: f32,
     /// Number of PPO epochs per rollout batch.
     #[config(default = 3)]
