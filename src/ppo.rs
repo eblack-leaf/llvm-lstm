@@ -33,7 +33,7 @@ pub struct PpoConfig {
     #[config(default = 0.95)]
     pub gae_lambda: f32,
     /// Number of PPO epochs per rollout batch.
-    #[config(default = 8)]
+    #[config(default = 3)]
     pub num_epochs: usize,
     /// Stop updates when approx KL exceeds this threshold.
     #[config(default = 0.15)]
