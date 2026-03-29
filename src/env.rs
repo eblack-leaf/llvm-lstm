@@ -363,18 +363,11 @@ impl LlvmEnv {
             let vs_o2 = ((o2 - t) / o2) as f32;
             let vs_o3 = ((o3 - t) / o3) as f32;
 
-            // Continuous reward: fraction of the O0→O3 performance gap covered.
-            //   0.0 = matched O0 (no better than unoptimized)
-            //   1.0 = matched O3 (goal)
-            //  >1.0 = beating O3
-            // Linear and monotonic — every speed improvement produces the same
-            // reward gain regardless of where the agent currently sits, giving a
-            // consistent gradient signal with no dead zones between tiers.
-            let gap = (o0 - o3).max(1.0);
-            let total = ((o0 - t) / gap) as f32;
-
+            // Reward = (O3 - t) / O3: negative when slower than O3, positive when faster.
+            // Zero is the goal line. Removes local optima from the O0→O3 gap framing
+            // where the agent could settle at O2-quality (~0.5) and stop improving.
             let bd = RewardBreakdown { vs_o0, vs_o2, vs_o3 };
-            (total, Some(bd))
+            (vs_o3, Some(bd))
         } else {
             (0.0, None)
         }
