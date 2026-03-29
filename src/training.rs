@@ -200,27 +200,27 @@ pub fn train(config: TrainConfig) -> Result<()> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        // Snapshot EMA *before* updating it — this becomes the per-function baseline.
-        // Using the historical EMA rather than the current batch mean prevents the good
-        // episode's advantage from being cancelled out by the bad episodes in the same
-        // batch (batch-mean centering forces advantages to sum to zero per function,
-        // which zeros the net gradient when most episodes are below the batch mean).
-        let fn_ema_baseline = fn_ema.clone();
-
-        // Collect rollouts and update per-function EMA (sequential — no races).
+        // Collect rollouts (sequential — no races).
         let mut rollouts: Vec<Rollout> = Vec::with_capacity(total_episodes);
+        let mut episode_g0s: Vec<f32> = Vec::with_capacity(total_episodes);
+        let mut episode_v0s: Vec<f32> = Vec::with_capacity(total_episodes);
         let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
-        let mut episode_g0s: Vec<f32> = Vec::with_capacity(total_episodes); // per-episode total return
         // Per-function breakdown sums for this iteration's logging window.
         let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new(); // (vs_o0, vs_o2, vs_o3, count)
-        for (rollout, func_name, episode_reward, bd) in episode_results {
-            // G0: discounted return from t=0 — the signal we compare against the EMA baseline.
+        for (rollout, func_name, _episode_reward, bd) in episode_results {
             let g0: f32 = rollout.rewards.iter().enumerate()
                 .map(|(t, &r)| r * config.ppo.gamma.powi(t as i32))
                 .sum();
+            // V(s₀): critic's prediction at episode start — used as the per-episode
+            // baseline. Unlike EMA, V(s₀) doesn't converge toward the current policy's
+            // mean return (which would zero out all advantages). Instead it improves
+            // alongside value training, creating a self-improving signal loop.
+            let v0 = rollout.values.first().copied().unwrap_or(0.0);
             episode_g0s.push(g0);
-            let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
-            *ema = 0.9 * *ema + 0.1 * episode_reward;
+            episode_v0s.push(v0);
+            // EMA is kept for logging only — not used as a baseline.
+            let ema = fn_ema.entry(func_name.clone()).or_insert(g0);
+            *ema = 0.9 * *ema + 0.1 * g0;
             if let Some(b) = bd {
                 let e = fn_bd_sum.entry(func_name.clone()).or_insert((0.0, 0.0, 0.0, 0));
                 e.0 += b.vs_o0; e.1 += b.vs_o2; e.2 += b.vs_o3; e.3 += 1;
@@ -232,23 +232,15 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // ── Compute advantages ────────────────────────────────────────────────
         step_pb.set_message("computing advantages");
 
-        // Returns: pure MC (lambda=1.0) — unbiased targets for value training.
+        // Returns and advantages both broadcast the episode-level signal to every
+        // step, keeping value training and policy gradient on the same basis.
         let mut all_returns: Vec<f32> = Vec::new();
-        for rollout in &rollouts {
-            let (_, ret) = rollout.compute_advantages(config.ppo.gamma, 1.0, 0.0);
-            all_returns.extend(ret);
-        }
-
-        // Advantages: broadcast per-episode (G0 − EMA_baseline) to every step.
-        // The EMA baseline is from before this batch, so good episodes stay positive
-        // regardless of how many bad episodes share the batch for the same function.
-        // Fall back to the global batch mean G0 on the first iteration when EMA is empty.
-        let global_g0_mean = episode_g0s.iter().sum::<f32>() / episode_g0s.len().max(1) as f32;
         let mut all_advantages: Vec<f32> = Vec::new();
-        for ((rollout, func), &g0) in rollouts.iter().zip(rollout_funcs.iter()).zip(episode_g0s.iter()) {
-            let baseline = fn_ema_baseline.get(func).copied().unwrap_or(global_g0_mean);
-            let ep_adv = g0 - baseline;
-            all_advantages.extend(std::iter::repeat(ep_adv).take(rollout.len()));
+        for ((&g0, &v0), rollout) in episode_g0s.iter().zip(episode_v0s.iter()).zip(rollouts.iter()) {
+            let ep_adv = g0 - v0;
+            let steps = rollout.len();
+            all_returns.extend(std::iter::repeat(g0).take(steps));
+            all_advantages.extend(std::iter::repeat(ep_adv).take(steps));
         }
 
         let combined = Rollout::merge(&rollouts);
@@ -348,6 +340,46 @@ pub fn train(config: TrainConfig) -> Result<()> {
                               else if *v > -0.05 { format!("\x1b[33m{s}\x1b[0m") }
                               else               { format!("\x1b[31m{s}\x1b[0m") };
                 train_pb.println(colored);
+            }
+
+            // ── Diagnostic block ─────────────────────────────────────────────────
+            {
+                let fmts = |v: &[f32]| -> String {
+                    if v.is_empty() { return "  (empty)".to_string(); }
+                    let mean = v.iter().sum::<f32>() / v.len() as f32;
+                    let std  = (v.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / v.len() as f32).sqrt();
+                    let min  = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let max  = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    format!("mean={mean:+.3}  std={std:.3}  min={min:+.3}  max={max:+.3}")
+                };
+                let raw_advs: Vec<f32> = episode_g0s.iter().zip(episode_v0s.iter())
+                    .map(|(g, v)| g - v).collect();
+                train_pb.println(format!("          g0: {}", fmts(&episode_g0s)));
+                train_pb.println(format!("          v0: {}", fmts(&episode_v0s)));
+                train_pb.println(format!("    adv(g0-v0): {}", fmts(&raw_advs)));
+                train_pb.println(format!("        vloss: {:.4}  ploss: {:.4}",
+                    stats.value_loss, stats.policy_loss));
+
+                // Per-function G0 spread (shows if variance exists within each func's 8 episodes)
+                let mut fn_g0s: HashMap<&str, Vec<f32>> = HashMap::new();
+                for (func, &g0) in rollout_funcs.iter().zip(episode_g0s.iter()) {
+                    fn_g0s.entry(func.as_str()).or_default().push(g0);
+                }
+                let mut fn_g0_list: Vec<(&str, Vec<f32>)> = fn_g0s.into_iter().collect();
+                fn_g0_list.sort_by_key(|(k, _)| *k);
+                for (func, g0s) in &fn_g0_list {
+                    let mean = g0s.iter().sum::<f32>() / g0s.len() as f32;
+                    let min  = g0s.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let max  = g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let v0   = episode_v0s.iter().zip(rollout_funcs.iter())
+                        .filter(|(_, f)| f.as_str() == *func)
+                        .map(|(&v, _)| v)
+                        .next().unwrap_or(0.0);
+                    train_pb.println(format!(
+                        "    {func:>24}  g0 [{min:+.3} .. {max:+.3}] mean={mean:+.3}  v0={v0:+.3}  adv_spread={:.3}",
+                        max - min,
+                    ));
+                }
             }
 
             // Best checkpoint: checked every log interval, saved only when
