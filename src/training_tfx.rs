@@ -250,8 +250,17 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let combined = Rollout::merge(&rollouts);
 
         // ── PPO update ────────────────────────────────────────────────────────
+        // With episode-level REINFORCE advantages the value function is not used
+        // for bootstrapping, so its loss has no algorithmic purpose.  Keeping it
+        // in the total loss sends contradictory gradients through the shared
+        // transformer trunk (every step in an episode has the same return target
+        // g0 but different IR-feature states, so the value head can't converge).
+        // Zero the coefficient so only policy gradient + entropy drive training.
         step_pb.set_message("ppo update");
         let ev = explained_variance(&all_returns, &combined.values);
+
+        let mut ppo_cfg = config.ppo.clone();
+        ppo_cfg.value_loss_coef = 0.0;
 
         let stats;
         (model, stats) = ppo_update_tfx(
@@ -260,7 +269,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &combined,
             &all_advantages,
             &all_returns,
-            &config.ppo,
+            &ppo_cfg,
             &device,
         );
 
