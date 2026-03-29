@@ -4,7 +4,25 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use anyhow::Result;
-use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
+use burn::backend::Autodiff;
+
+// ── Backend selection ─────────────────────────────────────────────────────────
+// Default: NdArray (CPU).  GPU: add `wgpu` to burn features in Cargo.toml and
+// recompile.  No code changes needed — the type aliases below wire it through.
+#[cfg(not(feature = "wgpu"))]
+use burn::backend::{NdArray, ndarray::NdArrayDevice};
+#[cfg(feature = "wgpu")]
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
+
+#[cfg(not(feature = "wgpu"))]
+type Inner = NdArray;
+#[cfg(feature = "wgpu")]
+type Inner = Wgpu;
+
+#[cfg(not(feature = "wgpu"))]
+type Dev = NdArrayDevice;
+#[cfg(feature = "wgpu")]
+type Dev = WgpuDevice;
 use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
 use burn::optim::AdamConfig;
@@ -21,10 +39,10 @@ use crate::ppo::ppo_update_tfx;
 use crate::rollout::Rollout;
 use crate::training::TrainConfig;
 
-type B = Autodiff<NdArray>;
+type B = Autodiff<Inner>;
 
 pub fn train(config: TrainConfig) -> Result<()> {
-    let device = NdArrayDevice::default();
+    let device = Dev::default();
 
     let worker_functions_dir  = config.env.functions_dir.clone();
     let worker_work_dir       = config.env.work_dir.clone();
@@ -109,7 +127,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     let mut state      = worker_env.reset_to(func_index)?;
                     let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
 
-                    let device  = NdArrayDevice::default();
+                    let device  = Dev::default();
                     let mut rng = rand::thread_rng();
 
                     let mut rollout        = Rollout::new();
@@ -129,11 +147,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
                         act_history.push(prev_action);
                         let seq_len = act_history.len();
 
-                        let features_seq = Tensor::<NdArray, 3>::from_data(
+                        let features_seq = Tensor::<Inner, 3>::from_data(
                             TensorData::new(feat_history.clone(), [1, seq_len, feat_dim]),
                             &device,
                         );
-                        let actions_seq = Tensor::<NdArray, 2, Int>::from_data(
+                        let actions_seq = Tensor::<Inner, 2, Int>::from_data(
                             TensorData::new(act_history.clone(), [1, seq_len]),
                             &device,
                         );

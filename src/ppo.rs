@@ -3,6 +3,7 @@ use burn::config::Config;
 use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData, activation};
+use burn::tensor::backend::AutodiffBackend;
 
 use crate::actor_critic::ActorCritic;
 use crate::actor_critic_tfx::TransformerActorCritic;
@@ -16,7 +17,7 @@ pub struct PpoConfig {
     #[config(default = 0.2)]
     pub clip_epsilon: f32,
     /// Weight of the value function loss term.
-    #[config(default = 1.0)]
+    #[config(default = 0.5)]
     pub value_loss_coef: f32,
     /// Entropy bonus coefficient — encourages exploration.
     #[config(default = 0.03)]
@@ -35,7 +36,7 @@ pub struct PpoConfig {
     #[config(default = 8)]
     pub num_epochs: usize,
     /// Stop updates when approx KL exceeds this threshold.
-    #[config(default = 0.1)]
+    #[config(default = 0.15)]
     pub target_kl: f32,
 }
 
@@ -209,18 +210,20 @@ where
 }
 
 /// PPO update for the Transformer actor-critic — identical algorithm, typed for
-/// `TransformerActorCritic`. See `ppo_update` for full documentation.
-pub fn ppo_update_tfx<O>(
-    mut model: TransformerActorCritic<B>,
+/// `TransformerActorCritic`. Generic over the backend so it works with both the
+/// NdArray CPU backend and the Wgpu GPU backend.
+pub fn ppo_update_tfx<Bx, O>(
+    mut model: TransformerActorCritic<Bx>,
     optim: &mut O,
     rollout: &Rollout,
     advantages: &[f32],
     returns: &[f32],
     config: &PpoConfig,
-    device: &NdArrayDevice,
-) -> (TransformerActorCritic<B>, PpoStats)
+    device: &Bx::Device,
+) -> (TransformerActorCritic<Bx>, PpoStats)
 where
-    O: Optimizer<TransformerActorCritic<B>, B>,
+    Bx: AutodiffBackend,
+    O: Optimizer<TransformerActorCritic<Bx>, Bx>,
 {
     let n = rollout.len();
     let feat_dim = rollout.states[0].len();
@@ -248,11 +251,11 @@ where
             }
         }
 
-        let features_pad = Tensor::<B, 3>::from_data(
+        let features_pad = Tensor::<Bx, 3>::from_data(
             TensorData::new(feat_buf, [n_ep, max_t, feat_dim]),
             device,
         );
-        let prev_pad = Tensor::<B, 2, Int>::from_data(
+        let prev_pad = Tensor::<Bx, 2, Int>::from_data(
             TensorData::new(prev_buf, [n_ep, max_t]),
             device,
         );
@@ -263,7 +266,7 @@ where
         let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);
         let values_flat = values_3d.reshape([n_ep * max_t, 1]);
 
-        let idx = Tensor::<B, 1, Int>::from_data(TensorData::new(real_idx, [n]), device);
+        let idx = Tensor::<Bx, 1, Int>::from_data(TensorData::new(real_idx, [n]), device);
         let logits = logits_flat.gather(0, idx.clone().unsqueeze_dim::<2>(1).expand([n, n_act]));
         let values = values_flat
             .gather(0, idx.unsqueeze_dim::<2>(1).expand([n, 1]))
@@ -272,7 +275,7 @@ where
         let log_probs_all = activation::log_softmax(logits.clone(), 1);
         let probs_all     = activation::softmax(logits, 1);
 
-        let action_idx = Tensor::<B, 2, Int>::from_data(
+        let action_idx = Tensor::<Bx, 2, Int>::from_data(
             TensorData::new(
                 rollout.actions.iter().map(|&a| a as i64).collect::<Vec<_>>(),
                 [n, 1],
@@ -283,12 +286,12 @@ where
 
         let entropy = -(probs_all * log_probs_all).sum_dim(1).reshape([n]).mean();
 
-        let log_probs_old = Tensor::<B, 1>::from_data(
+        let log_probs_old = Tensor::<Bx, 1>::from_data(
             TensorData::new(rollout.log_probs.clone(), [n]),
             device,
         );
 
-        let adv = Tensor::<B, 1>::from_data(
+        let adv = Tensor::<Bx, 1>::from_data(
             TensorData::new(advantages.to_vec(), [n]),
             device,
         );
@@ -313,7 +316,7 @@ where
         let policy_loss =
             -((obj1.clone() + obj2.clone() - (obj1 - obj2).abs()) / 2.0).mean();
 
-        let ret = Tensor::<B, 1>::from_data(
+        let ret = Tensor::<Bx, 1>::from_data(
             TensorData::new(returns.to_vec(), [n]),
             device,
         );

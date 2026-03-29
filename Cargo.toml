@@ -10,9 +10,13 @@ edition = "2024"
 # coroutine, module-level, and niche function passes + new Stop = 86 actions.
 # Enable when the primary set converges but still leaves room to improve.
 secondary_passes = []
+# Switch transformer training to the Wgpu GPU backend (Vulkan/Metal/DX12).
+# GRU training remains on CPU NdArray regardless.
+# Usage: cargo build --release --features wgpu
+wgpu = []
 
 [dependencies]
-burn = { version = "0.20.1", features = ["ndarray", "autodiff"] }
+burn = { version = "0.20.1", features = ["ndarray", "autodiff", "wgpu"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
