@@ -200,12 +200,25 @@ pub fn train(config: TrainConfig) -> Result<()> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
+        // Snapshot EMA *before* updating it — this becomes the per-function baseline.
+        // Using the historical EMA rather than the current batch mean prevents the good
+        // episode's advantage from being cancelled out by the bad episodes in the same
+        // batch (batch-mean centering forces advantages to sum to zero per function,
+        // which zeros the net gradient when most episodes are below the batch mean).
+        let fn_ema_baseline = fn_ema.clone();
+
         // Collect rollouts and update per-function EMA (sequential — no races).
         let mut rollouts: Vec<Rollout> = Vec::with_capacity(total_episodes);
         let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
+        let mut episode_g0s: Vec<f32> = Vec::with_capacity(total_episodes); // per-episode total return
         // Per-function breakdown sums for this iteration's logging window.
         let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new(); // (vs_o0, vs_o2, vs_o3, count)
         for (rollout, func_name, episode_reward, bd) in episode_results {
+            // G0: discounted return from t=0 — the signal we compare against the EMA baseline.
+            let g0: f32 = rollout.rewards.iter().enumerate()
+                .map(|(t, &r)| r * config.ppo.gamma.powi(t as i32))
+                .sum();
+            episode_g0s.push(g0);
             let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
             *ema = 0.9 * *ema + 0.1 * episode_reward;
             if let Some(b) = bd {
@@ -218,29 +231,24 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // ── Compute advantages ────────────────────────────────────────────────
         step_pb.set_message("computing advantages");
-        let mut raw_advantages: Vec<Vec<f32>> = Vec::new();
+
+        // Returns: pure MC (lambda=1.0) — unbiased targets for value training.
         let mut all_returns: Vec<f32> = Vec::new();
         for rollout in &rollouts {
-            let (adv, ret) =
-                rollout.compute_advantages(config.ppo.gamma, config.ppo.gae_lambda, 0.0);
-            raw_advantages.push(adv);
+            let (_, ret) = rollout.compute_advantages(config.ppo.gamma, 1.0, 0.0);
             all_returns.extend(ret);
         }
 
-        // Per-step GAE with per-function batch-mean centering.
-        // EV is now 0.3-0.4, so the value function provides useful per-step baselines.
-        // GAE produces lower-variance advantages than episode-level REINFORCE, giving
-        // more stable policy updates rather than oscillating with each noisy batch.
-        let mut fn_adv_sum: HashMap<String, f32> = HashMap::new();
-        let mut fn_adv_cnt: HashMap<String, usize> = HashMap::new();
-        for (adv, func) in raw_advantages.iter().zip(rollout_funcs.iter()) {
-            *fn_adv_sum.entry(func.clone()).or_insert(0.0) += adv.iter().sum::<f32>();
-            *fn_adv_cnt.entry(func.clone()).or_insert(0)   += adv.len();
-        }
+        // Advantages: broadcast per-episode (G0 − EMA_baseline) to every step.
+        // The EMA baseline is from before this batch, so good episodes stay positive
+        // regardless of how many bad episodes share the batch for the same function.
+        // Fall back to the global batch mean G0 on the first iteration when EMA is empty.
+        let global_g0_mean = episode_g0s.iter().sum::<f32>() / episode_g0s.len().max(1) as f32;
         let mut all_advantages: Vec<f32> = Vec::new();
-        for (adv, func) in raw_advantages.iter().zip(rollout_funcs.iter()) {
-            let mean = fn_adv_sum[func] / fn_adv_cnt[func] as f32;
-            all_advantages.extend(adv.iter().map(|&a| a - mean));
+        for ((rollout, func), &g0) in rollouts.iter().zip(rollout_funcs.iter()).zip(episode_g0s.iter()) {
+            let baseline = fn_ema_baseline.get(func).copied().unwrap_or(global_g0_mean);
+            let ep_adv = g0 - baseline;
+            all_advantages.extend(std::iter::repeat(ep_adv).take(rollout.len()));
         }
 
         let combined = Rollout::merge(&rollouts);
@@ -408,7 +416,7 @@ fn explained_variance(returns: &[f32], values: &[f32]) -> f32 {
     let n = returns.len() as f32;
     let ret_mean = returns.iter().sum::<f32>() / n;
     let ret_var  = returns.iter().map(|r| (r - ret_mean).powi(2)).sum::<f32>() / n;
-    if ret_var < 1e-8 {
+    if ret_var < 0.01 {
         return 0.0;
     }
     let residuals: Vec<f32> = returns.iter().zip(values.iter()).map(|(r, v)| r - v).collect();

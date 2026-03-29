@@ -140,8 +140,8 @@ where
             device,
         );
 
-        // Scale advantages — per-function mean centering already done in training.rs,
-        // so only divide by global std here to standardize the scale.
+        // Scale advantages — broadcast per-episode (G0 − EMA) values from training.rs.
+        // Divide by RMS to standardize gradient scale across batches.
         let adv = Tensor::<B, 1>::from_data(
             TensorData::new(advantages.to_vec(), [n]),
             device,
