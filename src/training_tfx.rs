@@ -298,6 +298,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 (all_advantages.iter().map(|x| (x - m).powi(2)).sum::<f32>() / n).sqrt()
             };
 
+            let g0_min = episode_g0s.iter().cloned().fold(f32::INFINITY, f32::min);
+            let g0_max = episode_g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let g0_spread = g0_max - g0_min;
+
             // Update rolling histories
             fn push(h: &mut Vec<f32>, v: f32, cap: usize) {
                 h.push(v);
@@ -310,100 +314,107 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 push(fn_ema_hist.entry(k.clone()).or_default(), v, HIST);
             }
 
-            // EMA trend delta: current vs oldest in history
+            // ── Pre-diagnosed status words ────────────────────────────────
+
+            // Policy trend: compare current ema vs oldest in history
             let ema_delta = mean_ema - ema_mean_hist[0];
-            let ema_delta_s = if ema_delta > 0.005 {
-                format!("  \x1b[32m▲{:+.3}/{}\x1b[0m", ema_delta, ema_mean_hist.len())
-            } else if ema_delta < -0.005 {
-                format!("  \x1b[31m▼{:+.3}/{}\x1b[0m", ema_delta, ema_mean_hist.len())
+            let enough_hist = ema_mean_hist.len() >= 5;
+            let (trend_label, trend_c) = if !enough_hist {
+                ("WARMUP  ", "\x1b[2m")
+            } else if ema_delta > 0.01 {
+                ("IMPROVING", "\x1b[32m")
+            } else if ema_delta < -0.01 {
+                ("DECLINING", "\x1b[31m")
             } else {
-                format!("  \x1b[2m━{:+.3}/{}\x1b[0m", ema_delta, ema_mean_hist.len())
+                ("FLAT     ", "\x1b[33m")
             };
 
-            // Rolling ploss average (positive consistently = bad baseline or policy collapse)
+            // Signal: how much variance between episodes (can the policy learn anything?)
+            let (sig_label, sig_c) = if adv_std > 0.05 {
+                ("STRONG", "\x1b[32m")
+            } else if adv_std > 0.015 {
+                ("OK    ", "\x1b[33m")
+            } else if adv_std > 0.003 {
+                ("WEAK  ", "\x1b[31m")
+            } else {
+                ("DEAD  ", "\x1b[1;31m")
+            };
+
+            // Exploration: entropy as fraction of maximum
+            let (exp_label, exp_c) = if ent_frac > 0.75 {
+                ("HIGH     ", "\x1b[33m")  // too random
+            } else if ent_frac > 0.35 {
+                ("OK       ", "\x1b[32m")
+            } else if ent_frac > 0.15 {
+                ("LOW      ", "\x1b[33m")
+            } else {
+                ("COLLAPSED", "\x1b[1;31m")
+            };
+
+            // Update health: skipped by KL > stale positive ploss > saturated > healthy
             let ploss_avg = ploss_hist.iter().sum::<f32>() / ploss_hist.len() as f32;
-            let ploss_avg_s = if ploss_avg.abs() < 0.05 {
-                format!("\x1b[32m{ploss_avg:+.3}\x1b[0m")
-            } else if ploss_avg < 0.15 {
-                format!("\x1b[33m{ploss_avg:+.3}\x1b[0m")
+            let (upd_label, upd_c, upd_detail) = if kl > config.ppo.target_kl {
+                ("SKIPPED ", "\x1b[31m", format!("kl {kl:.3}"))
+            } else if ploss_avg > 0.10 {
+                ("STALE   ", "\x1b[31m", format!("ploss-avg {ploss_avg:+.3}"))
+            } else if clip > 0.4 {
+                ("SATURATED", "\x1b[33m", format!("clip {:.0}%", clip * 100.0))
             } else {
-                format!("\x1b[31m{ploss_avg:+.3}\x1b[0m")
+                ("HEALTHY ", "\x1b[32m", format!("ploss {ploss:+.3}"))
             };
 
-            let c = |v: f32, lo: f32, hi: f32| -> &'static str {
-                if v >= hi { "\x1b[32m" } else if v >= lo { "\x1b[33m" } else { "\x1b[31m" }
-            };
-            let cr = |v: f32, lo: f32, hi: f32| -> &'static str {  // reversed: low = good
-                if v <= lo { "\x1b[32m" } else if v <= hi { "\x1b[33m" } else { "\x1b[31m" }
-            };
+            let ema_c = if mean_ema > 0.05 { "\x1b[1;36m" }
+                        else if mean_ema > 0.0 { "\x1b[36m" }
+                        else if mean_ema > -0.05 { "\x1b[33m" }
+                        else { "\x1b[31m" };
 
-            let ema_c   = if mean_ema > 0.05 { "\x1b[1;36m" } else if mean_ema > 0.0 { "\x1b[36m" }
-                          else if mean_ema > -0.05 { "\x1b[33m" } else { "\x1b[31m" };
-            let ploss_c = if ploss.abs() < 0.05 { "\x1b[32m" } else if ploss.abs() < 0.2 { "\x1b[33m" } else { "\x1b[31m" };
-
-            // ── Line 1: header + EMA trend ────────────────────────────────
+            // ── Line 1: overall status ────────────────────────────────────
             train_pb.println(format!(
-                "  \x1b[2m[{iteration:>4}]\x1b[0m  ema {ema_c}{mean_ema:+.4}\x1b[0m {}{}   ploss-avg {}",
-                sparkline(&ema_mean_hist), ema_delta_s, ploss_avg_s,
-            ));
-
-            // ── Line 2: update health ─────────────────────────────────────
-            // ploss≈0 = balanced signal. kl<0.15 = updates not skipped.
-            // clip 10-30% = healthy. ent>50% = exploring.
-            train_pb.println(format!(
-                "  update  ploss {ploss_c}{ploss:+.3}\x1b[0m  kl {}{kl:.3}\x1b[0m  clip {}{:.0}%\x1b[0m  ent {}{:.0}%\x1b[0m {}",
-                cr(kl,  0.05, 0.15),
-                cr(clip, 0.3,  0.5),
-                clip * 100.0,
-                c(ent_frac, 0.3, 0.5),
+                "  \x1b[2m[{iteration:>4}]\x1b[0m  \
+                 {trend_c}{trend_label}\x1b[0m ema {ema_c}{mean_ema:+.3}\x1b[0m  \
+                 signal {sig_c}{sig_label}\x1b[0m  \
+                 explore {exp_c}{exp_label}\x1b[0m {:.0}%  \
+                 update {upd_c}{upd_label}\x1b[0m {upd_detail}  \
+                 \x1b[2m{iter_secs:.0}s\x1b[0m",
                 ent_frac * 100.0,
-                sparkline(&ent_frac_hist),
             ));
 
-            // ── Line 3: signal health ─────────────────────────────────────
-            // adv_std>0.05 = real variance between episodes.
-            // g0 spread = range within this batch (wider = clearer signal).
-            let g0_min = episode_g0s.iter().cloned().fold(f32::INFINITY, f32::min);
-            let g0_max = episode_g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let g0_spread = g0_max - g0_min;
-            train_pb.println(format!(
-                "  signal  adv± {}{adv_std:.3}\x1b[0m  g0 [{g0_min:+.3}..{g0_max:+.3}]  spread {}{g0_spread:.3}\x1b[0m  n={}  {iter_secs:.0}s",
-                c(adv_std,  0.01, 0.05),
-                c(g0_spread, 0.05, 0.12),
-                combined.len(),
-            ));
-
-            // ── Per-function lines ────────────────────────────────────────
-            // ema sparkline shows trend. spread = how much g0 varied this
-            // batch (0 = all episodes identical = no useful signal).
+            // ── Line 2: per-function — name + trend arrow + ema + O3 ──────
+            // Trend arrow from per-function ema history (old half vs new half mean).
             let mut fn_list: Vec<&str> = fn_ema.keys().map(|s| s.as_str()).collect();
             fn_list.sort();
+            let mut fn_parts: Vec<String> = Vec::new();
             for func in fn_list {
                 let ema_val = fn_ema[func];
                 let hist    = fn_ema_hist.get(func).map(|v| v.as_slice()).unwrap_or(&[]);
+                let arrow = if hist.len() >= 4 {
+                    let mid = hist.len() / 2;
+                    let old_mean = hist[..mid].iter().sum::<f32>() / mid as f32;
+                    let new_mean = hist[mid..].iter().sum::<f32>() / (hist.len() - mid) as f32;
+                    let d = new_mean - old_mean;
+                    if d > 0.008 { "↑" } else if d < -0.008 { "↓" } else { "→" }
+                } else { "·" };
 
-                let g0s: Vec<f32> = rollout_funcs.iter().zip(episode_g0s.iter())
-                    .filter(|(f, _)| f.as_str() == func)
-                    .map(|(_, &g)| g)
-                    .collect();
-                let g0_mean = g0s.iter().sum::<f32>() / g0s.len().max(1) as f32;
-                let fn_spread = if g0s.len() > 1 {
-                    g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
-                    - g0s.iter().cloned().fold(f32::INFINITY, f32::min)
-                } else { 0.0 };
-
-                let bd_str = if let Some(&(s0, s2, s3, n)) = fn_bd_sum.get(func) {
-                    let n = n.max(1) as f32;
-                    format!("  O0{:+.0}%  O2{:+.0}%  O3{:+.0}%",
-                        s0 / n * 100.0, s2 / n * 100.0, s3 / n * 100.0)
+                let o3_str = if let Some(&(_, _, s3, n)) = fn_bd_sum.get(func) {
+                    let pct = s3 / n.max(1) as f32 * 100.0;
+                    let (pc, sign) = if pct >= 1.0 { ("\x1b[32m", "+") }
+                                     else if pct > -1.0 { ("\x1b[2m", "+") }
+                                     else { ("\x1b[31m", "") };
+                    format!(" O3 {pc}{sign}{pct:.0}%\x1b[0m")
                 } else { String::new() };
 
-                let ec = if ema_val > 0.05 { "\x1b[36m" }
+                let fc = if ema_val > 0.05 { "\x1b[36m" }
                          else if ema_val > -0.05 { "\x1b[33m" } else { "\x1b[31m" };
-                let sc = c(fn_spread, 0.03, 0.08);
+                fn_parts.push(format!("{func} {fc}{ema_val:+.3}\x1b[0m{arrow}{o3_str}"));
+            }
+            if !fn_parts.is_empty() {
+                train_pb.println(format!("         {}", fn_parts.join("   ")));
+            }
+
+            // ── Signal detail (only printed when signal is not OK/STRONG) ─
+            if adv_std <= 0.05 {
                 train_pb.println(format!(
-                    "  {func:>22}  ema {ec}{ema_val:+.3}\x1b[0m {}  g0 {g0_mean:+.3} spread {sc}{fn_spread:.3}\x1b[0m{bd_str}",
-                    sparkline(hist),
+                    "         \x1b[2msignal detail: adv_std {adv_std:.4}  g0 spread {g0_spread:.3}  [{g0_min:+.3}..{g0_max:+.3}]\x1b[0m"
                 ));
             }
 
@@ -454,19 +465,6 @@ fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let log_sum_exp = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;
     logits[action] - log_sum_exp
-}
-
-fn sparkline(vals: &[f32]) -> String {
-    const BLOCKS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    if vals.is_empty() { return String::new(); }
-    if vals.len() == 1 { return "·".to_string(); }
-    let min = vals.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max = vals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let range = (max - min).max(1e-6);
-    vals.iter().map(|&v| {
-        let idx = ((v - min) / range * 7.0).round() as usize;
-        BLOCKS[idx.min(7)]
-    }).collect()
 }
 
 fn explained_variance(returns: &[f32], values: &[f32]) -> f32 {
