@@ -197,6 +197,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
         let mut episode_g0s: Vec<f32> = Vec::with_capacity(total_episodes);
         let mut episode_v0s: Vec<f32> = Vec::with_capacity(total_episodes);
+        // Per-episode baseline = fn_ema value BEFORE this iteration's episodes
+        // are incorporated — avoids using the current episode in its own baseline.
+        let mut episode_baselines: Vec<f32> = Vec::with_capacity(total_episodes);
         let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new();
 
         for (rollout, func_name, _episode_reward, bd) in episode_results {
@@ -206,6 +209,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let v0 = rollout.values.first().copied().unwrap_or(0.0);
             episode_g0s.push(g0);
             episode_v0s.push(v0);
+            // Snapshot baseline before updating EMA so each episode is compared
+            // against the function's historical average, not the current batch.
+            let baseline = fn_ema.get(&func_name).copied().unwrap_or(g0);
+            episode_baselines.push(baseline);
             let ema = fn_ema.entry(func_name.clone()).or_insert(g0);
             *ema = 0.9 * *ema + 0.1 * g0;
             if let Some(b) = bd {
@@ -216,14 +223,28 @@ pub fn train(config: TrainConfig) -> Result<()> {
             rollouts.push(rollout);
         }
 
-        // ── Compute advantages (GAE) ──────────────────────────────────────────
+        // ── Compute advantages (episode-level REINFORCE with baseline) ────────
+        // Every step in an episode receives the same advantage: g0 - baseline.
+        // We don't try to decompose credit to individual steps — the speedup
+        // comes from the combination of passes, not any single one.  The
+        // transformer's self-attention over the full sequence history is what
+        // learns which combinations are good; the policy gradient here just
+        // says "sequences above baseline = reinforce, below = suppress".
+        // The value function target is g0 broadcast to all steps so it learns
+        // to predict episode-level quality from each intermediate state.
         step_pb.set_message("computing advantages");
         let mut all_returns: Vec<f32> = Vec::new();
         let mut all_advantages: Vec<f32> = Vec::new();
-        for rollout in &rollouts {
-            let (advs, rets) = rollout.compute_advantages(config.ppo.gamma, config.ppo.gae_lambda, 0.0);
-            all_advantages.extend(advs);
-            all_returns.extend(rets);
+        for ((rollout, &g0), &baseline) in rollouts.iter()
+            .zip(episode_g0s.iter())
+            .zip(episode_baselines.iter())
+        {
+            let advantage = g0 - baseline;
+            let n = rollout.len();
+            for _ in 0..n {
+                all_advantages.push(advantage);
+                all_returns.push(g0);
+            }
         }
 
         let combined = Rollout::merge(&rollouts);

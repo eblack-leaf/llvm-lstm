@@ -29,10 +29,10 @@ pub struct PpoConfig {
     #[config(default = 0.99)]
     pub gamma: f32,
     /// GAE lambda for advantage estimation.
-    /// Low lambda = TD-like (low variance, higher bias) — better when terminal
-    /// reward dominates and the value function has a long horizon to predict.
-    /// High lambda = MC-like (high variance, lower bias).
-    #[config(default = 0.8)]
+    /// Must stay high (≥0.95) when the terminal benchmark reward dominates g0:
+    /// with T=40 steps the terminal reward weight at step 0 is (γλ)^39, so
+    /// lambda=0.8 → 0.06% weight (signal gone), lambda=0.97 → 21% weight.
+    #[config(default = 0.97)]
     pub gae_lambda: f32,
     /// Number of PPO epochs per rollout batch.
     #[config(default = 3)]
