@@ -17,7 +17,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 
 use crate::actor_critic::{ActorCritic, ActorCriticConfig};
-use crate::env::{EnvConfig, LlvmEnv};
+use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::ppo::{PpoConfig, ppo_update};
 use crate::rollout::Rollout;
 
@@ -44,7 +44,7 @@ pub struct TrainConfig {
     /// Directory to write model checkpoints.
     pub checkpoint_dir: String,
     /// Print training stats every N iterations.
-    #[config(default = 10)]
+    #[config(default = 5)]
     pub log_interval: usize,
 }
 
@@ -120,24 +120,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // simultaneous compilations of the same function don't clobber each other.
         let model_inf = model.valid();
         let base_work_dir  = &worker_work_dir;
-        // Clear the IR cache each iteration — stochastic exploration means cross-
-        // iteration cache hits are near-zero after the first few steps, and the
-        // cache grows unboundedly otherwise.  Within-iteration parallel workers
-        // still benefit from sharing early-step IR.
-        let ir_cache_dir = worker_work_dir.join("ir_cache");
-        if ir_cache_dir.exists() {
-            std::fs::remove_dir_all(&ir_cache_dir).ok();
-        }
-        std::fs::create_dir_all(&ir_cache_dir).ok();
-
         // Actor<NdArray> contains OnceCell which is !Sync, so par_iter().map() won't
         // compile (closure needs Sync). map_with() side-steps this: the models live
         // in per-thread state (T: Send+Clone only, not Sync).
-        let episode_results: Vec<(Rollout, String, f32)> = (0..total_episodes)
+        let episode_results: Vec<(Rollout, String, f32, Option<RewardBreakdown>)> = (0..total_episodes)
             .into_par_iter()
             .map_with(
                 model_inf,
-                |model_s, ep| -> anyhow::Result<(Rollout, String, f32)> {
+                |model_s, ep| -> anyhow::Result<(Rollout, String, f32, Option<RewardBreakdown>)> {
                 // Round-robin: all functions covered before any gets a second episode.
                 let func_index = ep % n_funcs;
 
@@ -151,20 +141,19 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 .with_max_seq_length(worker_max_seq_length)
                 .with_benchmark_runs(worker_benchmark_runs);
 
-                let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?
-                    .with_ir_cache(ir_cache_dir.clone());
+                let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
                 let mut state      = worker_env.reset_to(func_index)?;
                 let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
 
                 let device  = NdArrayDevice::default();
                 let mut rng = rand::thread_rng();
 
-                let mut rollout     = Rollout::new();
+                let mut rollout        = Rollout::new();
                 let mut hidden: Option<Tensor<NdArray, 2>> = None;
                 let mut prev_action: i64 = 0;
                 let mut episode_reward   = 0.0f32;
 
-                loop {
+                let terminal_breakdown = loop {
                     let features = Tensor::<NdArray, 2>::from_data(
                         TensorData::new(state.features.clone(), [1, state.features.len()]),
                         &device,
@@ -199,24 +188,30 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
                     if step.done {
                         ep_pb.inc(1);
-                        break;
+                        break step.breakdown;
                     }
 
                     hidden      = Some(new_hidden);
                     prev_action = action as i64;
                     state       = step.state;
-                }
+                };
 
-                Ok((rollout, func_name, episode_reward))
+                Ok((rollout, func_name, episode_reward, terminal_breakdown))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
         // Collect rollouts and update per-function EMA (sequential — no races).
         let mut rollouts: Vec<Rollout> = Vec::with_capacity(total_episodes);
         let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
-        for (rollout, func_name, episode_reward) in episode_results {
+        // Per-function breakdown sums for this iteration's logging window.
+        let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new(); // (vs_o0, vs_o2, vs_o3, count)
+        for (rollout, func_name, episode_reward, bd) in episode_results {
             let ema = fn_ema.entry(func_name.clone()).or_insert(episode_reward);
             *ema = 0.9 * *ema + 0.1 * episode_reward;
+            if let Some(b) = bd {
+                let e = fn_bd_sum.entry(func_name.clone()).or_insert((0.0, 0.0, 0.0, 0));
+                e.0 += b.vs_o0; e.1 += b.vs_o2; e.2 += b.vs_o3; e.3 += 1;
+            }
             rollout_funcs.push(func_name);
             rollouts.push(rollout);
         }
@@ -331,7 +326,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 combined.len(),
             ));
             for (k, v) in &fn_summary {
-                let s = format!("         {k:>24} = {v:+.3}");
+                let bd_str = if let Some(&(s0, s2, s3, n)) = fn_bd_sum.get(*k) {
+                    let n = n.max(1) as f32;
+                    format!("  O0:{:+.0}%  O2:{:+.0}%  O3:{:+.0}%",
+                        s0 / n * 100.0, s2 / n * 100.0, s3 / n * 100.0)
+                } else {
+                    String::new()
+                };
+                let s = format!("         {k:>24} = {v:+.3}{bd_str}");
                 let colored = if *v > 0.05       { format!("\x1b[36m{s}\x1b[0m") }
                               else if *v > -0.05 { format!("\x1b[33m{s}\x1b[0m") }
                               else               { format!("\x1b[31m{s}\x1b[0m") };

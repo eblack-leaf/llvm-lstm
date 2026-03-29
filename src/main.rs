@@ -121,6 +121,9 @@ enum Commands {
         /// Max pass sequence length per episode
         #[arg(long, default_value = "40")]
         max_seq_length: usize,
+        /// Reward mode: sparse | per-step | instruction-proxy
+        #[arg(long, default_value = "instruction-proxy")]
+        reward_mode: String,
     },
 
     /// Evaluate agent against baselines
@@ -162,16 +165,6 @@ enum Commands {
         /// Source file (.c or .ll)
         #[arg(long)]
         file: PathBuf,
-    },
-
-    /// Extract IR features for all functions in a directory and generate heatmap PNG
-    PlotFeatures {
-        /// Directory containing benchmark .c files
-        #[arg(long, default_value = "benchmarks")]
-        functions: PathBuf,
-        /// Output directory for ir_features.json and PNG
-        #[arg(long, default_value = "eda_output")]
-        output: PathBuf,
     },
 
 }
@@ -228,13 +221,19 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::{TrainConfig, train};
 
+            let mode = match reward_mode.as_str() {
+                "per-step"           => RewardMode::PerStep,
+                "instruction-proxy"  => RewardMode::InstructionProxy,
+                _                    => RewardMode::Sparse,
+            };
+
             let config = TrainConfig::new(
-                EnvConfig::new(functions, work_dir, RewardMode::Sparse)
+                EnvConfig::new(functions, work_dir, mode)
                     .with_benchmark_runs(benchmark_runs)
                     .with_bench_iters(bench_iters)
                     .with_max_seq_length(max_seq_length),
@@ -391,51 +390,6 @@ fn main() -> Result<()> {
             eprintln!("  Binary size: {} bytes", result.binary_size_bytes);
         }
 
-
-        Commands::PlotFeatures { functions, output } => {
-            use serde_json::{json, Value};
-
-            std::fs::create_dir_all(&output)?;
-            let work_dir = output.join("_work");
-            let pipe = pipeline::CompilationPipeline::new(work_dir);
-
-            let mut paths: Vec<_> = std::fs::read_dir(&functions)?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "c"))
-                .collect();
-            paths.sort();
-
-            let mut entries: Vec<Value> = Vec::new();
-            for path in &paths {
-                let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                eprint!("  {stem}...");
-                let ir = pipe.emit_ir(path)?;
-                let feats = ir_features::IrFeatures::from_ll_file(&ir)?;
-                let mut v = serde_json::to_value(&feats)?;
-                v["function"]      = json!(stem);
-                v["difficulty"]    = json!("unknown");
-                v["gap_vs_o3_pct"] = json!(0.0f64);
-                entries.push(v);
-                eprintln!(" ok");
-            }
-
-            let json_path = output.join("ir_features.json");
-            let file = std::fs::File::create(&json_path)?;
-            serde_json::to_writer_pretty(file, &entries)?;
-            eprintln!("Wrote {}", json_path.display());
-
-            // Call the existing plot script
-            let status = std::process::Command::new("python3")
-                .arg("scripts/plot_eda.py")
-                .arg(&output)
-                .status();
-            match status {
-                Ok(s) if s.success() => eprintln!("PNG written to {}/ir_features_heatmap.png", output.display()),
-                Ok(s) => eprintln!("plot script exited {s} — run manually: python3 scripts/plot_eda.py {}", output.display()),
-                Err(e) => eprintln!("could not run plot script ({e}) — run manually: python3 scripts/plot_eda.py {}", output.display()),
-            }
-        }
 
         Commands::Features { file } => {
             let features = if file.extension().is_some_and(|e| e == "ll") {

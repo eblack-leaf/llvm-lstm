@@ -34,6 +34,15 @@ pub struct IrFeatures {
     pub mem_ratio: f32,         // (load+store) / total_inst (memory pressure)
     pub call_ratio: f32,        // call / total_inst (inlining opportunity signal)
     pub avg_bb_size: f32,       // total_inst / bb_count (block granularity)
+    // Pass-opportunity indicators — metadata and structural signals
+    pub unreachable_count: u32,    // dead terminators → ADCE / simplifycfg
+    pub invoke_count: u32,         // exception-handling calls → inlining cost signal
+    pub switch_count: u32,         // switch stmts → jump-threading / lowering
+    pub intrinsic_count: u32,      // llvm.* calls (memcpy/memset/…) → loop-idiom / memcpyopt
+    pub tbaa_count: u32,           // !tbaa refs → alias-analysis richness (LICM/DSE quality)
+    pub loop_metadata_count: u32,  // llvm.loop refs → loop hints present (vectorise/unroll)
+    pub noalias_count: u32,        // noalias attrs → pointer-aliasing provable (LICM/DSE)
+    pub phi_ratio: f32,            // phi / bb → SSA density (GVN/instcombine readiness)
 }
 
 impl IrFeatures {
@@ -50,6 +59,14 @@ impl IrFeatures {
         let mut _current_label: Option<String> = None;
         let mut label_order: Vec<String> = Vec::new();
         let mut in_function = false;
+
+        // Whole-file metadata counts — scan before the per-line loop.
+        for line in content.lines() {
+            let t = line.trim();
+            if t.contains("!tbaa")       { f.tbaa_count          += 1; }
+            if t.contains("llvm.loop")   { f.loop_metadata_count += 1; }
+            if t.contains("noalias")     { f.noalias_count        += 1; }
+        }
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -118,12 +135,21 @@ impl IrFeatures {
                     "store" => f.store_count += 1,
                     "br" | "switch" | "indirectbr" => {
                         f.br_count += 1;
-                        // Detect back-edges for loop approximation
                         if op == "br" {
                             detect_back_edge(trimmed, &label_order, &mut f.loop_depth_approx);
                         }
+                        if op == "switch" { f.switch_count += 1; }
                     }
-                    "call" | "invoke" => f.call_count += 1,
+                    "unreachable" => {
+                        f.total_instruction_count += 1;
+                        f.unreachable_count += 1;
+                    }
+                    "call" | "invoke" => {
+                        f.call_count += 1;
+                        if op == "invoke" { f.invoke_count += 1; }
+                        // Intrinsics: call target begins with @llvm.
+                        if trimmed.contains("@llvm.") { f.intrinsic_count += 1; }
+                    }
                     "phi" => f.phi_count += 1,
                     "alloca" => f.alloca_count += 1,
                     "getelementptr" => f.gep_count += 1,
@@ -153,6 +179,11 @@ impl IrFeatures {
         f.call_ratio = if total > 0.0 { f.call_count as f32 / total } else { 0.0 };
         f.avg_bb_size = if f.basic_block_count > 0 {
             total / f.basic_block_count as f32
+        } else {
+            0.0
+        };
+        f.phi_ratio = if f.basic_block_count > 0 {
+            f.phi_count as f32 / f.basic_block_count as f32
         } else {
             0.0
         };
@@ -195,6 +226,15 @@ impl IrFeatures {
             self.mem_ratio,
             self.call_ratio,
             self.avg_bb_size,
+            // Pass-opportunity indicators
+            ln(self.unreachable_count),
+            ln(self.invoke_count),
+            ln(self.switch_count),
+            ln(self.intrinsic_count),
+            ln(self.tbaa_count),
+            ln(self.loop_metadata_count),
+            ln(self.noalias_count),
+            self.phi_ratio,
         ]
     }
 

@@ -301,18 +301,24 @@ FEATURE_KEYS = [
     ("mem_ratio",              "mem%"),
     ("call_ratio",             "call%"),
     ("avg_bb_size",            "bb_sz"),
+    ("unreachable_count",      "unreach"),
+    ("invoke_count",           "invoke"),
+    ("switch_count",           "switch"),
+    ("intrinsic_count",        "intrin"),
+    ("tbaa_count",             "tbaa"),
+    ("loop_metadata_count",    "loop_md"),
+    ("noalias_count",          "noalias"),
+    ("phi_ratio",              "phi/bb"),
 ]
 
 
 def plot_ir_heatmap(features: list, out: Path):
-    """Heatmap of z-scored IR features sorted by gap_vs_o3."""
+    """Heatmap of z-scored IR features, rows sorted by function name."""
     if not features:
         return
 
-    features = sorted(features, key=lambda x: x.get("gap_vs_o3_pct", 0.0))
-    names  = [f["function"]    for f in features]
-    tiers  = [f["difficulty"]  for f in features]
-    gaps   = [f.get("gap_vs_o3_pct", 0.0) for f in features]
+    features = sorted(features, key=lambda x: x["function"])
+    names  = [f["function"] for f in features]
     keys   = [k for k, _ in FEATURE_KEYS]
     labels = [l for _, l in FEATURE_KEYS]
 
@@ -331,6 +337,7 @@ def plot_ir_heatmap(features: list, out: Path):
 
     vabs = min(3.0, np.abs(mat_z).max())
     im = ax.imshow(mat_z, cmap="RdBu_r", aspect="auto", vmin=-vabs, vmax=vabs)
+    ax.grid(False)
     plt.colorbar(im, ax=ax, label="z-score", fraction=0.03, pad=0.02)
 
     # annotate cells with z > 0.5 abs
@@ -342,19 +349,14 @@ def plot_ir_heatmap(features: list, out: Path):
                 ax.text(j, i, f"{v:.1f}", ha="center", va="center",
                         fontsize=6.5, color=tc)
 
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
     ax.set_xticks(range(n_cols))
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_xticklabels(labels, rotation=45, ha="left", fontsize=8)
     ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(names, fontsize=7.5)
 
-    # y-tick labels: colour by difficulty tier
-    ax.set_yticklabels(
-        [f"{n}  ({g:+.0f}%)" for n, g in zip(names, gaps)],
-        fontsize=7.5
-    )
-    for ytick, tier in zip(ax.get_yticklabels(), tiers):
-        ytick.set_color(TIER_COLORS.get(tier, "#333"))
-
-    ax.set_title("IR Feature Profiles (z-scored, sorted by gap vs O3 — colour = difficulty tier)")
+    ax.set_title("IR Feature Profiles (z-scored)")
     savefig(fig, out / "ir_features_heatmap.png")
 
 

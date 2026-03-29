@@ -14,8 +14,11 @@ use crate::pipeline::CompilationPipeline;
 pub enum RewardMode {
     /// Reward only at episode end: speedup vs baseline
     Sparse,
-    /// Reward at each step: incremental improvement
+    /// Reward at each step: incremental improvement (expensive — benchmarks every step)
     PerStep,
+    /// Per-step proxy from instruction count reduction + full benchmark at terminal.
+    /// Free: total_instruction_count is already extracted each step anyway.
+    InstructionProxy,
 }
 
 #[derive(Config, Debug)]
@@ -61,12 +64,26 @@ pub struct StepInfo {
     pub sequence_length: usize,
 }
 
+/// Breakdown of the terminal benchmark result into per-baseline margins.
+/// Positive = faster than that baseline, negative = slower.
+/// Only populated on the final step of an episode.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RewardBreakdown {
+    /// (O0 - t) / O0
+    pub vs_o0: f32,
+    /// (O2 - t) / O2
+    pub vs_o2: f32,
+    /// (O3 - t) / O3
+    pub vs_o3: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     pub state: State,
     pub reward: f32,
     pub done: bool,
     pub info: StepInfo,
+    pub breakdown: Option<RewardBreakdown>,
 }
 
 pub struct LlvmEnv {
@@ -80,6 +97,10 @@ pub struct LlvmEnv {
     current_opt_ir: Option<PathBuf>,
     current_passes: Vec<Pass>,
     previous_time_ns: Option<u64>,
+    /// Instruction count at episode start — denominator for InstructionProxy reward.
+    base_inst_count: Option<u32>,
+    /// Instruction count after the previous step — numerator delta for InstructionProxy.
+    previous_inst_count: Option<u32>,
     config: EnvConfig,
     /// Shared directory for caching IR by pass sequence. None = no caching.
     ir_cache_dir: Option<PathBuf>,
@@ -104,6 +125,8 @@ impl LlvmEnv {
             current_opt_ir: None,
             current_passes: Vec::new(),
             previous_time_ns: None,
+            base_inst_count: None,
+            previous_inst_count: None,
             config,
             ir_cache_dir: None,
         })
@@ -127,6 +150,8 @@ impl LlvmEnv {
             current_opt_ir: None,
             current_passes: Vec::new(),
             previous_time_ns: None,
+            base_inst_count: None,
+            previous_inst_count: None,
             config,
             ir_cache_dir: None,
         })
@@ -134,6 +159,7 @@ impl LlvmEnv {
 
     /// Enable the shared IR cache. Call before the first episode.
     /// `dir` should be the same path for all parallel workers (e.g. `work/ir_cache`).
+    #[allow(unused)]
     pub fn with_ir_cache(mut self, dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).ok();
         self.ir_cache_dir = Some(dir);
@@ -190,11 +216,14 @@ impl LlvmEnv {
         let base_ir = self.pipeline.emit_ir(&func)?;
         let features = IrFeatures::from_ll_file(&base_ir)?;
 
+        let base_insts = features.total_instruction_count;
         self.current_function = Some(func);
         self.current_base_ir = Some(base_ir.clone());
         self.current_opt_ir = Some(base_ir);
         self.current_passes.clear();
         self.previous_time_ns = None;
+        self.base_inst_count = Some(base_insts);
+        self.previous_inst_count = Some(base_insts);
 
         Ok(State {
             features: features.to_vec(),
@@ -254,18 +283,15 @@ impl LlvmEnv {
         let features = IrFeatures::from_ll_file(&opt_ir)?;
 
         // Compute reward
-        let (reward, exec_time, binary_size) = if done {
-            // Final step: actually benchmark
+        let (reward, exec_time, binary_size, breakdown) = if done {
+            // Final step: always benchmark and return full breakdown.
             let binary = self.pipeline.compile_ir(&opt_ir)?;
-            let result = self
-                .pipeline
-                .benchmark(&binary, self.config.benchmark_runs)?;
-
-            let reward = self.compute_reward(&stem, result.median_ns);
-            (reward, Some(result.median_ns), Some(result.binary_size_bytes))
+            let result = self.pipeline.benchmark(&binary, self.config.benchmark_runs)?;
+            let (reward, bd) = self.compute_reward(&stem, result.median_ns);
+            (reward, Some(result.median_ns), Some(result.binary_size_bytes), bd)
         } else {
             match self.config.reward_mode {
-                RewardMode::Sparse => (0.0, None, None),
+                RewardMode::Sparse => (0.0, None, None, None),
                 RewardMode::PerStep => {
                     // Benchmark at each step for per-step reward
                     let binary = self.pipeline.compile_ir(&opt_ir)?;
@@ -274,12 +300,21 @@ impl LlvmEnv {
                         .benchmark(&binary, self.config.benchmark_runs)?;
                     let reward = self.compute_step_reward(&stem, result.median_ns);
                     self.previous_time_ns = Some(result.median_ns);
-                    (reward, Some(result.median_ns), Some(result.binary_size_bytes))
+                    (reward, Some(result.median_ns), Some(result.binary_size_bytes), None)
+                }
+                RewardMode::InstructionProxy => {
+                    const PROXY_SCALE: f32 = 0.2;
+                    let curr = features.total_instruction_count;
+                    let prev = self.previous_inst_count.unwrap_or(curr);
+                    let base = self.base_inst_count.unwrap_or(prev.max(1));
+                    let reward = (prev as f32 - curr as f32) / base.max(1) as f32 * PROXY_SCALE;
+                    (reward, None, None, None)
                 }
             }
         };
 
         self.current_opt_ir = Some(opt_ir);
+        self.previous_inst_count = Some(features.total_instruction_count);
 
         Ok(StepResult {
             state: State {
@@ -294,6 +329,7 @@ impl LlvmEnv {
                 pass_applied: pass.opt_name().to_string(),
                 sequence_length: self.current_passes.len(),
             },
+            breakdown,
         })
     }
 
@@ -316,7 +352,7 @@ impl LlvmEnv {
             .map(|p| p.file_stem().unwrap().to_string_lossy().to_string())
     }
 
-    fn compute_reward(&self, function: &str, time_ns: u64) -> f32 {
+    fn compute_reward(&self, function: &str, time_ns: u64) -> (f32, Option<RewardBreakdown>) {
         if let Some(baselines) = self.baselines.get(function) {
             // Tiered reward: scaled points for beating each baseline tier,
             // plus a continuous gradient for margin above O3.
@@ -336,15 +372,20 @@ impl LlvmEnv {
             let o2 = baselines.o2_ns as f64;
             let o3 = baselines.o3_ns as f64;
 
+            let vs_o0 = ((o0 - t) / o0) as f32;
+            let vs_o2 = ((o2 - t) / o2) as f32;
+            let vs_o3 = ((o3 - t) / o3) as f32;
+
             let tier = if t < o0 { W0 } else { 0.0 }
                      + if t < o2 { W2 } else { 0.0 }
                      + if t < o3 { W3 } else { 0.0 };
+            let margin = S3 * (o3 - t) / o3;
 
-            let margin = S3 * (o3 - t) / o3; // positive when faster than O3
-
-            (tier + margin) as f32
+            let total = (tier + margin) as f32;
+            let bd = RewardBreakdown { vs_o0, vs_o2, vs_o3 };
+            (total, Some(bd))
         } else {
-            0.0
+            (0.0, None)
         }
     }
 
