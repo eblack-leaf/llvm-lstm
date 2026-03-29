@@ -5,53 +5,27 @@ use rayon::prelude::*;
 
 use anyhow::Result;
 use burn::backend::{Autodiff, NdArray, ndarray::NdArrayDevice};
-use burn::config::Config;
-use burn::module::AutodiffModule;
 use burn::grad_clipping::GradientClippingConfig;
+use burn::module::AutodiffModule;
 use burn::optim::AdamConfig;
+use burn::prelude::ElementConversion;
 use burn::prelude::Module as _;
 use burn::record::CompactRecorder;
-use burn::prelude::ElementConversion;
 use burn::tensor::{Int, Tensor, TensorData};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 
-use crate::actor_critic::{ActorCritic, ActorCriticConfig};
+use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
-use crate::ppo::{PpoConfig, ppo_update};
+use crate::ppo::{PpoConfig, ppo_update_tfx};
 use crate::rollout::Rollout;
+use crate::training::TrainConfig;
 
-/// The autodiff-enabled backend used for training.
 type B = Autodiff<NdArray>;
-
-#[derive(Config, Debug)]
-pub struct TrainConfig {
-    /// Environment settings (benchmark paths, episode length, reward mode).
-    pub env: EnvConfig,
-    /// PPO hyperparameters.
-    #[config(default = "PpoConfig::new()")]
-    pub ppo: PpoConfig,
-    /// Total number of rollout-collect + PPO-update iterations.
-    #[config(default = 1000)]
-    pub total_iterations: usize,
-    /// Number of episodes to collect per function per iteration.
-    /// Total episodes per iteration = episodes_per_function * num_functions.
-    #[config(default = 8)]
-    pub episodes_per_function: usize,
-    /// Run full evaluation every N iterations.
-    #[config(default = 50)]
-    pub eval_interval: usize,
-    /// Directory to write model checkpoints.
-    pub checkpoint_dir: String,
-    /// Print training stats every N iterations.
-    #[config(default = 1)]
-    pub log_interval: usize,
-}
 
 pub fn train(config: TrainConfig) -> Result<()> {
     let device = NdArrayDevice::default();
 
-    // Save fields needed by parallel workers — config.env is moved into LlvmEnv::new below.
     let worker_functions_dir  = config.env.functions_dir.clone();
     let worker_work_dir       = config.env.work_dir.clone();
     let worker_reward_mode    = config.env.reward_mode.clone();
@@ -61,27 +35,25 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let mut env = LlvmEnv::new(config.env)?;
     env.compute_baselines()?;
 
-    let mut model = ActorCriticConfig::new().init::<B>(&device);
+    let mut model = TransformerActorCriticConfig::new().init::<B>(&device);
     let grad_clip = Some(GradientClippingConfig::Norm(0.5));
-    let mut optim = AdamConfig::new().with_grad_clipping(grad_clip).init::<B, ActorCritic<B>>();
+    let mut optim = AdamConfig::new()
+        .with_grad_clipping(grad_clip)
+        .init::<B, TransformerActorCritic<B>>();
 
-    // ── Progress bars ─────────────────────────────────────────────────────────
-    let multi = MultiProgress::new();
-
+    let multi   = MultiProgress::new();
     let train_pb = multi.add(ProgressBar::new(config.total_iterations as u64));
     train_pb.set_style(
         ProgressStyle::default_bar()
             .template("  training  {bar:30.green}  {pos:>4}/{len}  {elapsed}  {msg}")
             .unwrap(),
     );
-
-    let ep_pb = multi.add(ProgressBar::new(0)); // length set each iteration after n_funcs is known
+    let ep_pb = multi.add(ProgressBar::new(0));
     ep_pb.set_style(
         ProgressStyle::default_bar()
             .template("  episode   {bar:20.cyan}   {pos}/{len}  {msg}")
             .unwrap(),
     );
-
     let step_pb = multi.add(ProgressBar::new_spinner());
     step_pb.set_style(
         ProgressStyle::default_spinner()
@@ -90,24 +62,17 @@ pub fn train(config: TrainConfig) -> Result<()> {
     );
     step_pb.enable_steady_tick(Duration::from_millis(120));
 
-    // Exponential moving average of episode reward per function (α=0.1).
     let mut fn_ema: HashMap<String, f32> = HashMap::new();
-    // Best mean EMA reward seen — tracked every log interval, only saves when positive.
     let mut best_mean_ema: f32 = 0.0;
-
-    // Previous logged stats for computing deltas.
     let mut prev_ev:  Option<f32> = None;
     let mut prev_ent: Option<f32> = None;
     let mut prev_kl:  Option<f32> = None;
 
-    // Maximum entropy for the action space — used to normalise entropy to [0,1].
-    let max_entropy = (ActorCriticConfig::new().num_actions as f32).ln();
+    let max_entropy = (TransformerActorCriticConfig::new().num_actions as f32).ln();
 
-    // Pre-computed baselines shared (read-only) across parallel workers.
     let baselines = env.baselines().clone();
     let n_funcs   = env.num_functions();
 
-    // ── Training loop ─────────────────────────────────────────────────────────
     let total_episodes = n_funcs * config.episodes_per_function;
     ep_pb.set_length(total_episodes as u64);
 
@@ -115,110 +80,114 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let iter_start = Instant::now();
         ep_pb.set_position(0);
 
-        // ── Collect episodes in parallel ──────────────────────────────────────
-        // Each episode gets its own LlvmEnv with a unique work dir so that
-        // simultaneous compilations of the same function don't clobber each other.
         let model_inf = model.valid();
-        let base_work_dir  = &worker_work_dir;
-        // Actor<NdArray> contains OnceCell which is !Sync, so par_iter().map() won't
-        // compile (closure needs Sync). map_with() side-steps this: the models live
-        // in per-thread state (T: Send+Clone only, not Sync).
+        let base_work_dir = &worker_work_dir;
+
+        // ── Collect episodes in parallel ──────────────────────────────────────
+        // Transformer rollout: no hidden state threading. Instead each worker
+        // accumulates the full (features, prev_action) sequence for the episode
+        // and re-runs the Transformer over the growing sequence at each step.
+        // Compute cost is O(t²) per step vs O(t) for GRU, but entirely negligible
+        // compared to compilation + benchmarking time.
         let episode_results: Vec<(Rollout, String, f32, Option<RewardBreakdown>)> = (0..total_episodes)
             .into_par_iter()
             .map_with(
                 model_inf,
                 |model_s, ep| -> anyhow::Result<(Rollout, String, f32, Option<RewardBreakdown>)> {
-                // Round-robin: all functions covered before any gets a second episode.
-                let func_index = ep % n_funcs;
+                    let func_index = ep % n_funcs;
 
-                // Unique scratch directory — avoids file races between parallel episodes.
-                let worker_dir = base_work_dir.join(format!("worker-{ep}"));
-                let worker_config = EnvConfig::new(
-                    worker_functions_dir.clone(),
-                    worker_dir,
-                    worker_reward_mode.clone(),
-                )
-                .with_max_seq_length(worker_max_seq_length)
-                .with_benchmark_runs(worker_benchmark_runs);
+                    let worker_dir = base_work_dir.join(format!("worker-tfx-{ep}"));
+                    let worker_config = EnvConfig::new(
+                        worker_functions_dir.clone(),
+                        worker_dir,
+                        worker_reward_mode.clone(),
+                    )
+                    .with_max_seq_length(worker_max_seq_length)
+                    .with_benchmark_runs(worker_benchmark_runs);
 
-                let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
-                let mut state      = worker_env.reset_to(func_index)?;
-                let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
+                    let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
+                    let mut state      = worker_env.reset_to(func_index)?;
+                    let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
 
-                let device  = NdArrayDevice::default();
-                let mut rng = rand::thread_rng();
+                    let device  = NdArrayDevice::default();
+                    let mut rng = rand::thread_rng();
 
-                let mut rollout        = Rollout::new();
-                let mut hidden: Option<Tensor<NdArray, 2>> = None;
-                let mut prev_action: i64 = 0;
-                let mut episode_reward   = 0.0f32;
+                    let mut rollout        = Rollout::new();
+                    let mut episode_reward = 0.0f32;
 
-                let terminal_breakdown = loop {
-                    let features = Tensor::<NdArray, 2>::from_data(
-                        TensorData::new(state.features.clone(), [1, state.features.len()]),
-                        &device,
-                    );
-                    let prev_act = Tensor::<NdArray, 1, Int>::from_data(
-                        TensorData::new(vec![prev_action], [1]),
-                        &device,
-                    );
+                    // Sequence history: flat feature buffer + prev_action per step.
+                    // feat_history[t * feat_dim .. (t+1) * feat_dim] = features at step t.
+                    // act_history[t] = prev_action entering step t (0 for t=0).
+                    let feat_dim = state.features.len();
+                    let mut feat_history: Vec<f32> = Vec::new();
+                    let mut act_history:  Vec<i64> = Vec::new();
+                    let mut prev_action:  i64      = 0;
 
-                    let (logits, value_tensor, new_hidden) =
-                        model_s.forward(features, prev_act, hidden);
-                    let value_scalar: f32 = value_tensor
-                        .reshape([1])
-                        .into_scalar()
-                        .elem();
+                    let terminal_breakdown = loop {
+                        // Append current step to sequence.
+                        feat_history.extend_from_slice(&state.features);
+                        act_history.push(prev_action);
+                        let seq_len = act_history.len();
 
-                    let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
-                    let action   = sample_categorical(&logits_vec, &mut rng);
-                    let log_prob = log_softmax_at(&logits_vec, action);
+                        let features_seq = Tensor::<NdArray, 3>::from_data(
+                            TensorData::new(feat_history.clone(), [1, seq_len, feat_dim]),
+                            &device,
+                        );
+                        let actions_seq = Tensor::<NdArray, 2, Int>::from_data(
+                            TensorData::new(act_history.clone(), [1, seq_len]),
+                            &device,
+                        );
 
-                    let step = worker_env.step(action)?;
-                    episode_reward += step.reward;
+                        let (logits, value_tensor) = model_s.forward(features_seq, actions_seq);
+                        let value_scalar: f32 = value_tensor
+                            .reshape([1])
+                            .into_scalar()
+                            .elem();
 
-                    rollout.push(
-                        state.features.clone(),
-                        action,
-                        log_prob,
-                        step.reward,
-                        value_scalar,
-                        step.done,
-                    );
+                        let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
+                        let action   = sample_categorical(&logits_vec, &mut rng);
+                        let log_prob = log_softmax_at(&logits_vec, action);
 
-                    if step.done {
-                        ep_pb.inc(1);
-                        break step.breakdown;
-                    }
+                        let step = worker_env.step(action)?;
+                        episode_reward += step.reward;
 
-                    hidden      = Some(new_hidden);
-                    prev_action = action as i64;
-                    state       = step.state;
-                };
+                        rollout.push(
+                            state.features.clone(),
+                            action,
+                            log_prob,
+                            step.reward,
+                            value_scalar,
+                            step.done,
+                        );
 
-                Ok((rollout, func_name, episode_reward, terminal_breakdown))
-            })
+                        if step.done {
+                            ep_pb.inc(1);
+                            break step.breakdown;
+                        }
+
+                        prev_action = action as i64;
+                        state = step.state;
+                    };
+
+                    Ok((rollout, func_name, episode_reward, terminal_breakdown))
+                },
+            )
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        // Collect rollouts (sequential — no races).
+        // ── Collect rollouts ──────────────────────────────────────────────────
         let mut rollouts: Vec<Rollout> = Vec::with_capacity(total_episodes);
+        let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
         let mut episode_g0s: Vec<f32> = Vec::with_capacity(total_episodes);
         let mut episode_v0s: Vec<f32> = Vec::with_capacity(total_episodes);
-        let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
-        // Per-function breakdown sums for this iteration's logging window.
-        let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new(); // (vs_o0, vs_o2, vs_o3, count)
+        let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new();
+
         for (rollout, func_name, _episode_reward, bd) in episode_results {
             let g0: f32 = rollout.rewards.iter().enumerate()
                 .map(|(t, &r)| r * config.ppo.gamma.powi(t as i32))
                 .sum();
-            // V(s₀): critic's prediction at episode start — used as the per-episode
-            // baseline. Unlike EMA, V(s₀) doesn't converge toward the current policy's
-            // mean return (which would zero out all advantages). Instead it improves
-            // alongside value training, creating a self-improving signal loop.
             let v0 = rollout.values.first().copied().unwrap_or(0.0);
             episode_g0s.push(g0);
             episode_v0s.push(v0);
-            // EMA is kept for logging only — not used as a baseline.
             let ema = fn_ema.entry(func_name.clone()).or_insert(g0);
             *ema = 0.9 * *ema + 0.1 * g0;
             if let Some(b) = bd {
@@ -229,13 +198,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
             rollouts.push(rollout);
         }
 
-        // ── Compute advantages ────────────────────────────────────────────────
+        // ── Compute advantages (GAE) ──────────────────────────────────────────
         step_pb.set_message("computing advantages");
-
-        // Per-step GAE advantages and returns. Each step gets its own advantage
-        // A_t = δ_t + γλ·δ_{t+1} + ... where δ_t = r_t + γ·V(s_{t+1}) - V(s_t).
-        // Credit for a good pass flows backward through V: if applying a pass moves
-        // the IR to a state V thinks is better, δ_{t} > 0 at that step.
         let mut all_returns: Vec<f32> = Vec::new();
         let mut all_advantages: Vec<f32> = Vec::new();
         for rollout in &rollouts {
@@ -248,11 +212,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // ── PPO update ────────────────────────────────────────────────────────
         step_pb.set_message("ppo update");
-        // Compute explained variance before the update (old values vs. raw returns).
         let ev = explained_variance(&all_returns, &combined.values);
 
         let stats;
-        (model, stats) = ppo_update(
+        (model, stats) = ppo_update_tfx(
             model,
             &mut optim,
             &combined,
@@ -273,7 +236,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let kl       = stats.approx_kl;
             let clip     = stats.clip_fraction;
 
-            // Small delta arrows — green up, red down, blank if negligible.
             let delta = |cur: f32, prev: Option<f32>| -> String {
                 match prev {
                     None => "    ".to_string(),
@@ -286,22 +248,18 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 }
             };
 
-            // ev: cyan (good) → yellow → red
             let ev_s = if ev > 0.3      { format!("\x1b[36m{ev:+.2}\x1b[0m") }
                        else if ev > 0.0 { format!("\x1b[33m{ev:+.2}\x1b[0m") }
                        else             { format!("\x1b[31m{ev:+.2}\x1b[0m") };
 
-            // ent: magenta (high/exploring) → yellow → red (collapsed)
             let ent_s = if ent_frac > 0.4      { format!("\x1b[35m{ent_frac:.2}\x1b[0m") }
                         else if ent_frac > 0.2 { format!("\x1b[33m{ent_frac:.2}\x1b[0m") }
                         else                   { format!("\x1b[31m{ent_frac:.2}\x1b[0m") };
 
-            // kl: dim/white (low=healthy) → yellow → red (too high)
             let kl_s = if kl < 0.05     { format!("\x1b[2m{kl:.4}\x1b[0m") }
                        else if kl < 0.1 { format!("\x1b[33m{kl:.4}\x1b[0m") }
                        else             { format!("\x1b[31m{kl:.4}\x1b[0m") };
 
-            // clip: dim/white (low=healthy) → yellow → red
             let clip_s = if clip < 0.2      { format!("\x1b[2m{clip:.2}\x1b[0m") }
                          else if clip < 0.4 { format!("\x1b[33m{clip:.2}\x1b[0m") }
                          else               { format!("\x1b[31m{clip:.2}\x1b[0m") };
@@ -310,14 +268,12 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let dent = delta(ent_frac, prev_ent);
             let dkl  = delta(kl,       prev_kl);
 
-            // Mean EMA across all functions — bold cyan when positive, yellow when near 0, red when negative.
             let mean_ema = if fn_ema.is_empty() { 0.0 }
                            else { fn_ema.values().sum::<f32>() / fn_ema.len() as f32 };
             let ema_s = if mean_ema > 0.05       { format!("\x1b[1;36m{mean_ema:+.3}\x1b[0m") }
                         else if mean_ema > -0.05 { format!("\x1b[33m{mean_ema:+.3}\x1b[0m") }
                         else                     { format!("\x1b[31m{mean_ema:+.3}\x1b[0m") };
 
-            // Per-function EMA: cyan positive, yellow near-zero, red negative.
             let mut fn_summary: Vec<(&str, f32)> = fn_ema
                 .iter()
                 .map(|(k, &v)| (k.as_str(), v))
@@ -343,7 +299,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 train_pb.println(colored);
             }
 
-            // ── Diagnostic block ─────────────────────────────────────────────────
+            // ── Diagnostics ──────────────────────────────────────────────────
             {
                 let fmts = |v: &[f32]| -> String {
                     if v.is_empty() { return "  (empty)".to_string(); }
@@ -359,7 +315,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 train_pb.println(format!("        vloss: {:.4}  ploss: {:.4}",
                     stats.value_loss, stats.policy_loss));
 
-                // Per-function G0 spread (shows if variance exists within each func's 8 episodes)
                 let mut fn_g0s: HashMap<&str, Vec<f32>> = HashMap::new();
                 for (func, &g0) in rollout_funcs.iter().zip(episode_g0s.iter()) {
                     fn_g0s.entry(func.as_str()).or_default().push(g0);
@@ -381,17 +336,15 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 }
             }
 
-            // Best checkpoint: checked every log interval, saved only when
-            // mean EMA is positive (policy beating baselines on average) and improving.
             if mean_ema > best_mean_ema {
                 best_mean_ema = mean_ema;
                 std::fs::create_dir_all(&config.checkpoint_dir).ok();
-                let best = format!("{}/best", config.checkpoint_dir);
+                let best = format!("{}/best_tfx", config.checkpoint_dir);
                 if let Err(e) = model.valid().save_file(&best, &CompactRecorder::new()) {
-                    train_pb.println(format!("  warn: best checkpoint save failed: {e}"));
+                    train_pb.println(format!("  warn: checkpoint save failed: {e}"));
                 } else {
                     train_pb.println(format!(
-                        "  \x1b[1;36m★ new best\x1b[0m  mean_ema={mean_ema:+.3}  → {best}.mpk"
+                        "  \x1b[1;36m★ new best (tfx)\x1b[0m  mean_ema={mean_ema:+.3}  → {best}.mpk"
                     ));
                 }
             }
@@ -401,10 +354,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
             prev_kl  = Some(kl);
         }
 
-        // ── Periodic checkpoint ───────────────────────────────────────────────
         if iteration % config.eval_interval == 0 && iteration > 0 {
             std::fs::create_dir_all(&config.checkpoint_dir).ok();
-            let ckpt = format!("{}/iter_{:04}", config.checkpoint_dir, iteration);
+            let ckpt = format!("{}/tfx_iter_{:04}", config.checkpoint_dir, iteration);
             if let Err(e) = model.valid().save_file(&ckpt, &CompactRecorder::new()) {
                 train_pb.println(format!("  warn: checkpoint save failed: {e}"));
             }
@@ -417,39 +369,30 @@ pub fn train(config: TrainConfig) -> Result<()> {
     Ok(())
 }
 
-/// Sample an action index from a categorical distribution defined by `logits`.
 fn sample_categorical(logits: &[f32], rng: &mut impl Rng) -> usize {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exp: Vec<f32> = logits.iter().map(|x| (x - max).exp()).collect();
     let sum: f32 = exp.iter().sum();
-
     let u: f32 = rng.r#gen();
     let mut cumsum = 0.0f32;
     for (i, e) in exp.iter().enumerate() {
         cumsum += e / sum;
-        if u <= cumsum {
-            return i;
-        }
+        if u <= cumsum { return i; }
     }
     logits.len() - 1
 }
 
-/// Log-probability of `action` under the softmax distribution defined by `logits`.
 fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let log_sum_exp = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;
     logits[action] - log_sum_exp
 }
 
-/// Explained variance: 1 - Var(returns - values) / Var(returns).
-/// Returns 0 when Var(returns) is near zero (constant target).
 fn explained_variance(returns: &[f32], values: &[f32]) -> f32 {
     let n = returns.len() as f32;
     let ret_mean = returns.iter().sum::<f32>() / n;
     let ret_var  = returns.iter().map(|r| (r - ret_mean).powi(2)).sum::<f32>() / n;
-    if ret_var < 0.01 {
-        return 0.0;
-    }
+    if ret_var < 0.01 { return 0.0; }
     let residuals: Vec<f32> = returns.iter().zip(values.iter()).map(|(r, v)| r - v).collect();
     let res_mean = residuals.iter().sum::<f32>() / n;
     let res_var  = residuals.iter().map(|r| (r - res_mean).powi(2)).sum::<f32>() / n;

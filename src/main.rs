@@ -4,12 +4,14 @@ mod env;
 mod evaluation;
 mod ir_features;
 mod actor_critic;
+mod actor_critic_tfx;
 mod pass_menu;
 mod pipeline;
 mod plots;
 mod ppo;
 mod rollout;
 mod training;
+mod training_tfx;
 
 use std::path::PathBuf;
 
@@ -124,6 +126,9 @@ enum Commands {
         /// Reward mode: sparse | per-step | instruction-proxy
         #[arg(long, default_value = "instruction-proxy")]
         reward_mode: String,
+        /// Model architecture: gru | transformer
+        #[arg(long, default_value = "gru")]
+        model: String,
     },
 
     /// Evaluate agent against baselines
@@ -221,10 +226,10 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
-            use training::{TrainConfig, train};
+            use training::TrainConfig;
 
             let mode = match reward_mode.as_str() {
                 "per-step"           => RewardMode::PerStep,
@@ -243,7 +248,10 @@ fn main() -> Result<()> {
             .with_episodes_per_function(episodes)
             .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef));
 
-            train(config)?;
+            match model.as_str() {
+                "transformer" | "tfx" => training_tfx::train(config)?,
+                _                     => training::train(config)?,
+            }
         }
 
         Commands::Evaluate {
