@@ -36,7 +36,7 @@ pub struct TrainConfig {
     pub total_iterations: usize,
     /// Number of episodes to collect per function per iteration.
     /// Total episodes per iteration = episodes_per_function * num_functions.
-    #[config(default = 4)]
+    #[config(default = 8)]
     pub episodes_per_function: usize,
     /// Run full evaluation every N iterations.
     #[config(default = 50)]
@@ -44,7 +44,7 @@ pub struct TrainConfig {
     /// Directory to write model checkpoints.
     pub checkpoint_dir: String,
     /// Print training stats every N iterations.
-    #[config(default = 5)]
+    #[config(default = 1)]
     pub log_interval: usize,
 }
 
@@ -220,7 +220,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
         step_pb.set_message("computing advantages");
         let mut raw_advantages: Vec<Vec<f32>> = Vec::new();
         let mut all_returns: Vec<f32> = Vec::new();
-
         for rollout in &rollouts {
             let (adv, ret) =
                 rollout.compute_advantages(config.ppo.gamma, config.ppo.gae_lambda, 0.0);
@@ -228,13 +227,16 @@ pub fn train(config: TrainConfig) -> Result<()> {
             all_returns.extend(ret);
         }
 
+        // Per-step GAE with per-function batch-mean centering.
+        // EV is now 0.3-0.4, so the value function provides useful per-step baselines.
+        // GAE produces lower-variance advantages than episode-level REINFORCE, giving
+        // more stable policy updates rather than oscillating with each noisy batch.
         let mut fn_adv_sum: HashMap<String, f32> = HashMap::new();
         let mut fn_adv_cnt: HashMap<String, usize> = HashMap::new();
         for (adv, func) in raw_advantages.iter().zip(rollout_funcs.iter()) {
             *fn_adv_sum.entry(func.clone()).or_insert(0.0) += adv.iter().sum::<f32>();
             *fn_adv_cnt.entry(func.clone()).or_insert(0)   += adv.len();
         }
-
         let mut all_advantages: Vec<f32> = Vec::new();
         for (adv, func) in raw_advantages.iter().zip(rollout_funcs.iter()) {
             let mean = fn_adv_sum[func] / fn_adv_cnt[func] as f32;

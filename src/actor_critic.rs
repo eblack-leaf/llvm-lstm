@@ -12,7 +12,7 @@ pub struct ActorCriticConfig {
     #[config(default = 29)]
     pub num_actions: usize,
     /// GRU hidden state size and input projection size.
-    #[config(default = 128)]
+    #[config(default = 256)]
     pub hidden_size: usize,
     /// Dimensionality of the learned previous-action embedding.
     #[config(default = 32)]
@@ -110,7 +110,8 @@ impl<B: Backend> ActorCritic<B> {
         let h_dim = out.shape().dims[2];
         let out_flat = out.reshape([n_ep * max_t, h_dim]);     // [n_ep*max_T, hidden_size]
 
-        // Both heads share the same GRU output — clone before first use.
+        // Both heads share the GRU output. Value loss trains the GRU to encode
+        // return-predictive features, which also benefits the policy representation.
         let logits_flat = self.policy_head.forward(out_flat.clone());
         let n_act = logits_flat.shape().dims[1];
         let logits = logits_flat.reshape([n_ep, max_t, n_act]);

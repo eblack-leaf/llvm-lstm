@@ -35,7 +35,7 @@ pub struct EnvConfig {
     /// No inline default — enum variants aren't Config literals.
     pub reward_mode: RewardMode,
     /// Number of benchmark process invocations to average per timing call.
-    #[config(default = 3)]
+    #[config(default = 1)]
     pub benchmark_runs: usize,
     /// Internal timing iterations inside each benchmark binary (passed as argv[1]).
     #[config(default = 51)]
@@ -354,22 +354,7 @@ impl LlvmEnv {
 
     fn compute_reward(&self, function: &str, time_ns: u64) -> (f32, Option<RewardBreakdown>) {
         if let Some(baselines) = self.baselines.get(function) {
-            // Tiered reward: scaled points for beating each baseline tier,
-            // plus a continuous gradient for margin above O3.
-            //
-            //   r = w0 * 1[t < O0] + w2 * 1[t < O2] + w3 * 1[t < O3]
-            //       + s3 * (O3 - t) / O3
-            //
-            // Tiered reward: discrete bonuses for each baseline beaten, plus a
-            // continuous bonus for the margin beyond O3.
-            // All terms are non-negative — beating a faster baseline always
-            // increases the reward; being slower than O3 is not penalised.
-            const W0: f64 = 0.1;   // bonus for beating -O0
-            const W2: f64 = 0.3;   // bonus for beating -O2
-            const W3: f64 = 0.5;   // bonus for beating -O3
-            const S3: f64 = 1.0;   // scale for continuous margin beyond O3
-
-            let t = time_ns as f64;
+            let t  = time_ns as f64;
             let o0 = baselines.o0_ns as f64;
             let o2 = baselines.o2_ns as f64;
             let o3 = baselines.o3_ns as f64;
@@ -378,13 +363,16 @@ impl LlvmEnv {
             let vs_o2 = ((o2 - t) / o2) as f32;
             let vs_o3 = ((o3 - t) / o3) as f32;
 
-            let tier = if t < o0 { W0 } else { 0.0 }
-                     + if t < o2 { W2 } else { 0.0 }
-                     + if t < o3 { W3 } else { 0.0 };
-            // Margin only positive: extra credit for beating O3, no penalty for missing it.
-            let margin = if t < o3 { S3 * (o3 - t) / o3 } else { 0.0 };
+            // Continuous reward: fraction of the O0→O3 performance gap covered.
+            //   0.0 = matched O0 (no better than unoptimized)
+            //   1.0 = matched O3 (goal)
+            //  >1.0 = beating O3
+            // Linear and monotonic — every speed improvement produces the same
+            // reward gain regardless of where the agent currently sits, giving a
+            // consistent gradient signal with no dead zones between tiers.
+            let gap = (o0 - o3).max(1.0);
+            let total = ((o0 - t) / gap) as f32;
 
-            let total = (tier + margin) as f32;
             let bd = RewardBreakdown { vs_o0, vs_o2, vs_o3 };
             (total, Some(bd))
         } else {

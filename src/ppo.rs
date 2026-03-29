@@ -18,7 +18,7 @@ pub struct PpoConfig {
     #[config(default = 0.5)]
     pub value_loss_coef: f32,
     /// Entropy bonus coefficient — encourages exploration.
-    #[config(default = 0.01)]
+    #[config(default = 0.001)]
     pub entropy_coef: f32,
     /// Adam learning rate.
     #[config(default = 3e-4)]
@@ -26,11 +26,13 @@ pub struct PpoConfig {
     /// Discount factor.
     #[config(default = 0.99)]
     pub gamma: f32,
-    /// GAE lambda for advantage estimation.
-    #[config(default = 0.95)]
+    /// GAE lambda for advantage estimation. 1.0 = pure MC returns (no value
+    /// bootstrap), which gives clean unbiased targets when the value function
+    /// is still learning.
+    #[config(default = 0.99)]
     pub gae_lambda: f32,
     /// Number of PPO epochs per rollout batch.
-    #[config(default = 4)]
+    #[config(default = 8)]
     pub num_epochs: usize,
     /// Stop updates when approx KL exceeds this threshold.
     #[config(default = 0.1)]
