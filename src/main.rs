@@ -68,8 +68,8 @@ enum Commands {
         #[arg(long, default_value = "eda_output")]
         output: PathBuf,
 
-        /// Benchmark directory (optional, enables IR feature extraction)
-        #[arg(long)]
+        /// Benchmark directory for IR feature extraction
+        #[arg(long, default_value = "benchmarks")]
         functions: Option<PathBuf>,
     },
 

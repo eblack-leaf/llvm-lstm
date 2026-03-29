@@ -360,12 +360,14 @@ impl LlvmEnv {
             //   r = w0 * 1[t < O0] + w2 * 1[t < O2] + w3 * 1[t < O3]
             //       + s3 * (O3 - t) / O3
             //
-            // Weights chosen so that beating O3 dominates, but the agent
-            // receives positive signal even when it only beats O0.
-            const W0: f64 = 0.1;   // points for beating -O0
-            const W2: f64 = 0.3;   // points for beating -O2
-            const W3: f64 = 0.5;   // points for beating -O3
-            const S3: f64 = 1.0;   // scale for continuous O3 margin
+            // Tiered reward: discrete bonuses for each baseline beaten, plus a
+            // continuous bonus for the margin beyond O3.
+            // All terms are non-negative — beating a faster baseline always
+            // increases the reward; being slower than O3 is not penalised.
+            const W0: f64 = 0.1;   // bonus for beating -O0
+            const W2: f64 = 0.3;   // bonus for beating -O2
+            const W3: f64 = 0.5;   // bonus for beating -O3
+            const S3: f64 = 1.0;   // scale for continuous margin beyond O3
 
             let t = time_ns as f64;
             let o0 = baselines.o0_ns as f64;
@@ -379,7 +381,8 @@ impl LlvmEnv {
             let tier = if t < o0 { W0 } else { 0.0 }
                      + if t < o2 { W2 } else { 0.0 }
                      + if t < o3 { W3 } else { 0.0 };
-            let margin = S3 * (o3 - t) / o3;
+            // Margin only positive: extra credit for beating O3, no penalty for missing it.
+            let margin = if t < o3 { S3 * (o3 - t) / o3 } else { 0.0 };
 
             let total = (tier + margin) as f32;
             let bd = RewardBreakdown { vs_o0, vs_o2, vs_o3 };
