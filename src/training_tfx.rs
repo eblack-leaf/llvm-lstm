@@ -17,7 +17,7 @@ use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
-use crate::ppo::{PpoConfig, ppo_update_tfx};
+use crate::ppo::ppo_update_tfx;
 use crate::rollout::Rollout;
 use crate::training::TrainConfig;
 

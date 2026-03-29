@@ -132,7 +132,7 @@ impl<B: Backend> TransformerActorCritic<B> {
         let out = self.transformer.forward(TransformerEncoderInput::new(tokens));
         // [1, seq, d_model] → last position → [1, d_model]
         let d = out.dims()[2];
-        let last = out.slice([0..1, (seq - 1)..seq, 0..d]).squeeze::<2>();
+        let last = out.slice([0..1, (seq - 1)..seq, 0..d]).reshape([1, d]);
         let logits = self.policy_head.forward(last.clone()); // [1, num_actions]
         let value  = self.value_head.forward(last);           // [1, 1]
         (logits, value)
@@ -153,15 +153,10 @@ impl<B: Backend> TransformerActorCritic<B> {
 
         let tokens = self.tokenize(features_pad, prev_actions); // [n_ep, max_t, d_model]
 
-        // Build [n_ep, max_t, max_t] causal mask directly to avoid repeat_dim.
-        let mut mask_data = vec![false; n_ep * max_t * max_t];
-        for b in 0..n_ep {
-            for i in 0..max_t {
-                for j in (i + 1)..max_t {
-                    mask_data[b * max_t * max_t + i * max_t + j] = true;
-                }
-            }
-        }
+        // Build [max_t, max_t] causal mask then tile to [n_ep, max_t, max_t].
+        let mask_2d = Self::causal_mask(max_t, &device); // [max_t, max_t]
+        let mask_flat: Vec<bool> = mask_2d.into_data().to_vec().unwrap();
+        let mask_data: Vec<bool> = mask_flat.iter().copied().cycle().take(n_ep * max_t * max_t).collect();
         let causal = Tensor::<B, 3, Bool>::from_data(
             TensorData::new(mask_data, [n_ep, max_t, max_t]),
             &device,
