@@ -112,7 +112,7 @@ enum Commands {
         #[arg(long, default_value = "4")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
-        #[arg(long, default_value = "0.02")]
+        #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
         #[arg(long, default_value = "1")]

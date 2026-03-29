@@ -21,7 +21,7 @@ pub struct TransformerActorCriticConfig {
     /// FFN hidden dim inside each transformer layer.
     #[config(default = 256)]
     pub d_ff: usize,
-    #[config(default = 0.0)]
+    #[config(default = 0.1)]
     pub dropout: f64,
     /// Dimensionality of the learned previous-action embedding.
     #[config(default = 32)]
