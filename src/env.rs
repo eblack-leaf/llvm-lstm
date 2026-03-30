@@ -174,6 +174,15 @@ impl LlvmEnv {
         self.functions.len()
     }
 
+    /// Returns the function name for a given index (same order as reset_to).
+    pub fn function_name(&self, index: usize) -> String {
+        self.functions[index % self.functions.len()]
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    }
+
     /// Compute baselines for all functions. Call once before training.
     pub fn compute_baselines(&mut self) -> Result<()> {
         let pb = ProgressBar::new(self.functions.len() as u64);
