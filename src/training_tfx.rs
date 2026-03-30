@@ -256,12 +256,18 @@ pub fn train(config: TrainConfig) -> Result<()> {
         {
             let baseline = fn_batch_mean.get(func_name.as_str()).copied().unwrap_or(g0);
             let raw_adv  = g0 - baseline;
-            // Downweight solved functions so their near-zero advantages don't dilute
-            // the gradient from unsolved ones. weight=1.0 at EMA=0 (O3 boundary),
-            // decays to 0.1 at EMA=+0.2. Functions below O3 always get full weight.
-            let ema_val  = fn_ema.get(func_name.as_str()).copied().unwrap_or(0.0);
-            let weight   = (1.0 - ema_val.max(0.0) / 0.2).max(0.1);
-            let advantage = raw_adv * weight;
+            // Downweight solved functions only when the batch has a mix of solved and
+            // unsolved functions. When all are above O3, uniform weighting is used —
+            // applying downweighting to all functions suppresses the gradient everywhere
+            // and causes the policy to drift.
+            let any_unsolved = fn_ema.values().any(|&e| e < 0.0);
+            let advantage = if any_unsolved {
+                let ema_val = fn_ema.get(func_name.as_str()).copied().unwrap_or(0.0);
+                let weight  = (1.0 - ema_val.max(0.0) / 0.2).max(0.1);
+                raw_adv * weight
+            } else {
+                raw_adv
+            };
             let n = rollout.len();
             for _ in 0..n {
                 all_advantages.push(advantage);
