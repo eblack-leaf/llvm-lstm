@@ -170,30 +170,24 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     let mut rollout        = Rollout::new();
                     let mut episode_reward = 0.0f32;
 
-                    // Sequence history: flat feature buffer + prev_action per step.
-                    // feat_history[t * feat_dim .. (t+1) * feat_dim] = features at step t.
-                    // act_history[t] = prev_action entering step t (0 for t=0).
+                    // Base IR features: captured once at reset, never changes.
+                    // act_history: starts with [0] (no-prior-action padding), grows as actions are taken.
+                    // The transformer sees [IR_token | act_history] and outputs at the last position.
                     let feat_dim = state.features.len();
-                    let mut feat_history: Vec<f32> = Vec::new();
-                    let mut act_history:  Vec<i64> = Vec::new();
-                    let mut prev_action:  i64      = 0;
+                    let base_features: Vec<f32> = state.features.clone();
+                    let mut act_history: Vec<i64> = vec![0i64]; // position 0 = no-prior-action pad
 
                     let terminal_breakdown = loop {
-                        // Append current step to sequence.
-                        feat_history.extend_from_slice(&state.features);
-                        act_history.push(prev_action);
-                        let seq_len = act_history.len();
-
-                        let features_seq = Tensor::<Inner, 3>::from_data(
-                            TensorData::new(feat_history.clone(), [1, seq_len, feat_dim]),
+                        let base_t = Tensor::<Inner, 2>::from_data(
+                            TensorData::new(base_features.clone(), [1, feat_dim]),
                             &device,
                         );
-                        let actions_seq = Tensor::<Inner, 2, Int>::from_data(
-                            TensorData::new(act_history.clone(), [1, seq_len]),
+                        let actions_t = Tensor::<Inner, 2, Int>::from_data(
+                            TensorData::new(act_history.clone(), [1, act_history.len()]),
                             &device,
                         );
 
-                        let (logits, value_tensor) = model_s.forward(features_seq, actions_seq);
+                        let (logits, value_tensor) = model_s.forward(base_t, actions_t);
                         let value_scalar: f32 = value_tensor
                             .reshape([1])
                             .into_scalar()
@@ -220,7 +214,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                             break step.breakdown;
                         }
 
-                        prev_action = action as i64;
+                        act_history.push(action as i64);
                         state = step.state;
                     };
 

@@ -236,14 +236,17 @@ where
         let n_ep  = episodes.len();
         let max_t = episodes.iter().map(|r| r.len()).max().unwrap_or(1);
 
-        let mut feat_buf = vec![0.0f32; n_ep * max_t * feat_dim];
-        let mut prev_buf = vec![0i64;   n_ep * max_t];
+        // Base features: one feature vector per episode (IR at step 0).
+        // prev_buf: prev_buf[ep][0]=0 (no prior action), prev_buf[ep][t+1]=action_t.
+        let mut base_feat_buf = vec![0.0f32; n_ep * feat_dim];
+        let mut prev_buf      = vec![0i64;   n_ep * max_t];
         let mut real_idx: Vec<i64> = Vec::with_capacity(n);
 
         for (ei, range) in episodes.iter().enumerate() {
-            for (t, state) in rollout.states[range.clone()].iter().enumerate() {
-                let fi = (ei * max_t + t) * feat_dim;
-                feat_buf[fi..fi + feat_dim].copy_from_slice(state);
+            // Base features = first state of this episode
+            base_feat_buf[ei * feat_dim..(ei + 1) * feat_dim]
+                .copy_from_slice(&rollout.states[range.start]);
+            for t in 0..range.len() {
                 real_idx.push((ei * max_t + t) as i64);
             }
             for (t, &a) in rollout.actions[range.clone()].iter().enumerate() {
@@ -253,8 +256,8 @@ where
             }
         }
 
-        let features_pad = Tensor::<Bx, 3>::from_data(
-            TensorData::new(feat_buf, [n_ep, max_t, feat_dim]),
+        let base_features = Tensor::<Bx, 2>::from_data(
+            TensorData::new(base_feat_buf, [n_ep, feat_dim]),
             device,
         );
         let prev_pad = Tensor::<Bx, 2, Int>::from_data(
@@ -262,7 +265,7 @@ where
             device,
         );
 
-        let (logits_3d, values_3d) = model.forward_batch(features_pad, prev_pad);
+        let (logits_3d, values_3d) = model.forward_batch(base_features, prev_pad);
 
         let n_act       = logits_3d.shape().dims[2];
         let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);

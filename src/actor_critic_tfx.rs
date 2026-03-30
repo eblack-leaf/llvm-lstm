@@ -11,22 +11,20 @@ pub struct TransformerActorCriticConfig {
     pub input_dim: usize,
     #[config(default = 29)]
     pub num_actions: usize,
-    /// Token embedding dimension — must be divisible by n_heads.
     #[config(default = 256)]
     pub d_model: usize,
     #[config(default = 8)]
     pub n_heads: usize,
     #[config(default = 3)]
     pub n_layers: usize,
-    /// FFN hidden dim inside each transformer layer.
     #[config(default = 512)]
     pub d_ff: usize,
     #[config(default = 0.1)]
     pub dropout: f64,
-    /// Dimensionality of the learned previous-action embedding.
+    /// Dimensionality of the learned action embedding.
     #[config(default = 32)]
     pub action_embed_dim: usize,
-    /// Learned positional embedding table size — must exceed max episode length.
+    /// Positional embedding table size — must exceed max episode length + 1.
     #[config(default = 64)]
     pub max_seq_len: usize,
 }
@@ -41,13 +39,10 @@ impl TransformerActorCriticConfig {
             self.n_heads
         );
         TransformerActorCritic {
-            token_proj: LinearConfig::new(
-                self.input_dim + self.action_embed_dim,
-                self.d_model,
-            )
-            .init(device),
+            ir_proj: LinearConfig::new(self.input_dim, self.d_model).init(device),
             action_embed: EmbeddingConfig::new(self.num_actions, self.action_embed_dim)
                 .init(device),
+            action_proj: LinearConfig::new(self.action_embed_dim, self.d_model).init(device),
             pos_embed: EmbeddingConfig::new(self.max_seq_len, self.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
                 self.d_model,
@@ -65,18 +60,26 @@ impl TransformerActorCriticConfig {
 
 /// Causal Transformer actor-critic.
 ///
-/// Replaces the GRU's rolling hidden state with full causal self-attention over
-/// the sequence of (IR_features, prev_action) tokens accumulated during the
-/// episode. At step t the model attends directly to every earlier step — no
-/// hidden-state bottleneck compressing prior decisions into a fixed-size vector.
+/// Input structure: one fixed IR-features token (base IR at episode start) followed
+/// by the ordered sequence of action tokens (passes applied so far).  The transformer
+/// attends causally over [IR | a_0 | a_1 | … | a_{t-1}] and the output at position t
+/// becomes the policy logits and value for step t.
 ///
-/// Two calling modes (identical interface to the GRU actor-critic):
-/// - `forward`       — growing sequence, single step during rollout.
-/// - `forward_batch` — padded episode batch with causal mask, PPO updates.
+/// Compared to the previous approach (IR features repeated at every position), this
+/// separates what the code looks like (IR prefix, one token) from what has been tried
+/// (action sequence).  The attention layers learn pass-combination patterns directly
+/// without having to filter noisy per-step IR snapshots.
+///
+/// Convention: position 0 in the sequence is always the IR token.  The action
+/// sequence starts at position 1, with a zero-padding token at position 1 (representing
+/// "no previous action") so the sequence is never empty.  Position t+1 holds the action
+/// taken at step t-1 (for t≥1); the output at position t is used for the decision at
+/// step t.
 #[derive(Module, Debug)]
 pub struct TransformerActorCritic<B: Backend> {
-    token_proj:   Linear<B>,
+    ir_proj:      Linear<B>,
     action_embed: Embedding<B>,
+    action_proj:  Linear<B>,
     pos_embed:    Embedding<B>,
     transformer:  TransformerEncoder<B>,
     policy_head:  Linear<B>,
@@ -84,89 +87,103 @@ pub struct TransformerActorCritic<B: Backend> {
 }
 
 impl<B: Backend> TransformerActorCritic<B> {
-    /// Project (IR_features ++ prev_action_embed) into d_model tokens, add
-    /// learned positional embeddings.
+    /// Build token sequence: [IR_token, action_tokens…].
+    ///
+    /// `base_features`: [batch, feat_dim]
+    /// `actions`:       [batch, seq]  (seq ≥ 1; position 0 = zero-pad "no prior action")
+    /// Returns:         [batch, 1+seq, d_model]
     fn tokenize(
         &self,
-        features:     Tensor<B, 3>,      // [batch, seq, feat_dim]
-        prev_actions: Tensor<B, 2, Int>, // [batch, seq]
-    ) -> Tensor<B, 3> {                  // [batch, seq, d_model]
-        let [_, seq, _] = features.dims();
-        let device = features.device();
+        base_features: Tensor<B, 2>,
+        actions:       Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        let [_, seq] = actions.dims();
+        let device   = base_features.device();
 
-        let act_emb = self.action_embed.forward(prev_actions); // [batch, seq, act_emb_dim]
-        let tokens  = Tensor::cat(vec![features, act_emb], 2); // [batch, seq, feat+act_emb]
-        let tokens  = self.token_proj.forward(tokens);          // [batch, seq, d_model]
+        let ir_token  = self.ir_proj.forward(base_features).unsqueeze_dim::<3>(1); // [b,1,d]
+        let act_emb   = self.action_embed.forward(actions);                         // [b,seq,ae]
+        let act_tok   = self.action_proj.forward(act_emb);                          // [b,seq,d]
+        let tokens    = Tensor::cat(vec![ir_token, act_tok], 1);                    // [b,1+seq,d]
 
-        let pos_ids = Tensor::<B, 1, Int>::arange(0..seq as i64, &device)
-            .unsqueeze::<2>();                                   // [1, seq]
-        let pos_emb = self.pos_embed.forward(pos_ids);          // [1, seq, d_model]
+        let total = seq + 1;
+        let pos_ids = Tensor::<B, 1, Int>::arange(0..total as i64, &device)
+            .unsqueeze::<2>();                                                       // [1,1+seq]
+        let pos_emb = self.pos_embed.forward(pos_ids);                              // [1,1+seq,d]
 
-        tokens + pos_emb // broadcast over batch
+        tokens + pos_emb
     }
 
-/// Single-episode forward used during rollout collection.
+    /// Single-episode forward used during rollout collection.
     ///
-    /// Takes the full sequence accumulated so far this episode and returns
-    /// the policy logits and value for the LAST position (the current step).
-    /// No hidden state is threaded — the full context is always available.
+    /// `base_features`: [1, feat_dim] — IR at episode start (never changes)
+    /// `actions`:       [1, t+1]      — zero-pad at index 0, then actions taken so far
+    ///
+    /// Returns logits and value for the current step (output at last position).
     pub fn forward(
         &self,
-        features_seq: Tensor<B, 3>,      // [1, t, feat_dim]
-        actions_seq:  Tensor<B, 2, Int>, // [1, t]  prev_action at each position
-    ) -> (Tensor<B, 2>, Tensor<B, 2>) {  // (logits [1, num_actions], value [1, 1])
-        let [_, seq, _] = features_seq.dims();
-        let tokens = self.tokenize(features_seq, actions_seq); // [1, seq, d_model]
-        let out = self.transformer.forward(TransformerEncoderInput::new(tokens));
-        // [1, seq, d_model] → last position → [1, d_model]
-        let d = out.dims()[2];
-        let last = out.slice([0..1, (seq - 1)..seq, 0..d]).reshape([1, d]);
-        let logits = self.policy_head.forward(last.clone()); // [1, num_actions]
-        let value  = self.value_head.forward(last);           // [1, 1]
+        base_features: Tensor<B, 2>,
+        actions:       Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 2>, Tensor<B, 2>) {
+        let tokens = self.tokenize(base_features, actions); // [1, 1+t+1, d]
+        let out    = self.transformer.forward(TransformerEncoderInput::new(tokens));
+        let [_, seq, d] = out.dims();
+        let last   = out.slice([0..1, (seq - 1)..seq, 0..d]).reshape([1, d]);
+        let logits = self.policy_head.forward(last.clone());
+        let value  = self.value_head.forward(last);
         (logits, value)
     }
 
     /// Batched multi-episode forward used during PPO updates.
     ///
-    /// Identical interface to the GRU's `forward_batch` so ppo_update is unchanged.
-    /// A causal attention mask ensures position t attends only to 0..=t-1, matching
-    /// the strictly causal rollout.
+    /// `base_features`: [n_ep, feat_dim]  — base IR per episode
+    /// `prev_actions`:  [n_ep, max_t]     — prev_actions[ep][t] = action at step t-1
+    ///                                      (0 at t=0, same format as before)
+    ///
+    /// Returns (logits [n_ep, max_t, n_act], values [n_ep, max_t, 1]).
+    /// Output at position t (1-indexed in the token sequence, 0-indexed in the slice)
+    /// corresponds to step t decisions — identical output contract to the old interface.
     pub fn forward_batch(
         &self,
-        features_pad:  Tensor<B, 3>,      // [n_ep, max_t, feat_dim]
-        prev_actions:  Tensor<B, 2, Int>, // [n_ep, max_t]
-    ) -> (Tensor<B, 3>, Tensor<B, 3>) {   // (logits [n_ep, max_t, n_act], values [n_ep, max_t, 1])
-        let [n_ep, max_t, _] = features_pad.dims();
-        let device = features_pad.device();
+        base_features: Tensor<B, 2>,
+        prev_actions:  Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let [n_ep, max_t] = prev_actions.dims();
+        let device        = base_features.device();
 
-        let tokens = self.tokenize(features_pad, prev_actions); // [n_ep, max_t, d_model]
+        // Sequence: [IR_token, prev_action_0=0, prev_action_1=a_0, ..., prev_action_{max_t-1}]
+        // Length = max_t + 1
+        let tokens  = self.tokenize(base_features, prev_actions); // [n_ep, max_t+1, d]
+        let seq_len = max_t + 1;
 
-        // Build [n_ep, max_t, max_t] causal mask directly.
-        let mut mask_data = vec![false; n_ep * max_t * max_t];
+        // Causal mask [n_ep, seq_len, seq_len]: position i cannot attend to j > i
+        let mut mask_data = vec![false; n_ep * seq_len * seq_len];
         for ep in 0..n_ep {
-            for i in 0..max_t {
-                for j in (i + 1)..max_t {
-                    mask_data[ep * max_t * max_t + i * max_t + j] = true;
+            for i in 0..seq_len {
+                for j in (i + 1)..seq_len {
+                    mask_data[ep * seq_len * seq_len + i * seq_len + j] = true;
                 }
             }
         }
         let causal = Tensor::<B, 3, Bool>::from_data(
-            TensorData::new(mask_data, [n_ep, max_t, max_t]),
+            TensorData::new(mask_data, [n_ep, seq_len, seq_len]),
             &device,
         );
 
         let out = self.transformer.forward(
             TransformerEncoderInput::new(tokens).mask_attn(causal),
-        ); // [n_ep, max_t, d_model]
+        ); // [n_ep, max_t+1, d]
 
         let d = out.dims()[2];
-        let out_flat = out.reshape([n_ep * max_t, d]);
+
+        // Positions 1..max_t (0-indexed slice 1..max_t+1) correspond to step decisions 0..max_t-1.
+        // This matches the output contract: logits[ep][t] = logits for step t.
+        let out_steps = out.slice([0..n_ep, 1..(max_t + 1), 0..d]); // [n_ep, max_t, d]
+        let out_flat  = out_steps.reshape([n_ep * max_t, d]);
 
         let logits_flat = self.policy_head.forward(out_flat.clone());
-        let n_act = logits_flat.dims()[1];
-        let logits = logits_flat.reshape([n_ep, max_t, n_act]);
-
-        let values = self.value_head.forward(out_flat).reshape([n_ep, max_t, 1]);
+        let n_act       = logits_flat.dims()[1];
+        let logits      = logits_flat.reshape([n_ep, max_t, n_act]);
+        let values      = self.value_head.forward(out_flat).reshape([n_ep, max_t, 1]);
 
         (logits, values)
     }
