@@ -105,19 +105,7 @@ impl<B: Backend> TransformerActorCritic<B> {
         tokens + pos_emb // broadcast over batch
     }
 
-    /// Build a [seq, seq] causal attention mask where true = blocked.
-    /// Position i cannot attend to position j when j > i.
-    fn causal_mask(seq: usize, device: &B::Device) -> Tensor<B, 2, Bool> {
-        let mut data = vec![false; seq * seq];
-        for i in 0..seq {
-            for j in (i + 1)..seq {
-                data[i * seq + j] = true;
-            }
-        }
-        Tensor::<B, 2, Bool>::from_data(TensorData::new(data, [seq, seq]), device)
-    }
-
-    /// Single-episode forward used during rollout collection.
+/// Single-episode forward used during rollout collection.
     ///
     /// Takes the full sequence accumulated so far this episode and returns
     /// the policy logits and value for the LAST position (the current step).
@@ -153,10 +141,15 @@ impl<B: Backend> TransformerActorCritic<B> {
 
         let tokens = self.tokenize(features_pad, prev_actions); // [n_ep, max_t, d_model]
 
-        // Build [max_t, max_t] causal mask then tile to [n_ep, max_t, max_t].
-        let mask_2d = Self::causal_mask(max_t, &device); // [max_t, max_t]
-        let mask_flat: Vec<bool> = mask_2d.into_data().to_vec().unwrap();
-        let mask_data: Vec<bool> = mask_flat.iter().copied().cycle().take(n_ep * max_t * max_t).collect();
+        // Build [n_ep, max_t, max_t] causal mask directly.
+        let mut mask_data = vec![false; n_ep * max_t * max_t];
+        for ep in 0..n_ep {
+            for i in 0..max_t {
+                for j in (i + 1)..max_t {
+                    mask_data[ep * max_t * max_t + i * max_t + j] = true;
+                }
+            }
+        }
         let causal = Tensor::<B, 3, Bool>::from_data(
             TensorData::new(mask_data, [n_ep, max_t, max_t]),
             &device,
