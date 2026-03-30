@@ -324,6 +324,15 @@ def plot_ir_heatmap(features: list, out: Path):
 
     mat = np.array([[f.get(k, 0.0) for k in keys] for f in features], dtype=float)
 
+    # Drop constant columns (zero variance across all functions — no signal,
+    # and z-scoring them would produce misleading non-neutral colors).
+    stds_raw = mat.std(axis=0)
+    active   = stds_raw >= 1e-8
+    if not active.any():
+        return
+    mat    = mat[:, active]
+    labels = [l for l, keep in zip(labels, active) if keep]
+
     # z-score per column
     means = mat.mean(axis=0)
     stds  = mat.std(axis=0)
