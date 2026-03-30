@@ -20,7 +20,7 @@ pub struct PpoConfig {
     #[config(default = 0.5)]
     pub value_loss_coef: f32,
     /// Entropy bonus coefficient — encourages exploration.
-    #[config(default = 0.03)]
+    #[config(default = 0.005)]
     pub entropy_coef: f32,
     /// Adam learning rate.
     #[config(default = 1e-4)]

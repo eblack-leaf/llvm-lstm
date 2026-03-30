@@ -97,7 +97,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let n_funcs   = env.num_functions();
 
     // Build a name→index map so episode allocation can look up EMAs by function index.
-    let fn_index_names: Vec<String> = (0..n_funcs).map(|i| env.function_name(i)).collect();
+    let _fn_index_names: Vec<String> = (0..n_funcs).map(|i| env.function_name(i)).collect();
 
     let total_episodes = n_funcs * config.episodes_per_function;
     ep_pb.set_length(total_episodes as u64);
@@ -109,33 +109,12 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let model_inf = model.valid();
         let base_work_dir = &worker_work_dir;
 
-        // ── Dynamic episode allocation ────────────────────────────────────────
-        // Solved functions (EMA > 0) get a minimum allocation to detect regression.
-        // Remaining episodes flow to unsolved functions proportional to how far
-        // below O3 they are, concentrating compute where the gradient is real.
-        let min_per_func = (config.episodes_per_function / 4).max(2);
-        let episode_func_map: Vec<usize> = {
-            let mut alloc = vec![min_per_func; n_funcs];
-            let spare = total_episodes.saturating_sub(min_per_func * n_funcs);
-            // Weight = distance below O3 (EMA < 0 → positive weight; EMA ≥ 0 → 0)
-            let weights: Vec<f32> = fn_index_names.iter()
-                .map(|name| (-fn_ema.get(name.as_str()).copied().unwrap_or(0.0)).max(0.0))
-                .collect();
-            let weight_sum: f32 = weights.iter().sum();
-            if weight_sum > 0.0 {
-                for (i, &w) in weights.iter().enumerate() {
-                    alloc[i] += (spare as f32 * w / weight_sum).round() as usize;
-                }
-            } else {
-                // All functions solved — spread spare episodes evenly
-                for i in 0..n_funcs { alloc[i] += spare / n_funcs; }
-            }
-            // Build flat func-index list: [0,0,..,1,1,..,2,2,..]
-            alloc.iter().enumerate()
-                .flat_map(|(fi, &count)| std::iter::repeat(fi).take(count))
-                .collect()
-        };
-        let actual_episodes = episode_func_map.len();
+        // Episode→function mapping: even allocation across all functions.
+        // Gradient emphasis toward unsolved functions is handled via advantage
+        // weighting below, not by reducing solved functions' episode count
+        // (fewer episodes makes their batch-mean baseline noisy and destabilises them).
+        let episode_func_map: Vec<usize> = (0..total_episodes).map(|ep| ep % n_funcs).collect();
+        let actual_episodes = total_episodes;
         ep_pb.set_length(actual_episodes as u64);
 
         // ── Collect episodes in parallel ──────────────────────────────────────
