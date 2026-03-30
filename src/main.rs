@@ -1,7 +1,10 @@
 #![recursion_limit = "256"]
+mod baseline;
+mod critic;
 mod dataset;
 mod eda;
 mod env;
+mod episode_store;
 mod evaluation;
 mod ir_features;
 mod actor_critic;
@@ -10,6 +13,7 @@ mod pass_menu;
 mod pipeline;
 mod plots;
 mod ppo;
+mod returns;
 mod rollout;
 mod training;
 mod training_tfx;
@@ -139,6 +143,18 @@ enum Commands {
         /// Downweight solved functions' advantages when batch mixes solved/unsolved
         #[arg(long, default_value = "true")]
         adv_weighting: bool,
+        /// Return computation mode: episode | per-step
+        #[arg(long, default_value = "episode")]
+        return_mode: String,
+        /// Baseline mode: intra-batch | best | critic
+        #[arg(long, default_value = "best")]
+        baseline_mode: String,
+        /// Critic architecture: null | pattern-cnn
+        #[arg(long, default_value = "null")]
+        critic_arch: String,
+        /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
+        #[arg(long, default_value = "0.3")]
+        prune_threshold: f32,
     },
 
     /// Evaluate agent against baselines
@@ -243,7 +259,7 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model, dynamic_alloc, ir_mode, adv_weighting } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model, dynamic_alloc, ir_mode, adv_weighting, return_mode, baseline_mode, critic_arch, prune_threshold } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::TrainConfig;
@@ -266,7 +282,11 @@ fn main() -> Result<()> {
             .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef))
             .with_dynamic_alloc(dynamic_alloc)
             .with_ir_mode(ir_mode)
-            .with_adv_weighting(adv_weighting);
+            .with_adv_weighting(adv_weighting)
+            .with_return_mode(return_mode)
+            .with_baseline_mode(baseline_mode)
+            .with_critic_arch(critic_arch)
+            .with_prune_threshold(prune_threshold);
 
             match model.as_str() {
                 "transformer" | "tfx" => training_tfx::train(config)?,

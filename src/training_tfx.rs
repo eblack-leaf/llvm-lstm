@@ -34,8 +34,12 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
+use crate::baseline::{BaselineMode, Baseline, FnStats, build_advantages, broadcast_to_steps};
+use crate::critic::{Critic, NullCritic, PatternCnnCritic, PatternCnnConfig};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
+use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
+use crate::returns::{ReturnMode, Returns};
 use crate::rollout::Rollout;
 use crate::training::TrainConfig;
 
@@ -85,8 +89,20 @@ pub fn train(config: TrainConfig) -> Result<()> {
     );
     step_pb.enable_steady_tick(Duration::from_millis(120));
 
-    let mut fn_ema: HashMap<String, f32> = HashMap::new();
+    let return_mode   = ReturnMode::from_str(&config.return_mode);
+    let baseline_mode = BaselineMode::from_str(&config.baseline_mode);
+    let mut fn_stats      = FnStats::new();
+    let mut store         = BestEpisodeStore::new(config.prune_threshold);
     let mut best_mean_ema: f32 = 0.0;
+
+    let mut critic: Box<dyn Critic> = match config.critic_arch.as_str() {
+        "pattern-cnn" => Box::new(PatternCnnCritic::<B>::new(
+            PatternCnnConfig::new(TransformerActorCriticConfig::new().num_actions),
+            config.ppo.learning_rate,
+            device.clone(),
+        )),
+        _ => Box::new(NullCritic),
+    };
 
     // Rolling histories for trend detection (last HIST logged iterations).
     const HIST: usize = 20;
@@ -129,7 +145,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let mut alloc = vec![min_per_func; n_funcs];
             let spare = total_episodes.saturating_sub(min_per_func * n_funcs);
             let weights: Vec<f32> = fn_index_names.iter()
-                .map(|name| (-fn_ema.get(name.as_str()).copied().unwrap_or(0.0)).max(0.0))
+                .map(|name| (-fn_stats.ema(name.as_str()).unwrap_or(0.0)).max(0.0))
                 .collect();
             let weight_sum: f32 = weights.iter().sum();
             if weight_sum > 0.0 {
@@ -184,15 +200,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
                     // Shared across all modes: base IR captured once at episode start.
                     let base_features: Vec<f32> = state.features.clone();
-                    // Action history for base / base+current modes (grows each step).
+                    // Action history: grows each step; index 0 = zero-pad "no prior action".
                     let mut act_history: Vec<i64> = vec![0i64];
-                    // Per-step IR history for per-step mode (flat: seq * feat_dim).
-                    let mut ir_history: Vec<f32>  = base_features.clone();
-                    // Per-step prev-action history for per-step mode.
-                    let mut ps_acts: Vec<i64>     = vec![0i64];
 
                     let terminal_breakdown = loop {
-                        let (logits, value_scalar) = match ir_mode {
+                        let logits = match ir_mode {
                             "base+current" => {
                                 // IR token = concat(base, current) — 68-d input.
                                 let mut concat = base_features.clone();
@@ -205,21 +217,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                                     TensorData::new(act_history.clone(), [1, act_history.len()]),
                                     &device,
                                 );
-                                let (l, v) = model_s.forward(base_t, acts_t);
-                                (l, v.reshape([1]).into_scalar().elem())
-                            }
-                            "per-step" => {
-                                let seq = ps_acts.len();
-                                let ir_t = Tensor::<Inner, 3>::from_data(
-                                    TensorData::new(ir_history.clone(), [1, seq, feat_dim]),
-                                    &device,
-                                );
-                                let acts_t = Tensor::<Inner, 2, Int>::from_data(
-                                    TensorData::new(ps_acts.clone(), [1, seq]),
-                                    &device,
-                                );
-                                let (l, v) = model_s.forward_persteoir(ir_t, acts_t);
-                                (l, v.reshape([1]).into_scalar().elem())
+                                model_s.forward(base_t, acts_t)
                             }
                             _ => {
                                 // "base" (default): fixed base IR token + action sequence.
@@ -231,8 +229,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                                     TensorData::new(act_history.clone(), [1, act_history.len()]),
                                     &device,
                                 );
-                                let (l, v) = model_s.forward(base_t, acts_t);
-                                (l, v.reshape([1]).into_scalar().elem())
+                                model_s.forward(base_t, acts_t)
                             }
                         };
 
@@ -253,24 +250,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
                             state.features.clone()
                         };
 
-                        rollout.push(
-                            stored_features,
-                            action,
-                            log_prob,
-                            step.reward,
-                            value_scalar,
-                            step.done,
-                        );
+                        rollout.push(stored_features, action, log_prob, step.reward, 0.0, step.done);
 
                         if step.done {
                             ep_pb.inc(1);
                             break step.breakdown;
                         }
 
-                        // Advance history buffers.
                         act_history.push(action as i64);
-                        ir_history.extend_from_slice(&step.state.features);
-                        ps_acts.push(action as i64);
                         state = step.state;
                     };
 
@@ -282,19 +269,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // ── Collect rollouts ──────────────────────────────────────────────────
         let mut rollouts: Vec<Rollout> = Vec::with_capacity(total_episodes);
         let mut rollout_funcs: Vec<String> = Vec::with_capacity(total_episodes);
-        let mut episode_g0s: Vec<f32> = Vec::with_capacity(total_episodes);
-        let mut episode_v0s: Vec<f32> = Vec::with_capacity(total_episodes);
         let mut fn_bd_sum: HashMap<String, (f32, f32, f32, usize)> = HashMap::new();
 
         for (rollout, func_name, _episode_reward, bd) in episode_results {
-            let g0: f32 = rollout.rewards.iter().enumerate()
-                .map(|(t, &r)| r * config.ppo.gamma.powi(t as i32))
-                .sum();
-            let v0 = rollout.values.first().copied().unwrap_or(0.0);
-            episode_g0s.push(g0);
-            episode_v0s.push(v0);
-            let ema = fn_ema.entry(func_name.clone()).or_insert(g0);
-            *ema = 0.9 * *ema + 0.1 * g0;
             if let Some(b) = bd {
                 let e = fn_bd_sum.entry(func_name.clone()).or_insert((0.0, 0.0, 0.0, 0));
                 e.0 += b.vs_o0; e.1 += b.vs_o2; e.2 += b.vs_o3; e.3 += 1;
@@ -303,63 +280,56 @@ pub fn train(config: TrainConfig) -> Result<()> {
             rollouts.push(rollout);
         }
 
-        // ── Compute advantages (episode-level REINFORCE, intra-batch baseline) ─
-        // Baseline = per-function mean g0 within this batch.
-        // This zero-centers advantages within each function every iteration —
-        // no EMA lag, no inflation from early lucky episodes, works from iter 1.
-        // Positive ploss with EMA baseline meant the historical average was
-        // inflated above current policy performance; intra-batch mean fixes that.
+        // ── Compute returns, update state, compute advantages ─────────────────
         step_pb.set_message("computing advantages");
-        let mut fn_g0_batch: HashMap<&str, (f32, usize)> = HashMap::new();
-        for (func_name, &g0) in rollout_funcs.iter().zip(episode_g0s.iter()) {
-            let e = fn_g0_batch.entry(func_name.as_str()).or_insert((0.0, 0));
-            e.0 += g0; e.1 += 1;
-        }
-        let fn_batch_mean: HashMap<&str, f32> = fn_g0_batch.iter()
-            .map(|(&k, &(sum, n))| (k, sum / n as f32))
-            .collect();
 
-        let mut all_returns: Vec<f32> = Vec::new();
-        let mut all_advantages: Vec<f32> = Vec::new();
-        for ((rollout, &g0), func_name) in rollouts.iter()
-            .zip(episode_g0s.iter())
-            .zip(rollout_funcs.iter())
-        {
-            let baseline = fn_batch_mean.get(func_name.as_str()).copied().unwrap_or(g0);
-            let raw_adv  = g0 - baseline;
-            // Downweight solved functions only when the batch has a mix of solved and
-            // unsolved functions. When all are above O3, uniform weighting is used —
-            // applying downweighting to all functions suppresses the gradient everywhere
-            // and causes the policy to drift.
-            let any_unsolved = fn_ema.values().any(|&e| e < 0.0);
-            let advantage = if config.adv_weighting && any_unsolved {
-                let ema_val = fn_ema.get(func_name.as_str()).copied().unwrap_or(0.0);
-                let weight  = (1.0 - ema_val.max(0.0) / 0.2).max(0.1);
-                raw_adv * weight
-            } else {
-                raw_adv
-            };
-            let n = rollout.len();
-            for _ in 0..n {
-                all_advantages.push(advantage);
-                all_returns.push(g0);
-            }
+        // 1. Compute returns
+        let returns = Returns::compute(&rollouts, &return_mode, config.ppo.gamma);
+        let episode_g0s = returns.g0_per_ep.clone();
+
+        // 2. Update fn_stats (EMA + best) and BestEpisodeStore
+        for (ep_idx, (func, rollout)) in rollout_funcs.iter().zip(rollouts.iter()).enumerate() {
+            let g0 = returns.g0_per_ep[ep_idx];
+            fn_stats.update(func, g0);
+            store.insert(Episode {
+                func:    func.clone(),
+                actions: rollout.actions.clone(),
+                g0,
+            });
         }
+
+        // 3. Update critic from store
+        critic.update(&store);
+
+        // 4. Compute baselines
+        let baseline = Baseline::select(
+            &rollout_funcs,
+            &rollouts,
+            &returns,
+            &baseline_mode,
+            &fn_stats,
+            critic.as_ref(),
+        );
+
+        // 5. Per-episode advantage weights (downweight solved functions)
+        let any_unsolved = fn_stats.fn_ema.values().any(|&e| e < 0.0);
+        let ep_weights: Vec<f32> = rollout_funcs.iter().map(|func| {
+            if config.adv_weighting && any_unsolved {
+                let ema_val = fn_stats.ema(func).unwrap_or(0.0);
+                (1.0 - ema_val.max(0.0) / 0.2).max(0.1)
+            } else { 1.0 }
+        }).collect();
+        let ep_lens: Vec<usize> = rollouts.iter().map(|r| r.len()).collect();
+        let step_weights = broadcast_to_steps(&ep_weights, &ep_lens);
+
+        // 6. Build normalised advantages
+        let all_advantages = build_advantages(&returns.values, &baseline.values, &step_weights);
+        let all_returns    = returns.values.clone();
 
         let combined = Rollout::merge(&rollouts);
 
         // ── PPO update ────────────────────────────────────────────────────────
-        // With episode-level REINFORCE advantages the value function is not used
-        // for bootstrapping, so its loss has no algorithmic purpose.  Keeping it
-        // in the total loss sends contradictory gradients through the shared
-        // transformer trunk (every step in an episode has the same return target
-        // g0 but different IR-feature states, so the value head can't converge).
-        // Zero the coefficient so only policy gradient + entropy drive training.
         step_pb.set_message("ppo update");
-        let _ev = explained_variance(&all_returns, &combined.values);
-
-        let mut ppo_cfg = config.ppo.clone();
-        ppo_cfg.value_loss_coef = 0.0;
 
         let stats;
         (model, stats) = ppo_update_tfx(
@@ -367,10 +337,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &mut optim,
             &combined,
             &all_advantages,
-            &all_returns,
-            &ppo_cfg,
+            &config.ppo,
             &device,
-            &worker_ir_mode,
         );
 
         let iter_secs = iter_start.elapsed().as_secs_f32();
@@ -385,8 +353,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let clip     = stats.clip_fraction;
             let ploss    = stats.policy_loss;
 
-            let mean_ema = if fn_ema.is_empty() { 0.0 }
-                           else { fn_ema.values().sum::<f32>() / fn_ema.len() as f32 };
+            let mean_ema = if fn_stats.fn_ema.is_empty() { 0.0 }
+                           else { fn_stats.fn_ema.values().sum::<f32>() / fn_stats.fn_ema.len() as f32 };
 
             let adv_std = {
                 let n = all_advantages.len().max(1) as f32;
@@ -400,7 +368,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
             // ── Save metrics record ───────────────────────────────────────────
             {
-                let fn_ema_map: serde_json::Map<String, serde_json::Value> = fn_ema.iter()
+                let fn_ema_map: serde_json::Map<String, serde_json::Value> = fn_stats.fn_ema.iter()
                     .map(|(k, &v)| (k.clone(), serde_json::Value::from(v as f64)))
                     .collect();
                 let fn_vs_o0: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
@@ -421,6 +389,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     "clip_fraction":clip as f64,
                     "adv_std":      adv_std as f64,
                     "g0_spread":    g0_spread as f64,
+                    "explained_var":0.0_f64,
                     "iter_secs":    iter_secs as f64,
                     "fn_ema":       fn_ema_map,
                     "fn_vs_o0":     fn_vs_o0,
@@ -441,7 +410,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             push(&mut ent_frac_hist, ent_frac, HIST);
             push(&mut ploss_hist,    ploss,    HIST);
             push(&mut kl_hist,       kl,       HIST);
-            for (k, &v) in &fn_ema {
+            for (k, &v) in &fn_stats.fn_ema {
                 push(fn_ema_hist.entry(k.clone()).or_default(), v, HIST);
             }
 
@@ -475,8 +444,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
             // ── Line 2: update diagnostics ────────────────────────────────
             // kl>0.15 = epoch skipped. clip>30% = steps too large. ent<35% = collapsing.
+            // ev: how well V(s_t) predicts per-step returns. <0 = worse than mean baseline.
+            let ev_c = if ev > 0.5 { "\x1b[32m" } else if ev > 0.0 { "\x1b[33m" } else { "\x1b[31m" };
             train_pb.println(format!(
-                "         update  kl {}{kl:.4}\x1b[0m  clip {}{:.1}%\x1b[0m  ent {}{:.1}%\x1b[0m",
+                "         update  kl {}{kl:.4}\x1b[0m  clip {}{:.1}%\x1b[0m  ent {}{:.1}%\x1b[0m  ev {ev_c}{ev:+.3}\x1b[0m",
                 cr(kl,   0.05, 0.15),
                 cr(clip, 0.3,  0.5),  clip * 100.0,
                 c(ent_frac, 0.35, 0.55), ent_frac * 100.0,
@@ -493,10 +464,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
             ));
 
             // ── Per-function lines ────────────────────────────────────────
-            let mut fn_list: Vec<&str> = fn_ema.keys().map(|s| s.as_str()).collect();
+            let mut fn_list: Vec<&str> = fn_stats.fn_ema.keys().map(|s| s.as_str()).collect();
             fn_list.sort();
             for func in fn_list {
-                let ema_val = fn_ema[func];
+                let ema_val = fn_stats.fn_ema[func];
                 let hist    = fn_ema_hist.get(func).map(|v| v.as_slice()).unwrap_or(&[]);
 
                 // trend arrow: compare old half vs new half of ema history
@@ -589,6 +560,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     flags.push(format!("\x1b[1;31msignal dead (adv_std {adv_std:.5})\x1b[0m"));
                 }
 
+                // critic info
+                if critic.name() != "null" {
+                    flags.push(format!("\x1b[2mcritc={} store={}\x1b[0m", critic.name(), store.total_count()));
+                }
+
                 if !flags.is_empty() {
                     train_pb.println(format!("         \x1b[2m!\x1b[0m  {}", flags.join("  ")));
                 }
@@ -650,13 +626,4 @@ fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
     logits[action] - log_sum_exp
 }
 
-fn explained_variance(returns: &[f32], values: &[f32]) -> f32 {
-    let n = returns.len() as f32;
-    let ret_mean = returns.iter().sum::<f32>() / n;
-    let ret_var  = returns.iter().map(|r| (r - ret_mean).powi(2)).sum::<f32>() / n;
-    if ret_var < 0.01 { return 0.0; }
-    let residuals: Vec<f32> = returns.iter().zip(values.iter()).map(|(r, v)| r - v).collect();
-    let res_mean = residuals.iter().sum::<f32>() / n;
-    let res_var  = residuals.iter().map(|r| (r - res_mean).powi(2)).sum::<f32>() / n;
-    1.0 - res_var / ret_var
-}
+

@@ -54,12 +54,30 @@ pub struct TrainConfig {
     /// Disable to use uniform weighting always.
     #[config(default = true)]
     pub adv_weighting: bool,
-    /// IR featurisation mode for the transformer: "base" | "base+current" | "per-step".
+    /// IR featurisation mode for the transformer: "base" | "base+current".
     /// "base": fixed base IR token + action sequence (default).
     /// "base+current": concat(base, current) 68-d IR token at each step + action sequence.
-    /// "per-step": each token is (IR_t + prev_action_t), original per-step design.
     #[config(default = "\"base\".to_string()")]
     pub ir_mode: String,
+    /// Return computation mode: "episode" | "per-step".
+    /// "episode": G0 broadcast to all steps; "per-step": G_t = r_t + γ·G_{t+1}.
+    #[config(default = "\"episode\".to_string()")]
+    pub return_mode: String,
+    /// Baseline subtracted from returns before normalisation.
+    /// "intra-batch": mean G0 of current batch.
+    /// "best": running best G0 per function (regret signal).
+    /// "critic": learned PatternCNN baseline.
+    #[config(default = "\"best\".to_string()")]
+    pub baseline_mode: String,
+    /// Critic architecture used when baseline_mode = "critic".
+    /// "null": always 0.0.  "pattern-cnn": 1D CNN over action sequences.
+    #[config(default = "\"null\".to_string()")]
+    pub critic_arch: String,
+    /// Prune threshold for BestEpisodeStore.
+    /// Episodes with g0 < (best_g0 - threshold) are dropped.
+    /// Set large (e.g. 100.0) to keep all episodes ever seen.
+    #[config(default = 0.3)]
+    pub prune_threshold: f32,
 }
 
 pub fn train(config: TrainConfig) -> Result<()> {

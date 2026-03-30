@@ -155,27 +155,38 @@ def fig_signal(records, out_dir):
     iters     = extract(records, "iteration")
     adv_std   = extract(records, "adv_std")
     g0_spread = extract(records, "g0_spread")
+    has_ev    = any("explained_var" in r for r in records)
+    ev        = [r.get("explained_var", float("nan")) for r in records] if has_ev else None
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+    n_rows = 3 if has_ev else 2
+    fig, axes = plt.subplots(n_rows, 1, figsize=(10, 3 * n_rows), sharex=True)
 
-    ax1.plot(iters, adv_std, color="#b07aa1", linewidth=1.4)
-    ax1.axhline(0.015, color="orange", linewidth=0.8, linestyle="--",
-                alpha=0.7, label="0.015 weak signal")
-    ax1.axhline(0.005, color="red",    linewidth=0.8, linestyle="--",
-                alpha=0.7, label="0.005 dead signal")
-    ax1.set_ylabel("advantage std")
-    ax1.set_title("Signal quality")
-    ax1.legend(fontsize=8, loc="upper right")
-    _style(ax1)
+    axes[0].plot(iters, adv_std, color="#b07aa1", linewidth=1.4)
+    axes[0].axhline(0.015, color="orange", linewidth=0.8, linestyle="--",
+                    alpha=0.7, label="0.015 weak signal")
+    axes[0].axhline(0.005, color="red",    linewidth=0.8, linestyle="--",
+                    alpha=0.7, label="0.005 dead signal")
+    axes[0].set_ylabel("advantage std")
+    axes[0].set_title("Signal quality")
+    axes[0].legend(fontsize=8, loc="upper right")
+    _style(axes[0])
 
-    ax2.plot(iters, g0_spread, color="#76b7b2", linewidth=1.4)
-    ax2.axhline(0.05, color="orange", linewidth=0.8, linestyle="--",
-                alpha=0.7, label="0.05 low spread")
-    ax2.set_xlabel("iteration")
-    ax2.set_ylabel("g0 spread (max−min)")
-    ax2.legend(fontsize=8, loc="upper right")
-    _style(ax2)
+    axes[1].plot(iters, g0_spread, color="#76b7b2", linewidth=1.4)
+    axes[1].axhline(0.05, color="orange", linewidth=0.8, linestyle="--",
+                    alpha=0.7, label="0.05 low spread")
+    axes[1].set_ylabel("g0 spread (max−min)")
+    axes[1].legend(fontsize=8, loc="upper right")
+    _style(axes[1])
 
+    if has_ev:
+        axes[2].plot(iters, ev, color="#edc948", linewidth=1.4)
+        axes[2].axhline(0.5, color="green",  linewidth=0.8, linestyle="--", alpha=0.7, label="0.5 good")
+        axes[2].axhline(0.0, color="red",    linewidth=0.8, linestyle="--", alpha=0.6, label="0 = mean baseline")
+        axes[2].set_ylabel("explained variance")
+        axes[2].legend(fontsize=8, loc="lower right")
+        _style(axes[2])
+
+    axes[-1].set_xlabel("iteration")
     fig.tight_layout()
     fig.savefig(out_dir / "train_signal.png", dpi=150)
     plt.close(fig)
