@@ -222,6 +222,7 @@ pub fn ppo_update_tfx<Bx, O>(
     returns: &[f32],
     config: &PpoConfig,
     device: &Bx::Device,
+    ir_mode: &str,
 ) -> (TransformerActorCritic<Bx>, PpoStats)
 where
     Bx: AutodiffBackend,
@@ -236,16 +237,10 @@ where
         let n_ep  = episodes.len();
         let max_t = episodes.iter().map(|r| r.len()).max().unwrap_or(1);
 
-        // Base features: one feature vector per episode (IR at step 0).
-        // prev_buf: prev_buf[ep][0]=0 (no prior action), prev_buf[ep][t+1]=action_t.
-        let mut base_feat_buf = vec![0.0f32; n_ep * feat_dim];
-        let mut prev_buf      = vec![0i64;   n_ep * max_t];
+        let mut prev_buf  = vec![0i64; n_ep * max_t];
         let mut real_idx: Vec<i64> = Vec::with_capacity(n);
 
         for (ei, range) in episodes.iter().enumerate() {
-            // Base features = first state of this episode
-            base_feat_buf[ei * feat_dim..(ei + 1) * feat_dim]
-                .copy_from_slice(&rollout.states[range.start]);
             for t in 0..range.len() {
                 real_idx.push((ei * max_t + t) as i64);
             }
@@ -256,16 +251,41 @@ where
             }
         }
 
-        let base_features = Tensor::<Bx, 2>::from_data(
-            TensorData::new(base_feat_buf, [n_ep, feat_dim]),
-            device,
-        );
         let prev_pad = Tensor::<Bx, 2, Int>::from_data(
             TensorData::new(prev_buf, [n_ep, max_t]),
             device,
         );
 
-        let (logits_3d, values_3d) = model.forward_batch(base_features, prev_pad);
+        // Build features tensor and run the appropriate forward depending on ir_mode.
+        // "per-step": each episode position uses its own IR snapshot → 3D features.
+        // "base" / "base+current": one feature vector per episode (step 0) → 2D features.
+        //   For "base+current", rollout.states stores 68-d concat(base,current) vectors;
+        //   PPO approximates by using the step-0 vector (= concat(base,base)) for all steps.
+        let (logits_3d, values_3d) = if ir_mode == "per-step" {
+            let mut feat_buf = vec![0.0f32; n_ep * max_t * feat_dim];
+            for (ei, range) in episodes.iter().enumerate() {
+                for (t, state) in rollout.states[range.clone()].iter().enumerate() {
+                    let fi = (ei * max_t + t) * feat_dim;
+                    feat_buf[fi..fi + feat_dim].copy_from_slice(state);
+                }
+            }
+            let ir_features = Tensor::<Bx, 3>::from_data(
+                TensorData::new(feat_buf, [n_ep, max_t, feat_dim]),
+                device,
+            );
+            model.forward_batch_persteoir(ir_features, prev_pad)
+        } else {
+            let mut base_feat_buf = vec![0.0f32; n_ep * feat_dim];
+            for (ei, range) in episodes.iter().enumerate() {
+                base_feat_buf[ei * feat_dim..(ei + 1) * feat_dim]
+                    .copy_from_slice(&rollout.states[range.start]);
+            }
+            let base_features = Tensor::<Bx, 2>::from_data(
+                TensorData::new(base_feat_buf, [n_ep, feat_dim]),
+                device,
+            );
+            model.forward_batch(base_features, prev_pad)
+        };
 
         let n_act       = logits_3d.shape().dims[2];
         let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);

@@ -50,6 +50,12 @@ pub struct TrainConfig {
     /// Solved functions get a minimum floor; remaining episodes go to hard ones.
     #[config(default = false)]
     pub dynamic_alloc: bool,
+    /// IR featurisation mode for the transformer: "base" | "base+current" | "per-step".
+    /// "base": fixed base IR token + action sequence (default).
+    /// "base+current": concat(base, current) 68-d IR token at each step + action sequence.
+    /// "per-step": each token is (IR_t + prev_action_t), original per-step design.
+    #[config(default = "\"base\".to_string()")]
+    pub ir_mode: String,
 }
 
 pub fn train(config: TrainConfig) -> Result<()> {

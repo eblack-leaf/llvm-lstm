@@ -49,11 +49,16 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let worker_reward_mode    = config.env.reward_mode.clone();
     let worker_max_seq_length = config.env.max_seq_length;
     let worker_benchmark_runs = config.env.benchmark_runs;
+    let worker_ir_mode        = config.ir_mode.clone();
 
     let mut env = LlvmEnv::new(config.env)?;
     env.compute_baselines()?;
 
-    let mut model = TransformerActorCriticConfig::new().init::<B>(&device);
+    // "base+current" concatenates base and current IR → input_dim doubles to 68.
+    let input_dim = if config.ir_mode == "base+current" { 68 } else { 34 };
+    let mut model = TransformerActorCriticConfig::new()
+        .with_input_dim(input_dim)
+        .init::<B>(&device);
     let grad_clip = Some(GradientClippingConfig::Norm(0.5));
     let mut optim = AdamConfig::new()
         .with_grad_clipping(grad_clip)
@@ -169,29 +174,62 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
                     let mut rollout        = Rollout::new();
                     let mut episode_reward = 0.0f32;
+                    let feat_dim           = state.features.len();
+                    let ir_mode            = worker_ir_mode.as_str();
 
-                    // Base IR features: captured once at reset, never changes.
-                    // act_history: starts with [0] (no-prior-action padding), grows as actions are taken.
-                    // The transformer sees [IR_token | act_history] and outputs at the last position.
-                    let feat_dim = state.features.len();
+                    // Shared across all modes: base IR captured once at episode start.
                     let base_features: Vec<f32> = state.features.clone();
-                    let mut act_history: Vec<i64> = vec![0i64]; // position 0 = no-prior-action pad
+                    // Action history for base / base+current modes (grows each step).
+                    let mut act_history: Vec<i64> = vec![0i64];
+                    // Per-step IR history for per-step mode (flat: seq * feat_dim).
+                    let mut ir_history: Vec<f32>  = base_features.clone();
+                    // Per-step prev-action history for per-step mode.
+                    let mut ps_acts: Vec<i64>     = vec![0i64];
 
                     let terminal_breakdown = loop {
-                        let base_t = Tensor::<Inner, 2>::from_data(
-                            TensorData::new(base_features.clone(), [1, feat_dim]),
-                            &device,
-                        );
-                        let actions_t = Tensor::<Inner, 2, Int>::from_data(
-                            TensorData::new(act_history.clone(), [1, act_history.len()]),
-                            &device,
-                        );
-
-                        let (logits, value_tensor) = model_s.forward(base_t, actions_t);
-                        let value_scalar: f32 = value_tensor
-                            .reshape([1])
-                            .into_scalar()
-                            .elem();
+                        let (logits, value_scalar) = match ir_mode {
+                            "base+current" => {
+                                // IR token = concat(base, current) — 68-d input.
+                                let mut concat = base_features.clone();
+                                concat.extend_from_slice(&state.features);
+                                let base_t = Tensor::<Inner, 2>::from_data(
+                                    TensorData::new(concat, [1, feat_dim * 2]),
+                                    &device,
+                                );
+                                let acts_t = Tensor::<Inner, 2, Int>::from_data(
+                                    TensorData::new(act_history.clone(), [1, act_history.len()]),
+                                    &device,
+                                );
+                                let (l, v) = model_s.forward(base_t, acts_t);
+                                (l, v.reshape([1]).into_scalar().elem())
+                            }
+                            "per-step" => {
+                                let seq = ps_acts.len();
+                                let ir_t = Tensor::<Inner, 3>::from_data(
+                                    TensorData::new(ir_history.clone(), [1, seq, feat_dim]),
+                                    &device,
+                                );
+                                let acts_t = Tensor::<Inner, 2, Int>::from_data(
+                                    TensorData::new(ps_acts.clone(), [1, seq]),
+                                    &device,
+                                );
+                                let (l, v) = model_s.forward_persteoir(ir_t, acts_t);
+                                (l, v.reshape([1]).into_scalar().elem())
+                            }
+                            _ => {
+                                // "base" (default): fixed base IR token + action sequence.
+                                let base_t = Tensor::<Inner, 2>::from_data(
+                                    TensorData::new(base_features.clone(), [1, feat_dim]),
+                                    &device,
+                                );
+                                let acts_t = Tensor::<Inner, 2, Int>::from_data(
+                                    TensorData::new(act_history.clone(), [1, act_history.len()]),
+                                    &device,
+                                );
+                                let (l, v) = model_s.forward(base_t, acts_t);
+                                (l, v.reshape([1]).into_scalar().elem())
+                            }
+                        };
 
                         let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
                         let action   = sample_categorical(&logits_vec, &mut rng);
@@ -200,8 +238,18 @@ pub fn train(config: TrainConfig) -> Result<()> {
                         let step = worker_env.step(action)?;
                         episode_reward += step.reward;
 
+                        // Store in rollout: per-step and base both use current state.features;
+                        // base+current stores the 68-d concat so PPO uses step-0 vector correctly.
+                        let stored_features = if ir_mode == "base+current" {
+                            let mut concat = base_features.clone();
+                            concat.extend_from_slice(&state.features);
+                            concat
+                        } else {
+                            state.features.clone()
+                        };
+
                         rollout.push(
-                            state.features.clone(),
+                            stored_features,
                             action,
                             log_prob,
                             step.reward,
@@ -214,7 +262,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
                             break step.breakdown;
                         }
 
+                        // Advance history buffers.
                         act_history.push(action as i64);
+                        ir_history.extend_from_slice(&step.state.features);
+                        ps_acts.push(action as i64);
                         state = step.state;
                     };
 
@@ -314,6 +365,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &all_returns,
             &ppo_cfg,
             &device,
+            &worker_ir_mode,
         );
 
         let iter_secs = iter_start.elapsed().as_secs_f32();
