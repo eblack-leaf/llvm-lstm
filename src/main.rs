@@ -182,6 +182,13 @@ enum Commands {
         file: PathBuf,
     },
 
+    /// Plot training metrics from a previous transformer train run
+    PlotTrain {
+        /// Checkpoint directory containing train_metrics.json
+        #[arg(long, default_value = "checkpoints")]
+        checkpoint_dir: PathBuf,
+    },
+
 }
 
 fn main() -> Result<()> {
@@ -411,6 +418,10 @@ fn main() -> Result<()> {
             eprintln!("  Binary size: {} bytes", result.binary_size_bytes);
         }
 
+
+        Commands::PlotTrain { checkpoint_dir } => {
+            plots::plot_train(&checkpoint_dir)?;
+        }
 
         Commands::Features { file } => {
             let features = if file.extension().is_some_and(|e| e == "ll") {

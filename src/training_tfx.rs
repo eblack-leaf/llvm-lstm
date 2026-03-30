@@ -104,6 +104,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
     // Build a name→index map so episode allocation can look up EMAs by function index.
     let fn_index_names: Vec<String> = (0..n_funcs).map(|i| env.function_name(i)).collect();
 
+    // Metrics log: one JSON record per logged iteration, written incrementally.
+    std::fs::create_dir_all(&config.checkpoint_dir).ok();
+    let metrics_path = format!("{}/train_metrics.json", config.checkpoint_dir);
+    let mut metric_records: Vec<serde_json::Value> = Vec::new();
+
     let total_episodes = n_funcs * config.episodes_per_function;
     ep_pb.set_length(total_episodes as u64);
 
@@ -393,6 +398,40 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let g0_max = episode_g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let g0_spread = g0_max - g0_min;
 
+            // ── Save metrics record ───────────────────────────────────────────
+            {
+                let fn_ema_map: serde_json::Map<String, serde_json::Value> = fn_ema.iter()
+                    .map(|(k, &v)| (k.clone(), serde_json::Value::from(v as f64)))
+                    .collect();
+                let fn_vs_o0: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
+                    .map(|(k, &(s0, _, _, n))| (k.clone(), serde_json::Value::from(s0 as f64 / n.max(1) as f64 * 100.0)))
+                    .collect();
+                let fn_vs_o2: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
+                    .map(|(k, &(_, s2, _, n))| (k.clone(), serde_json::Value::from(s2 as f64 / n.max(1) as f64 * 100.0)))
+                    .collect();
+                let fn_vs_o3: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
+                    .map(|(k, &(_, _, s3, n))| (k.clone(), serde_json::Value::from(s3 as f64 / n.max(1) as f64 * 100.0)))
+                    .collect();
+                metric_records.push(serde_json::json!({
+                    "iteration":    iteration,
+                    "ema_mean":     mean_ema as f64,
+                    "policy_loss":  ploss as f64,
+                    "entropy_frac": ent_frac as f64,
+                    "kl":           kl as f64,
+                    "clip_fraction":clip as f64,
+                    "adv_std":      adv_std as f64,
+                    "g0_spread":    g0_spread as f64,
+                    "iter_secs":    iter_secs as f64,
+                    "fn_ema":       fn_ema_map,
+                    "fn_vs_o0":     fn_vs_o0,
+                    "fn_vs_o2":     fn_vs_o2,
+                    "fn_vs_o3":     fn_vs_o3,
+                }));
+                if let Ok(json) = serde_json::to_string_pretty(&metric_records) {
+                    std::fs::write(&metrics_path, json).ok();
+                }
+            }
+
             // Update rolling histories
             fn push(h: &mut Vec<f32>, v: f32, cap: usize) {
                 h.push(v);
@@ -582,6 +621,13 @@ pub fn train(config: TrainConfig) -> Result<()> {
     train_pb.finish_with_message("complete");
     ep_pb.finish_and_clear();
     step_pb.finish_and_clear();
+
+    if std::path::Path::new(&metrics_path).exists() {
+        if let Err(e) = crate::plots::plot_train(std::path::Path::new(&config.checkpoint_dir)) {
+            eprintln!("Warning: plot_train failed: {e}");
+        }
+    }
+
     Ok(())
 }
 
