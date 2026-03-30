@@ -46,6 +46,10 @@ pub struct TrainConfig {
     /// Print training stats every N iterations.
     #[config(default = 1)]
     pub log_interval: usize,
+    /// Dynamically allocate episodes toward unsolved functions (EMA < 0).
+    /// Solved functions get a minimum floor; remaining episodes go to hard ones.
+    #[config(default = false)]
+    pub dynamic_alloc: bool,
 }
 
 pub fn train(config: TrainConfig) -> Result<()> {

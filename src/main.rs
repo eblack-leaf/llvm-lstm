@@ -129,6 +129,9 @@ enum Commands {
         /// Model architecture: gru | transformer
         #[arg(long, default_value = "gru")]
         model: String,
+        /// Allocate more episodes to functions still below O3, fewer to solved ones
+        #[arg(long, default_value = "false")]
+        dynamic_alloc: bool,
     },
 
     /// Evaluate agent against baselines
@@ -226,7 +229,7 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model, dynamic_alloc } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::TrainConfig;
@@ -246,7 +249,8 @@ fn main() -> Result<()> {
             )
             .with_total_iterations(iterations)
             .with_episodes_per_function(episodes)
-            .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef));
+            .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef))
+            .with_dynamic_alloc(dynamic_alloc);
 
             match model.as_str() {
                 "transformer" | "tfx" => training_tfx::train(config)?,
