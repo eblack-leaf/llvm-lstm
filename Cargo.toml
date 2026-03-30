@@ -13,7 +13,7 @@ secondary_passes = []
 # Switch transformer training to the Wgpu GPU backend (Vulkan/Metal/DX12).
 # GRU training remains on CPU NdArray regardless.
 # Usage: cargo build --release --features wgpu
-wgpu = []
+wgpu = ["burn/wgpu"]
 
 [dependencies]
 burn = { version = "0.20.1", features = ["ndarray", "autodiff"] }

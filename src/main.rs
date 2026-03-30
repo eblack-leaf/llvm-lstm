@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod dataset;
 mod eda;
 mod env;
