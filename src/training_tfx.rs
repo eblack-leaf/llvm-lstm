@@ -409,20 +409,22 @@ pub fn train(config: TrainConfig) -> Result<()> {
             if ema_mean_hist.len() >= 5 {
                 let mut flags: Vec<String> = Vec::new();
 
-                // ploss oscillating: high std but modest mean → swinging around 0
+                // ploss stuck positive: baseline too high or policy degrading
                 let ploss_mean = ploss_hist.iter().sum::<f32>() / ploss_hist.len() as f32;
                 let ploss_std  = {
                     let m = ploss_mean;
                     (ploss_hist.iter().map(|x| (x-m).powi(2)).sum::<f32>() / ploss_hist.len() as f32).sqrt()
                 };
-                if ploss_std > 0.06 && ploss_mean.abs() < ploss_std * 1.5 {
-                    flags.push(format!("\x1b[33mploss oscillating (std {ploss_std:.3})\x1b[0m"));
-                } else if ploss_mean > 0.08 {
-                    // more than half of recent values positive
+                if ploss_mean > 0.08 {
                     let pos = ploss_hist.iter().filter(|&&x| x > 0.0).count();
                     if pos > ploss_hist.len() / 2 {
                         flags.push(format!("\x1b[31mploss stuck positive (avg {ploss_mean:+.3}, {pos}/{} iters)\x1b[0m", ploss_hist.len()));
                     }
+                }
+                // ploss oscillating: only flag when mean is near zero (no consistent direction)
+                // negative mean = policy genuinely improving, not a problem
+                if ploss_std > 0.10 && ploss_mean.abs() < 0.05 {
+                    flags.push(format!("\x1b[33mploss no clear direction (avg {ploss_mean:+.3} std {ploss_std:.3})\x1b[0m"));
                 }
 
                 // ema flat or declining over window
