@@ -327,7 +327,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             // applying downweighting to all functions suppresses the gradient everywhere
             // and causes the policy to drift.
             let any_unsolved = fn_ema.values().any(|&e| e < 0.0);
-            let advantage = if any_unsolved {
+            let advantage = if config.adv_weighting && any_unsolved {
                 let ema_val = fn_ema.get(func_name.as_str()).copied().unwrap_or(0.0);
                 let weight  = (1.0 - ema_val.max(0.0) / 0.2).max(0.1);
                 raw_adv * weight

@@ -50,6 +50,10 @@ pub struct TrainConfig {
     /// Solved functions get a minimum floor; remaining episodes go to hard ones.
     #[config(default = false)]
     pub dynamic_alloc: bool,
+    /// Downweight solved functions' advantages when the batch mixes solved/unsolved.
+    /// Disable to use uniform weighting always.
+    #[config(default = true)]
+    pub adv_weighting: bool,
     /// IR featurisation mode for the transformer: "base" | "base+current" | "per-step".
     /// "base": fixed base IR token + action sequence (default).
     /// "base+current": concat(base, current) 68-d IR token at each step + action sequence.

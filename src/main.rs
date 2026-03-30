@@ -136,6 +136,9 @@ enum Commands {
         /// IR featurisation mode (transformer only): base | base+current | per-step
         #[arg(long, default_value = "base")]
         ir_mode: String,
+        /// Downweight solved functions' advantages when batch mixes solved/unsolved
+        #[arg(long, default_value = "true")]
+        adv_weighting: bool,
     },
 
     /// Evaluate agent against baselines
@@ -233,7 +236,7 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model, dynamic_alloc, ir_mode } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model, dynamic_alloc, ir_mode, adv_weighting } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::TrainConfig;
@@ -255,7 +258,8 @@ fn main() -> Result<()> {
             .with_episodes_per_function(episodes)
             .with_ppo(PpoConfig::new().with_entropy_coef(entropy_coef))
             .with_dynamic_alloc(dynamic_alloc)
-            .with_ir_mode(ir_mode);
+            .with_ir_mode(ir_mode)
+            .with_adv_weighting(adv_weighting);
 
             match model.as_str() {
                 "transformer" | "tfx" => training_tfx::train(config)?,
