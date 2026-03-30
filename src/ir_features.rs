@@ -43,6 +43,9 @@ pub struct IrFeatures {
     pub loop_metadata_count: u32,  // llvm.loop refs → loop hints present (vectorise/unroll)
     pub noalias_count: u32,        // noalias attrs → pointer-aliasing provable (LICM/DSE)
     pub phi_ratio: f32,            // phi / bb → SSA density (GVN/instcombine readiness)
+    // Loop structure
+    pub cond_br_count: u32,        // conditional branches (br i1 ...) — control flow density
+    pub max_loop_nest_approx: u32, // approx max loop nesting depth from back-edge positions
 }
 
 impl IrFeatures {
@@ -55,9 +58,10 @@ impl IrFeatures {
     pub fn from_ll_str(content: &str) -> Result<Self> {
         let mut f = IrFeatures::default();
 
-        // Track labels we've seen to detect back-edges
+        // Track labels we've seen to detect back-edges and loop nesting
         let mut _current_label: Option<String> = None;
         let mut label_order: Vec<String> = Vec::new();
+        let mut loop_header_positions: Vec<usize> = Vec::new(); // positions of loop header labels
         let mut in_function = false;
 
         // Whole-file metadata counts — scan before the per-line loop.
@@ -82,6 +86,7 @@ impl IrFeatures {
                 f.basic_block_count += 1; // implicit entry block
                 in_function = true;
                 label_order.clear();
+                loop_header_positions.clear();
                 label_order.push("entry".to_string());
                 _current_label = None;
                 continue;
@@ -115,6 +120,10 @@ impl IrFeatures {
                     let label = before.to_string();
                     label_order.push(label.clone());
                     _current_label = Some(label);
+                    // Nesting depth at this block = number of loop headers at earlier positions
+                    let current_pos = label_order.len() - 1;
+                    let depth = loop_header_positions.iter().filter(|&&p| p < current_pos).count();
+                    f.max_loop_nest_approx = f.max_loop_nest_approx.max(depth as u32);
                     continue;
                 }
             }
@@ -136,7 +145,9 @@ impl IrFeatures {
                     "br" | "switch" | "indirectbr" => {
                         f.br_count += 1;
                         if op == "br" {
-                            detect_back_edge(trimmed, &label_order, &mut f.loop_depth_approx);
+                            // Conditional branch: "br i1 ..."
+                            if trimmed.contains("i1 ") { f.cond_br_count += 1; }
+                            detect_back_edge(trimmed, &label_order, &mut f.loop_depth_approx, &mut loop_header_positions);
                         }
                         if op == "switch" { f.switch_count += 1; }
                     }
@@ -235,6 +246,9 @@ impl IrFeatures {
             ln(self.loop_metadata_count),
             ln(self.noalias_count),
             self.phi_ratio,
+            // Loop structure
+            ln(self.cond_br_count),
+            ln(self.max_loop_nest_approx),
         ]
     }
 
@@ -284,28 +298,29 @@ fn extract_opcode(line: &str) -> Option<&str> {
 }
 
 /// Check if a br instruction branches back to an earlier label (indicating a loop).
-fn detect_back_edge(br_line: &str, label_order: &[String], loop_count: &mut u32) {
-    // Extract branch targets from: br i1 %cond, label %target1, label %target2
-    // or: br label %target
+/// Records the header's position in `loop_header_positions` for nesting depth estimation.
+fn detect_back_edge(
+    br_line: &str,
+    label_order: &[String],
+    loop_count: &mut u32,
+    loop_header_positions: &mut Vec<usize>,
+) {
     for part in br_line.split("label %") {
-        if part == br_line {
-            // No "label %" found
-            continue;
-        }
-        // Extract label name (ends at comma, space, or newline)
+        if part == br_line { continue; }
         let target: String = part
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
             .collect();
 
         if !target.is_empty() {
-            // Check if target appears before current position in label_order
-            // (excluding the last entry which is current block)
             let current_idx = label_order.len().saturating_sub(1);
             for (i, label) in label_order.iter().enumerate() {
                 if i < current_idx && *label == target {
                     *loop_count += 1;
-                    return; // Count each br as at most one back-edge
+                    if !loop_header_positions.contains(&i) {
+                        loop_header_positions.push(i);
+                    }
+                    return;
                 }
             }
         }

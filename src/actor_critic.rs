@@ -7,7 +7,7 @@ use burn::tensor::{Int, Tensor};
 
 #[derive(Config, Debug)]
 pub struct ActorCriticConfig {
-    #[config(default = 32)]
+    #[config(default = 34)]
     pub input_dim: usize,
     #[config(default = 29)]
     pub num_actions: usize,

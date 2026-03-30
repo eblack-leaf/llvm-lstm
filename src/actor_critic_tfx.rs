@@ -7,19 +7,19 @@ use burn::tensor::{Bool, Int, Tensor, TensorData};
 
 #[derive(Config, Debug)]
 pub struct TransformerActorCriticConfig {
-    #[config(default = 32)]
+    #[config(default = 34)]
     pub input_dim: usize,
     #[config(default = 29)]
     pub num_actions: usize,
     /// Token embedding dimension — must be divisible by n_heads.
-    #[config(default = 128)]
+    #[config(default = 256)]
     pub d_model: usize,
-    #[config(default = 4)]
+    #[config(default = 8)]
     pub n_heads: usize,
     #[config(default = 3)]
     pub n_layers: usize,
     /// FFN hidden dim inside each transformer layer.
-    #[config(default = 256)]
+    #[config(default = 512)]
     pub d_ff: usize,
     #[config(default = 0.1)]
     pub dropout: f64,
