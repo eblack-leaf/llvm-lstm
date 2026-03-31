@@ -128,9 +128,9 @@ where
         // Advantages are pre-normalised by build_advantages; re-normalise here
         // to handle any residual mean introduced by the weighting pass.
         let adv      = Tensor::<Bx, 1>::from_data(TensorData::new(advantages.to_vec(), [n]), device);
-        let adv_mean = adv.clone().mean();
-        let adv_std  = (adv.clone() - adv_mean.clone()).powf_scalar(2.0f32).mean().sqrt();
-        let adv      = (adv - adv_mean) / (adv_std + 1e-8);
+        // let adv_mean = adv.clone().mean();
+        // let adv_std  = (adv.clone() - adv_mean.clone()).powf_scalar(2.0f32).mean().sqrt();
+        // let adv      = (adv - adv_mean) / (adv_std + 1e-8);
 
         let log_ratio = log_probs_new - log_probs_old;
         let ratio     = log_ratio.clone().exp();

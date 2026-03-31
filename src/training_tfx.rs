@@ -295,7 +295,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
         step_pb.set_message("computing advantages");
 
         // 1. Compute returns
-        let returns = Returns::compute(&rollouts, &return_mode, config.ppo.gamma);
+        let returns = Returns::compute(&rollouts, &return_mode, if return_mode == ReturnMode::Episode { 1.0 } else { config.ppo.gamma });
         let episode_g0s = returns.g0_per_ep.clone();
 
         // 2. Update fn_stats (EMA + best) and BestEpisodeStore
