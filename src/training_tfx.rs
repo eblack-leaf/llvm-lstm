@@ -361,7 +361,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 ir_features,
             });
         }
-        
+
         // After store.insert loops...
         let adaptive_baseline_mode =
             if config.baseline_mode == "critic" && store.total_count() < config.warmup_threshold {
@@ -370,8 +370,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 &baseline_mode
             };
 
-        // 3. Update critic from store
+        let start = std::time::Instant::now();
         critic.update(&store);
+        let critic_time = start.elapsed().as_secs_f64();
+        train_pb.println(format!("critic update took {critic_time:.1}s"));
 
         // 4. Compute baselines
         let baseline = Baseline::select(
