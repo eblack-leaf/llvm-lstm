@@ -1,8 +1,9 @@
 use burn::config::Config;
-use burn::module::Module;
-use burn::nn::conv::{Conv1d, Conv1dConfig, PaddingConfig1d};
-use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
-use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer as _};
+use burn::module::{AutodiffModule, Module};
+use burn::nn::conv::{Conv1d, Conv1dConfig};
+use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, PaddingConfig1d};
+use burn::optim::optim::adaptor::OptimizerAdaptor;
+use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::activation::relu;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
@@ -13,25 +14,16 @@ use crate::episode_store::BestEpisodeStore;
 
 /// Common interface for all baseline critic architectures.
 ///
-/// A `Critic` scores an action sequence and returns a scalar — this becomes the
-/// per-episode baseline that advantages are subtracted from.  The actor's
-/// gradient path never touches this module.
+/// A `Critic` scores an action sequence and returns a scalar baseline value.
+/// The actor's gradient path never touches this module.
 pub trait Critic: Send {
-    /// Estimate the episode return for a given (function, action-sequence) pair.
     fn score(&self, func: &str, actions: &[usize]) -> f32;
-
-    /// Update the critic from the current `BestEpisodeStore` (one gradient step
-    /// or rule-based update).  Called once per training iteration.
     fn update(&mut self, store: &BestEpisodeStore);
-
-    /// Human-readable name used in logs.
     fn name(&self) -> &str;
 }
 
 // ── NullCritic ────────────────────────────────────────────────────────────────
 
-/// No-op critic — always returns 0.0.  Used as the default when no critic
-/// architecture is configured, or before the store has any data.
 pub struct NullCritic;
 
 impl Critic for NullCritic {
@@ -42,7 +34,6 @@ impl Critic for NullCritic {
 
 // ── PatternCNN burn Module ────────────────────────────────────────────────────
 
-/// Configuration for the inner `PatternCNN` burn module.
 #[derive(Config, Debug)]
 pub struct PatternCnnConfig {
     /// Pass vocabulary size — must match the actor's `num_actions`.
@@ -56,13 +47,12 @@ pub struct PatternCnnConfig {
     pub conv_channels: usize,
 }
 
-/// 1D convolutional network over action sequences.
+/// 1D CNN over action sequences.
 ///
 /// Architecture:
-///   action_ids → embedding [batch, seq, embed] → permute [batch, embed, seq]
-///   → conv3/conv5/conv7 (each → conv_channels channels, same padding)
-///   → global mean-pool each → concat [batch, conv_channels*3]
-///   → FC (ReLU) → value_out (scalar per sequence)
+///   action_ids → embedding [b, seq, embed] → permute [b, embed, seq]
+///   → conv3/conv5/conv7 (same padding) → global mean-pool each
+///   → concat [b, conv_channels*3] → FC (ReLU) → scalar per sequence
 #[derive(Module, Debug)]
 pub struct PatternCNN<B: burn::tensor::backend::Backend> {
     action_embed: Embedding<B>,
@@ -97,52 +87,46 @@ impl PatternCnnConfig {
 }
 
 impl<B: burn::tensor::backend::Backend> PatternCNN<B> {
-    /// Forward pass.
-    ///
-    /// `actions`: `[batch, seq_len]` integer action ids (0-padded for short seqs)
-    /// Returns:   `[batch]` scalar estimates.
+    /// `actions`: `[batch, seq_len]` int tensor  →  `[batch]` scalar estimates.
     pub fn forward(&self, actions: Tensor<B, 2, Int>) -> Tensor<B, 1> {
-        let [batch, seq] = actions.dims();
+        let [batch, _] = actions.dims();
 
-        // Embed → [batch, seq, embed_dim] → [batch, embed_dim, seq] for Conv1d
-        let emb = self.action_embed.forward(actions);                    // [b, s, e]
-        let x   = emb.permute([0, 2, 1]);                                // [b, e, s]
+        // Embed → [b, seq, embed] → permute → [b, embed, seq] for Conv1d
+        let emb = self.action_embed.forward(actions);
+        let x   = emb.permute([0, 2, 1]);
 
-        let c3 = relu(self.conv3.forward(x.clone()));                    // [b, ch, s]
+        let c3 = relu(self.conv3.forward(x.clone())); // [b, ch, seq]
         let c5 = relu(self.conv5.forward(x.clone()));
         let c7 = relu(self.conv7.forward(x));
 
-        // Global mean-pool over sequence dimension
-        let p3 = c3.mean_dim(2).reshape([batch, self.conv3.weight.dims()[0]]);
-        let p5 = c5.mean_dim(2).reshape([batch, self.conv5.weight.dims()[0]]);
-        let p7 = c7.mean_dim(2).reshape([batch, self.conv7.weight.dims()[0]]);
+        // Global mean-pool over sequence; extract channel count from tensor shape.
+        let [_, ch3, _] = c3.dims();
+        let [_, ch5, _] = c5.dims();
+        let [_, ch7, _] = c7.dims();
+        let p3 = c3.mean_dim(2).reshape([batch, ch3]);
+        let p5 = c5.mean_dim(2).reshape([batch, ch5]);
+        let p7 = c7.mean_dim(2).reshape([batch, ch7]);
 
-        let pooled = Tensor::cat(vec![p3, p5, p7], 1);                  // [b, ch*3]
-        let h      = relu(self.fc.forward(pooled));                      // [b, hidden]
-        self.value_out.forward(h).reshape([batch])                       // [b]
+        let pooled = Tensor::cat(vec![p3, p5, p7], 1);
+        let h      = relu(self.fc.forward(pooled));
+        self.value_out.forward(h).reshape([batch])
     }
 }
 
 // ── PatternCnnCritic ──────────────────────────────────────────────────────────
 
-/// Critic backed by a `PatternCNN` trained via MSE on `BestEpisodeStore` episodes.
-///
-/// Internally holds both the autodiff model and its Adam optimizer so that
-/// `update()` can do a self-contained gradient step without exposing generics
-/// through the `Critic` trait boundary.
 pub struct PatternCnnCritic<B: AutodiffBackend> {
     model:  Option<PatternCNN<B>>,
-    optim:  Adam<B>,
+    optim:  OptimizerAdaptor<Adam, PatternCNN<B>, B>,
     device: B::Device,
     lr:     f64,
-    config: PatternCnnConfig,
 }
 
 impl<B: AutodiffBackend> PatternCnnCritic<B> {
     pub fn new(config: PatternCnnConfig, lr: f64, device: B::Device) -> Self {
         let model = config.init::<B>(&device);
-        let optim = AdamConfig::new().init();
-        Self { model: Some(model), optim, device, lr, config }
+        let optim = AdamConfig::new().init::<B, PatternCNN<B>>();
+        Self { model: Some(model), optim, device, lr }
     }
 }
 
@@ -151,21 +135,15 @@ where
     B::Device: Clone,
 {
     fn score(&self, _func: &str, actions: &[usize]) -> f32 {
-        use burn::module::AutodiffModule;
+        if actions.is_empty() { return 0.0; }
 
-        if actions.is_empty() {
-            return 0.0;
-        }
-
-        let model_inf = self.model.as_ref().unwrap().valid();
-
+        let model_inf  = self.model.as_ref().unwrap().valid();
         let action_ids: Vec<i64> = actions.iter().map(|&a| a as i64).collect();
-        let seq = action_ids.len();
-        let actions_t = Tensor::<B::InnerBackend, 2, Int>::from_data(
+        let seq        = action_ids.len();
+        let actions_t  = Tensor::<B::InnerBackend, 2, Int>::from_data(
             TensorData::new(action_ids, [1, seq]),
             &self.device,
         );
-
         model_inf.forward(actions_t)
             .into_data()
             .to_vec::<f32>()
@@ -176,21 +154,16 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) {
-        // Collect (actions, g0) from all functions in the store.
         let all_episodes: Vec<(&Vec<usize>, f32)> = store
-            .store
-            .values()
-            .flat_map(|eps| eps.iter().map(|e| (&e.actions, e.g0)))
+            .iter_funcs()
+            .flat_map(|(_, eps)| eps.iter().map(|e| (&e.actions, e.g0)))
             .collect();
 
-        if all_episodes.is_empty() {
-            return;
-        }
+        if all_episodes.is_empty() { return; }
 
         let max_len = all_episodes.iter().map(|(a, _)| a.len()).max().unwrap_or(1);
         let batch   = all_episodes.len();
 
-        // Pad action sequences with 0 (stop action) to max_len.
         let mut action_buf = vec![0i64; batch * max_len];
         let mut target_buf = vec![0.0f32; batch];
 
@@ -210,11 +183,11 @@ where
             &self.device,
         );
 
-        let model = self.model.take().unwrap();
-        let predicted = model.forward(actions_t);
-        let loss      = (predicted - targets_t).powf_scalar(2.0f32).mean();
+        let model       = self.model.take().unwrap();
+        let predicted   = model.forward(actions_t);
+        let loss        = (predicted - targets_t).powf_scalar(2.0f32).mean();
 
-        let grads      = loss.backward();
+        let grads       = loss.backward();
         let grad_params = GradientsParams::from_grads(grads, &model);
         let model       = self.optim.step(self.lr, model, grad_params);
         self.model      = Some(model);

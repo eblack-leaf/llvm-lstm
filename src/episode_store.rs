@@ -16,7 +16,7 @@ pub struct Episode {
 pub struct BestEpisodeStore {
     /// Maximum allowed gap below the best g0; episodes outside are pruned.
     pub prune_threshold: f32,
-    store: HashMap<String, Vec<Episode>>,
+    pub(crate) store: HashMap<String, Vec<Episode>>,
 }
 
 impl BestEpisodeStore {

@@ -6,13 +6,13 @@ use rayon::prelude::*;
 use anyhow::Result;
 use burn::backend::Autodiff;
 
+#[cfg(feature = "wgpu")]
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
 // ── Backend selection ─────────────────────────────────────────────────────────
 // Default: NdArray (CPU).  GPU: add `wgpu` to burn features in Cargo.toml and
 // recompile.  No code changes needed — the type aliases below wire it through.
 #[cfg(not(feature = "wgpu"))]
-use burn::backend::{NdArray, ndarray::NdArrayDevice};
-#[cfg(feature = "wgpu")]
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
+use burn::backend::{ndarray::NdArrayDevice, NdArray};
 
 #[cfg(not(feature = "wgpu"))]
 type Inner = NdArray;
@@ -26,7 +26,6 @@ type Dev = WgpuDevice;
 use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
 use burn::optim::AdamConfig;
-use burn::prelude::ElementConversion;
 use burn::prelude::Module as _;
 use burn::record::CompactRecorder;
 use burn::tensor::{Int, Tensor, TensorData};
@@ -34,8 +33,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
-use crate::baseline::{BaselineMode, Baseline, FnStats, build_advantages, broadcast_to_steps};
-use crate::critic::{Critic, NullCritic, PatternCnnCritic, PatternCnnConfig};
+use crate::baseline::{broadcast_to_steps, build_advantages, Baseline, BaselineMode, FnStats};
+use crate::critic::{Critic, NullCritic, PatternCnnConfig, PatternCnnCritic};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
@@ -324,7 +323,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // 6. Build normalised advantages
         let all_advantages = build_advantages(&returns.values, &baseline.values, &step_weights);
-        let all_returns    = returns.values.clone();
 
         let combined = Rollout::merge(&rollouts);
 
@@ -444,13 +442,12 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
             // ── Line 2: update diagnostics ────────────────────────────────
             // kl>0.15 = epoch skipped. clip>30% = steps too large. ent<35% = collapsing.
-            // ev: how well V(s_t) predicts per-step returns. <0 = worse than mean baseline.
-            let ev_c = if ev > 0.5 { "\x1b[32m" } else if ev > 0.0 { "\x1b[33m" } else { "\x1b[31m" };
             train_pb.println(format!(
-                "         update  kl {}{kl:.4}\x1b[0m  clip {}{:.1}%\x1b[0m  ent {}{:.1}%\x1b[0m  ev {ev_c}{ev:+.3}\x1b[0m",
+                "         update  kl {}{kl:.4}\x1b[0m  clip {}{:.1}%\x1b[0m  ent {}{:.1}%\x1b[0m  critic={}",
                 cr(kl,   0.05, 0.15),
                 cr(clip, 0.3,  0.5),  clip * 100.0,
                 c(ent_frac, 0.35, 0.55), ent_frac * 100.0,
+                critic.name(),
             ));
 
             // ── Line 3: signal diagnostics ────────────────────────────────

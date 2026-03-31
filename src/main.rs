@@ -102,7 +102,7 @@ enum Commands {
     /// Train the actor-critic PPO agent
     Train {
         /// Directory containing benchmark .c files
-        #[arg(long, default_value = "benchmarks")]
+        #[arg(long, default_value = "sample-benchmarks")]
         functions: PathBuf,
         /// Working directory for compiled IR and binaries
         #[arg(long, default_value = "work")]
@@ -114,7 +114,7 @@ enum Commands {
         #[arg(long, default_value = "1000")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "4")]
+        #[arg(long, default_value = "16")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.005")]
@@ -129,10 +129,10 @@ enum Commands {
         #[arg(long, default_value = "40")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step | instruction-proxy
-        #[arg(long, default_value = "instruction-proxy")]
+        #[arg(long, default_value = "sparse")]
         reward_mode: String,
         /// Model architecture: gru | transformer
-        #[arg(long, default_value = "gru")]
+        #[arg(long, default_value = "transformer")]
         model: String,
         /// Allocate more episodes to functions still below O3, fewer to solved ones
         #[arg(long, default_value = "false")]
@@ -141,16 +141,16 @@ enum Commands {
         #[arg(long, default_value = "base")]
         ir_mode: String,
         /// Downweight solved functions' advantages when batch mixes solved/unsolved
-        #[arg(long, default_value = "true")]
+        #[arg(long, default_value = "false")]
         adv_weighting: bool,
         /// Return computation mode: episode | per-step
         #[arg(long, default_value = "episode")]
         return_mode: String,
         /// Baseline mode: intra-batch | best | critic
-        #[arg(long, default_value = "best")]
+        #[arg(long, default_value = "critic")]
         baseline_mode: String,
         /// Critic architecture: null | pattern-cnn
-        #[arg(long, default_value = "null")]
+        #[arg(long, default_value = "pattern-cnn")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.3")]
