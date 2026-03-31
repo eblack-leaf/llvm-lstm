@@ -119,13 +119,13 @@ enum Commands {
         #[arg(long, default_value = "0.005")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "1")]
         benchmark_runs: usize,
         /// Internal timing iterations inside each benchmark binary
         #[arg(long, default_value = "51")]
         bench_iters: usize,
         /// Max pass sequence length per episode
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "100")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
@@ -149,10 +149,10 @@ enum Commands {
         #[arg(long, default_value = "hybrid")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
-        #[arg(long, default_value = "0.3")]
+        #[arg(long, default_value = "0.1")]
         prune_threshold: f32,
         /// Hard cap on episodes kept per function in store (best-first)
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "128")]
         store_max_per_func: usize,
     },
 
