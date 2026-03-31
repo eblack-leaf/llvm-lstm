@@ -203,7 +203,10 @@ where
         // 1. Collect all episodes as (actions, ir_features, g0)
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
+            .flat_map(|(_, eps)| {
+                eps.iter()
+                    .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
+            })
             .collect();
 
         if episodes.is_empty() {
@@ -236,7 +239,8 @@ where
                         action_buf[i * max_len + t] = a as i64;
                     }
                     let src_len = ir.len().min(self.ir_dim);
-                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len].copy_from_slice(&ir[..src_len]);
+                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len]
+                        .copy_from_slice(&ir[..src_len]);
                     target_buf[i] = *g0;
                 }
 
@@ -249,10 +253,8 @@ where
                     TensorData::new(ir_buf, [batch, self.ir_dim]),
                     &device,
                 );
-                let targets_t = Tensor::<B, 1>::from_data(
-                    TensorData::new(target_buf, [batch]),
-                    &device,
-                );
+                let targets_t =
+                    Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &device);
 
                 let model = self.model.take().unwrap();
                 let predicted = model.forward(actions_t, ir_t);
@@ -324,39 +326,6 @@ pub fn retrieval_score(store: &BestEpisodeStore, func: &str, actions: &[usize]) 
         sims.iter().map(|&(_, g)| g).sum::<f32>() / sims.len() as f32
     } else {
         sims.iter().map(|&(s, g)| s * g).sum::<f32>() / weight_sum
-    }
-}
-
-// ── HybridCritic ─────────────────────────────────────────────────────────────
-
-pub struct HybridCritic<B: AutodiffBackend> {
-    film: IrFilmCritic<B>,
-    nn_threshold: usize,
-}
-
-impl<B: AutodiffBackend> HybridCritic<B> {
-    pub fn new(config: IrFilmCnnConfig, lr: f64, device: B::Device, nn_threshold: usize) -> Self {
-        Self {
-            film: IrFilmCritic::new(config, lr, device),
-            nn_threshold,
-        }
-    }
-}
-
-impl<B: AutodiffBackend + 'static> Critic for HybridCritic<B>
-where
-    B::Device: Clone,
-{
-    fn score(&self, func: &str, actions: &[usize], ir_features: &[f32]) -> f32 {
-        self.film.score(func, actions, ir_features)
-    }
-    fn update(&mut self, store: &BestEpisodeStore) {
-        if store.total_count() >= self.nn_threshold {
-            self.film.update(store);
-        }
-    }
-    fn name(&self) -> &str {
-        "hybrid"
     }
 }
 

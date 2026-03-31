@@ -1,6 +1,8 @@
 // File: src/tfx_critic.rs (or inside critic.rs)
 use burn::module::Module;
-use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::optim::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
@@ -8,23 +10,19 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use crate::actor_critic_tfx::TransformerActorCriticConfig;
-use crate::episode_store::BestEpisodeStore;
 use crate::critic::Critic;
+use crate::episode_store::BestEpisodeStore;
 
 /// Transformer-based critic: uses the same encoder as the actor but without a policy head.
 pub struct TransformerCritic<B: AutodiffBackend> {
     model: Option<TransformerCriticModel<B>>,
     optim: OptimizerAdaptor<Adam, TransformerCriticModel<B>, B>,
     lr: f64,
-    ir_dim: usize,          // IR feature dimension (34 or 68)
+    ir_dim: usize, // IR feature dimension (34 or 68)
 }
 
 impl<B: AutodiffBackend> TransformerCritic<B> {
-    pub fn new(
-        actor_config: TransformerActorCriticConfig,
-        lr: f64,
-        device: &B::Device,
-    ) -> Self {
+    pub fn new(actor_config: TransformerActorCriticConfig, lr: f64, device: &B::Device) -> Self {
         let model = TransformerCriticModel::new(actor_config.clone(), device);
         let optim = AdamConfig::new().init::<B, TransformerCriticModel<B>>();
         Self {
@@ -54,12 +52,13 @@ impl<B: burn::tensor::backend::Backend> TransformerCriticModel<B> {
             config.n_heads,
             config.n_layers,
         )
-            .with_dropout(config.dropout)
-            .init(device);
+        .with_dropout(config.dropout)
+        .init(device);
 
         Self {
             ir_proj: LinearConfig::new(config.input_dim, config.d_model).init(device),
-            action_embed: EmbeddingConfig::new(config.num_actions, config.action_embed_dim).init(device),
+            action_embed: EmbeddingConfig::new(config.num_actions, config.action_embed_dim)
+                .init(device),
             action_proj: LinearConfig::new(config.action_embed_dim, config.d_model).init(device),
             pos_embed: EmbeddingConfig::new(config.max_seq_len, config.d_model).init(device),
             encoder,
@@ -75,24 +74,24 @@ impl<B: burn::tensor::backend::Backend> TransformerCriticModel<B> {
         let ir_token = self.ir_proj.forward(ir_features).unsqueeze_dim::<3>(1); // [b,1,d]
 
         // Action embeddings
-        let act_emb = self.action_embed.forward(actions);                       // [b,seq,ae]
-        let act_tok = self.action_proj.forward(act_emb);                        // [b,seq,d]
+        let act_emb = self.action_embed.forward(actions); // [b,seq,ae]
+        let act_tok = self.action_proj.forward(act_emb); // [b,seq,d]
 
-        let tokens = Tensor::cat(vec![ir_token, act_tok], 1);                   // [b,1+seq,d]
+        let tokens = Tensor::cat(vec![ir_token, act_tok], 1); // [b,1+seq,d]
 
         // Positional embeddings for length 1+seq
-        let pos_ids = Tensor::<B, 1, Int>::arange(0..(seq_len + 1) as i64, &device)
-            .unsqueeze::<2>();                                                  // [1,1+seq]
-        let pos_emb = self.pos_embed.forward(pos_ids);                          // [1,1+seq,d]
+        let pos_ids =
+            Tensor::<B, 1, Int>::arange(0..(seq_len + 1) as i64, &device).unsqueeze::<2>(); // [1,1+seq]
+        let pos_emb = self.pos_embed.forward(pos_ids); // [1,1+seq,d]
         let tokens = tokens + pos_emb;
 
         // Bidirectional attention (no mask)
-        let out = self.encoder.forward(TransformerEncoderInput::new(tokens));   // [b,1+seq,d]
+        let out = self.encoder.forward(TransformerEncoderInput::new(tokens)); // [b,1+seq,d]
 
         // Take the last token (the final action) as the representation
         let d = out.dims()[2];
-        let last = out.slice([0..batch, seq_len..seq_len+1, 0..d]);             // [b,1,d]
-        let value = self.value_head.forward(last).reshape([batch]);             // [b]
+        let last = out.slice([0..batch, seq_len..seq_len + 1, 0..d]); // [b,1,d]
+        let value = self.value_head.forward(last).reshape([batch]); // [b]
         value
     }
 }
@@ -102,7 +101,9 @@ where
     B::Device: Clone,
 {
     fn score(&self, _func: &str, actions: &[usize], ir_features: &[f32]) -> f32 {
-        if actions.is_empty() { return 0.0; }
+        if actions.is_empty() {
+            return 0.0;
+        }
         let model = self.model.as_ref().unwrap();
         let device = model.ir_proj.weight.device();
 
@@ -111,14 +112,15 @@ where
         ir.resize(self.ir_dim, 0.0);
 
         let actions_t = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(actions.iter().map(|&a| a as i64).collect::<Vec<_>>(), [1, seq_len]),
+            TensorData::new(
+                actions.iter().map(|&a| a as i64).collect::<Vec<_>>(),
+                [1, seq_len],
+            ),
             &device,
         );
-        let ir_t = Tensor::<B, 2>::from_data(
-            TensorData::new(ir, [1, self.ir_dim]),
-            &device,
-        );
-        model.forward(actions_t, ir_t)
+        let ir_t = Tensor::<B, 2>::from_data(TensorData::new(ir, [1, self.ir_dim]), &device);
+        model
+            .forward(actions_t, ir_t)
             .into_data()
             .to_vec::<f32>()
             .unwrap_or_default()
@@ -131,7 +133,10 @@ where
         // 1. Collect all episodes
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
+            .flat_map(|(_, eps)| {
+                eps.iter()
+                    .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
+            })
             .collect();
 
         if episodes.is_empty() {
@@ -139,8 +144,8 @@ where
         }
 
         let max_len = episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
-        let batch_size = 64;    // tune as needed
-        let epochs = 3;         // number of passes over the store per iteration
+        let batch_size = 64; // tune as needed
+        let epochs = 3; // number of passes over the store per iteration
 
         for _ in 0..epochs {
             // Shuffle episodes
@@ -160,7 +165,8 @@ where
                         action_buf[i * max_len + t] = a as i64;
                     }
                     let src_len = ir.len().min(self.ir_dim);
-                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len].copy_from_slice(&ir[..src_len]);
+                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len]
+                        .copy_from_slice(&ir[..src_len]);
                     target_buf[i] = *g0;
                 }
 
@@ -173,10 +179,8 @@ where
                     TensorData::new(ir_buf, [batch, self.ir_dim]),
                     &device,
                 );
-                let targets_t = Tensor::<B, 1>::from_data(
-                    TensorData::new(target_buf, [batch]),
-                    &device,
-                );
+                let targets_t =
+                    Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &device);
 
                 let model = self.model.take().unwrap();
                 let predicted = model.forward(actions_t, ir_t);

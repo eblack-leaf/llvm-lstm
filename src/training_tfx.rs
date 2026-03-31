@@ -35,7 +35,7 @@ use rand::Rng;
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
 use crate::baseline::{Baseline, BaselineMode, FnStats, broadcast_to_steps, build_advantages};
 use crate::critic::{
-    Critic, HybridCritic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic,
+    Critic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic,
 };
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::episode_store::{BestEpisodeStore, Episode};
@@ -117,12 +117,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
             film_cfg(),
             config.ppo.learning_rate,
             device.clone(),
-        )),
-        "hybrid" => Box::new(HybridCritic::<B>::new(
-            film_cfg(),
-            config.ppo.learning_rate,
-            device.clone(),
-            50,
         )),
         "per-func" => Box::new(PerFuncCritic::<B>::new(
             film_cfg(),
@@ -367,6 +361,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 ir_features,
             });
         }
+        
+        // After store.insert loops...
+        let adaptive_baseline_mode =
+            if config.baseline_mode == "critic" && store.total_count() < config.warmup_threshold {
+                &BaselineMode::Retrieval
+            } else {
+                &baseline_mode
+            };
 
         // 3. Update critic from store
         critic.update(&store);
@@ -376,7 +378,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &rollout_funcs,
             &rollouts,
             &returns,
-            &baseline_mode,
+            adaptive_baseline_mode,
             &fn_stats,
             critic.as_ref(),
             &store,

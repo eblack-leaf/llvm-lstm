@@ -61,4 +61,6 @@ pub struct TrainConfig {
     /// Hard cap on episodes kept per function (best-first after threshold pruning).
     #[config(default = 32)]
     pub store_max_per_func: usize,
+    #[config(default = 500)]
+    pub warmup_threshold: usize,
 }

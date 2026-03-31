@@ -14,9 +14,9 @@ mod plots;
 mod ppo;
 mod returns;
 mod rollout;
+mod tfx_critic;
 mod training;
 mod training_tfx;
-mod tfx_critic;
 
 use std::path::PathBuf;
 
@@ -111,7 +111,7 @@ enum Commands {
         #[arg(long, default_value = "checkpoints")]
         checkpoint_dir: String,
         /// Total number of collect+update iterations
-        #[arg(long, default_value = "200")]
+        #[arg(long, default_value = "300")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
         #[arg(long, default_value = "32")]
@@ -146,15 +146,18 @@ enum Commands {
         /// Baseline mode: intra-batch | best | critic | retrieval
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
-        /// Critic architecture: null | pattern-cnn | ir-film | hybrid | per-func | transformer
+        /// Critic architecture: null | pattern-cnn | ir-film | per-func | transformer
         #[arg(long, default_value = "transformer")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
-        #[arg(long, default_value = "0.2")]
+        #[arg(long, default_value = "0.15")]
         prune_threshold: f32,
         /// Hard cap on episodes kept per function in store (best-first)
-        #[arg(long, default_value = "256")]
+        #[arg(long, default_value = "128")]
         store_max_per_func: usize,
+        /// How big the store needs to be before switching to critic scoring
+        #[arg(long, default_value = "500")]
+        warmup_threshold: usize,
     },
 
     /// Evaluate agent against baselines
@@ -292,6 +295,7 @@ fn main() -> Result<()> {
             critic_arch,
             prune_threshold,
             store_max_per_func,
+            warmup_threshold,
         } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
@@ -319,7 +323,8 @@ fn main() -> Result<()> {
             .with_baseline_mode(baseline_mode)
             .with_critic_arch(critic_arch)
             .with_prune_threshold(prune_threshold)
-            .with_store_max_per_func(store_max_per_func);
+            .with_store_max_per_func(store_max_per_func)
+            .with_warmup_threshold(warmup_threshold);
 
             training_tfx::train(config)?;
         }
