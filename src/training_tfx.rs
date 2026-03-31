@@ -34,7 +34,7 @@ use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
 use crate::baseline::{broadcast_to_steps, build_advantages, Baseline, BaselineMode, FnStats};
-use crate::critic::{Critic, NullCritic, PatternCnnConfig, PatternCnnCritic};
+use crate::critic::{Critic, HybridCritic, IrFilmCnnConfig, IrFilmCritic, NullCritic};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
@@ -94,11 +94,20 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let mut store         = BestEpisodeStore::new(config.prune_threshold);
     let mut best_mean_ema: f32 = 0.0;
 
+    let num_actions = TransformerActorCriticConfig::new().num_actions;
+    let ir_dim      = if config.ir_mode == "base+current" { 68 } else { 34 };
+
     let mut critic: Box<dyn Critic> = match config.critic_arch.as_str() {
-        "pattern-cnn" => Box::new(PatternCnnCritic::<B>::new(
-            PatternCnnConfig::new(TransformerActorCriticConfig::new().num_actions),
+        "ir-film" => Box::new(IrFilmCritic::<B>::new(
+            IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim),
             config.ppo.learning_rate,
             device.clone(),
+        )),
+        "hybrid" => Box::new(HybridCritic::<B>::new(
+            IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim),
+            config.ppo.learning_rate,
+            device.clone(),
+            50, // switch to CNN after 50 stored episodes
         )),
         _ => Box::new(NullCritic),
     };
@@ -290,10 +299,13 @@ pub fn train(config: TrainConfig) -> Result<()> {
         for (ep_idx, (func, rollout)) in rollout_funcs.iter().zip(rollouts.iter()).enumerate() {
             let g0 = returns.g0_per_ep[ep_idx];
             fn_stats.update(func, g0);
+            // Step 0 state = base IR features for this episode
+            let ir_features = rollout.states.first().cloned().unwrap_or_default();
             store.insert(Episode {
                 func:    func.clone(),
                 actions: rollout.actions.clone(),
                 g0,
+                ir_features,
             });
         }
 
@@ -308,6 +320,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             &baseline_mode,
             &fn_stats,
             critic.as_ref(),
+            &store,
         );
 
         // 5. Per-episode advantage weights (downweight solved functions)

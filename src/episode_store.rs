@@ -5,6 +5,8 @@ pub struct Episode {
     pub func: String,
     pub actions: Vec<usize>,
     pub g0: f32,
+    /// Base IR feature vector at episode start (34-d or 68-d depending on ir_mode).
+    pub ir_features: Vec<f32>,
 }
 
 /// Per-function episode memory with threshold-based pruning.

@@ -16,9 +16,6 @@ pub enum RewardMode {
     Sparse,
     /// Reward at each step: incremental improvement (expensive — benchmarks every step)
     PerStep,
-    /// Per-step proxy from instruction count reduction + full benchmark at terminal.
-    /// Free: total_instruction_count is already extracted each step anyway.
-    InstructionProxy,
 }
 
 #[derive(Config, Debug)]
@@ -97,10 +94,6 @@ pub struct LlvmEnv {
     current_opt_ir: Option<PathBuf>,
     current_passes: Vec<Pass>,
     previous_time_ns: Option<u64>,
-    /// Instruction count at episode start — denominator for InstructionProxy reward.
-    base_inst_count: Option<u32>,
-    /// Instruction count after the previous step — numerator delta for InstructionProxy.
-    previous_inst_count: Option<u32>,
     config: EnvConfig,
     /// Shared directory for caching IR by pass sequence. None = no caching.
     ir_cache_dir: Option<PathBuf>,
@@ -125,8 +118,6 @@ impl LlvmEnv {
             current_opt_ir: None,
             current_passes: Vec::new(),
             previous_time_ns: None,
-            base_inst_count: None,
-            previous_inst_count: None,
             config,
             ir_cache_dir: None,
         })
@@ -150,8 +141,6 @@ impl LlvmEnv {
             current_opt_ir: None,
             current_passes: Vec::new(),
             previous_time_ns: None,
-            base_inst_count: None,
-            previous_inst_count: None,
             config,
             ir_cache_dir: None,
         })
@@ -225,14 +214,11 @@ impl LlvmEnv {
         let base_ir = self.pipeline.emit_ir(&func)?;
         let features = IrFeatures::from_ll_file(&base_ir)?;
 
-        let base_insts = features.total_instruction_count;
         self.current_function = Some(func);
         self.current_base_ir = Some(base_ir.clone());
         self.current_opt_ir = Some(base_ir);
         self.current_passes.clear();
         self.previous_time_ns = None;
-        self.base_inst_count = Some(base_insts);
-        self.previous_inst_count = Some(base_insts);
 
         Ok(State {
             features: features.to_vec(),
@@ -311,19 +297,10 @@ impl LlvmEnv {
                     self.previous_time_ns = Some(result.median_ns);
                     (reward, Some(result.median_ns), Some(result.binary_size_bytes), None)
                 }
-                RewardMode::InstructionProxy => {
-                    const PROXY_SCALE: f32 = 0.2;
-                    let curr = features.total_instruction_count;
-                    let prev = self.previous_inst_count.unwrap_or(curr);
-                    let base = self.base_inst_count.unwrap_or(prev.max(1));
-                    let reward = (prev as f32 - curr as f32) / base.max(1) as f32 * PROXY_SCALE;
-                    (reward, None, None, None)
-                }
             }
         };
 
         self.current_opt_ir = Some(opt_ir);
-        self.previous_inst_count = Some(features.total_instruction_count);
 
         Ok(StepResult {
             state: State {

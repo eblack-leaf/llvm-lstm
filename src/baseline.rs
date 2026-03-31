@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::critic::Critic;
+use crate::critic::{retrieval_score, Critic};
+use crate::episode_store::BestEpisodeStore;
 use crate::returns::Returns;
 use crate::rollout::Rollout;
 
@@ -14,6 +15,9 @@ pub enum BaselineMode {
     Best,
     /// Ask the Critic module for a learned baseline estimate.
     Critic,
+    /// Non-parametric k-NN lookup: Jaccard similarity on action sets,
+    /// weighted average of top-k G0 values from BestEpisodeStore.
+    Retrieval,
 }
 
 impl BaselineMode {
@@ -21,6 +25,7 @@ impl BaselineMode {
         match s {
             "intra-batch" => BaselineMode::IntraBatch,
             "critic"      => BaselineMode::Critic,
+            "retrieval"   => BaselineMode::Retrieval,
             _             => BaselineMode::Best,
         }
     }
@@ -66,14 +71,15 @@ impl Baseline {
     /// Compute baselines for all (function, rollout) pairs.
     ///
     /// The baseline is the same scalar for every step in an episode (episode-level
-    /// subtraction).  Critic mode calls `critic.score()` once per episode.
+    /// subtraction).  Critic and Retrieval modes call their scorer once per episode.
     pub fn select(
         rollout_funcs: &[String],
-        rollouts: &[Rollout],
-        returns: &Returns,
-        mode: &BaselineMode,
-        fn_stats: &FnStats,
-        critic: &dyn Critic,
+        rollouts:      &[Rollout],
+        returns:       &Returns,
+        mode:          &BaselineMode,
+        fn_stats:      &FnStats,
+        critic:        &dyn Critic,
+        store:         &BestEpisodeStore,
     ) -> Self {
         let intra_mean = if returns.g0_per_ep.is_empty() {
             0.0
@@ -84,10 +90,14 @@ impl Baseline {
         let mut values = Vec::new();
 
         for (func, rollout) in rollout_funcs.iter().zip(rollouts.iter()) {
+            // Use step 0's features as the IR feature vector for this episode.
+            let ir_feats = rollout.states.first().map(|s| s.as_slice()).unwrap_or(&[]);
+
             let ep_baseline = match mode {
                 BaselineMode::IntraBatch => intra_mean,
                 BaselineMode::Best       => fn_stats.best(func).unwrap_or(0.0),
-                BaselineMode::Critic     => critic.score(func, &rollout.actions),
+                BaselineMode::Critic     => critic.score(func, &rollout.actions, ir_feats),
+                BaselineMode::Retrieval  => retrieval_score(store, func, &rollout.actions),
             };
             for _ in 0..rollout.len() {
                 values.push(ep_baseline);

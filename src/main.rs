@@ -7,7 +7,6 @@ mod env;
 mod episode_store;
 mod evaluation;
 mod ir_features;
-mod actor_critic;
 mod actor_critic_tfx;
 mod pass_menu;
 mod pipeline;
@@ -128,16 +127,13 @@ enum Commands {
         /// Max pass sequence length per episode
         #[arg(long, default_value = "40")]
         max_seq_length: usize,
-        /// Reward mode: sparse | per-step | instruction-proxy
+        /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
         reward_mode: String,
-        /// Model architecture: gru | transformer
-        #[arg(long, default_value = "transformer")]
-        model: String,
         /// Allocate more episodes to functions still below O3, fewer to solved ones
         #[arg(long, default_value = "false")]
         dynamic_alloc: bool,
-        /// IR featurisation mode (transformer only): base | base+current | per-step
+        /// IR featurisation mode: base | base+current
         #[arg(long, default_value = "base")]
         ir_mode: String,
         /// Downweight solved functions' advantages when batch mixes solved/unsolved
@@ -146,10 +142,10 @@ enum Commands {
         /// Return computation mode: episode | per-step
         #[arg(long, default_value = "episode")]
         return_mode: String,
-        /// Baseline mode: intra-batch | best | critic
+        /// Baseline mode: intra-batch | best | critic | retrieval
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
-        /// Critic architecture: null | pattern-cnn
+        /// Critic architecture: null | pattern-cnn | ir-film | hybrid
         #[arg(long, default_value = "pattern-cnn")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
@@ -259,15 +255,14 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, model, dynamic_alloc, ir_mode, adv_weighting, return_mode, baseline_mode, critic_arch, prune_threshold } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, dynamic_alloc, ir_mode, adv_weighting, return_mode, baseline_mode, critic_arch, prune_threshold } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::TrainConfig;
 
             let mode = match reward_mode.as_str() {
-                "per-step"           => RewardMode::PerStep,
-                "instruction-proxy"  => RewardMode::InstructionProxy,
-                _                    => RewardMode::Sparse,
+                "per-step" => RewardMode::PerStep,
+                _          => RewardMode::Sparse,
             };
 
             let config = TrainConfig::new(
@@ -288,10 +283,7 @@ fn main() -> Result<()> {
             .with_critic_arch(critic_arch)
             .with_prune_threshold(prune_threshold);
 
-            match model.as_str() {
-                "transformer" | "tfx" => training_tfx::train(config)?,
-                _                     => training::train(config)?,
-            }
+            training_tfx::train(config)?;
         }
 
         Commands::Evaluate {
@@ -310,12 +302,12 @@ fn main() -> Result<()> {
                 use burn::tensor::{Int, Tensor, TensorData};
                 use evaluation::EvalResult;
                 use env::{EnvConfig, LlvmEnv, RewardMode};
-                use actor_critic::{ActorCritic, ActorCriticConfig};
+                use actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
                 use burn::prelude::Module as _;
 
                 eprintln!("Loading model from {}...", model_path.display());
                 let device = NdArrayDevice::default();
-                let model: ActorCritic<NdArray> = ActorCriticConfig::new()
+                let model: TransformerActorCritic<NdArray> = TransformerActorCriticConfig::new()
                     .init::<NdArray>(&device)
                     .load_file(&model_path, &CompactRecorder::new(), &device)?;
 
@@ -331,28 +323,29 @@ fn main() -> Result<()> {
 
                 let mut results: Vec<EvalResult> = Vec::new();
                 for func_idx in 0..env.num_functions() {
-                    let mut state = env.reset_to(func_idx)?;
-                    let func_name = env.current_function_name().unwrap_or_else(|| "?".into());
+                    let state       = env.reset_to(func_idx)?;
+                    let func_name   = env.current_function_name().unwrap_or_else(|| "?".into());
                     eprintln!("  inference: {func_name}");
 
-                    let mut hidden: Option<Tensor<NdArray, 2>> = None;
-                    let mut prev_action: i64 = 0;
+                    let feat_dim   = state.features.len();
+                    let base_feats = state.features.clone();
+                    let mut act_history: Vec<i64> = vec![0i64];
                     let mut passes: Vec<Pass> = Vec::new();
 
                     let (time_ns, size_bytes) = loop {
-                        let feat = Tensor::<NdArray, 2>::from_data(
-                            TensorData::new(state.features.clone(), [1, state.features.len()]),
+                        let base_t = Tensor::<NdArray, 2>::from_data(
+                            TensorData::new(base_feats.clone(), [1, feat_dim]),
                             &device,
                         );
-                        let prev_act = Tensor::<NdArray, 1, Int>::from_data(
-                            TensorData::new(vec![prev_action], [1]),
+                        let acts_t = Tensor::<NdArray, 2, Int>::from_data(
+                            TensorData::new(act_history.clone(), [1, act_history.len()]),
                             &device,
                         );
 
-                        let (logits, _value, new_hidden) = model.forward(feat, prev_act, hidden);
+                        let logits = model.forward(base_t, acts_t);
                         let logits_vec: Vec<f32> = logits.into_data().to_vec::<f32>()?;
 
-                        // Greedy: argmax instead of sampling
+                        // Greedy: argmax
                         let action = logits_vec
                             .iter()
                             .enumerate()
@@ -374,9 +367,8 @@ fn main() -> Result<()> {
                             );
                         }
 
-                        hidden = Some(new_hidden);
-                        prev_action = action as i64;
-                        state = step.state;
+                        act_history.push(action as i64);
+                        let _ = step.state;
                     };
 
                     let bl = baselines.get(&func_name);
