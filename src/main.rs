@@ -126,7 +126,7 @@ enum Commands {
         #[arg(long, default_value = "51")]
         bench_iters: usize,
         /// Max pass sequence length per episode
-        #[arg(long, default_value = "100")]
+        #[arg(long, default_value = "40")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
