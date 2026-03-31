@@ -26,13 +26,13 @@ pub struct EnvConfig {
     /// Working directory for compiled IR and binaries.
     pub work_dir: PathBuf,
     /// Maximum number of passes per episode before forced termination.
-    #[config(default = 40)]
+    #[config(default = 50)]
     pub max_seq_length: usize,
     /// Whether to give reward at every step or only at episode end.
     /// No inline default — enum variants aren't Config literals.
     pub reward_mode: RewardMode,
     /// Number of benchmark process invocations to average per timing call.
-    #[config(default = 1)]
+    #[config(default = 3)]
     pub benchmark_runs: usize,
     /// Internal timing iterations inside each benchmark binary (passed as argv[1]).
     #[config(default = 51)]
