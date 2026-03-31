@@ -38,183 +38,181 @@ pub enum Pass {
     // ── Primary passes (indices 0–26) ─────────────────────────────────────────
     //
     // Core instruction cleanup
-    Instcombine,                // 0  — instruction combining; foundational for all IR clean-up
-    Mem2reg,                    // 1  — alloca→SSA; must run early, everything depends on it
-    Adce,                       // 2  — aggressive DCE; prunes dead computation after transforms
-    Dse,                        // 3  — dead store elimination; critical for C pointer writes
-    Sccp,                       // 4  — sparse conditional constant prop; resolves branch conditions
-    Reassociate,                // 5  — arithmetic re-association; enables constant folding downstream
-    JumpThreading,              // 6  — threads jumps; eliminates branch chains common in C
-    Gvn,                        // 7  — global value numbering; eliminates cross-block redundancies
+    Instcombine,   // 0  — instruction combining; foundational for all IR clean-up
+    Mem2reg,       // 1  — alloca→SSA; must run early, everything depends on it
+    Adce,          // 2  — aggressive DCE; prunes dead computation after transforms
+    Dse,           // 3  — dead store elimination; critical for C pointer writes
+    Sccp,          // 4  — sparse conditional constant prop; resolves branch conditions
+    Reassociate,   // 5  — arithmetic re-association; enables constant folding downstream
+    JumpThreading, // 6  — threads jumps; eliminates branch chains common in C
+    Gvn,           // 7  — global value numbering; eliminates cross-block redundancies
     //
     // Memory / struct promotion (two variants so model learns when CFG mods help)
-    Sroa,                       // 8  — scalar replacement of aggregates (conservative, no CFG mods)
-    SroaModifyCfg,              // 9  — sroa<modify-cfg>; O3's form, allows CFG restructuring
-    Memcpyopt,                  // 10 — merges memcpy/stores; C code is full of struct copies
+    Sroa,          // 8  — scalar replacement of aggregates (conservative, no CFG mods)
+    SroaModifyCfg, // 9  — sroa<modify-cfg>; O3's form, allows CFG restructuring
+    Memcpyopt,     // 10 — merges memcpy/stores; C code is full of struct copies
     //
     // CFG simplification
-    Simplifycfg,                // 11 — simplifies CFG; needed after nearly every transform
+    Simplifycfg, // 11 — simplifies CFG; needed after nearly every transform
     //
     // Inlining
-    Inline,                     // 12 — function inlining; single biggest win for C call-heavy code
+    Inline, // 12 — function inlining; single biggest win for C call-heavy code
     //
     // CSE (only the MemSSA form; plain early-cse is strictly weaker for C)
-    EarlyCseMemssa,             // 13 — early-cse<memssa>; eliminates redundant loads/stores via MemSSA
+    EarlyCseMemssa, // 13 — early-cse<memssa>; eliminates redundant loads/stores via MemSSA
     //
     // Loop infrastructure (rotation must precede LICM, indvars, vectorization)
-    LoopRotate,                 // 14 — loop rotation (conservative)
-    LoopRotateHeaderDup,        // 15 — loop-rotate<header-duplication;no-prepare-for-lto>; O3 form
+    LoopRotate,          // 14 — loop rotation (conservative)
+    LoopRotateHeaderDup, // 15 — loop-rotate<header-duplication;no-prepare-for-lto>; O3 form
     //
     // Loop-invariant code motion (two variants; model learns when speculation helps)
-    Licm,                       // 16 — LICM without speculation (conservative, safe for aliased loads)
-    LicmAllowSpeculation,       // 17 — licm<allowspeculation>; O3's second LICM pass; hoists aggressively
+    Licm,                 // 16 — LICM without speculation (conservative, safe for aliased loads)
+    LicmAllowSpeculation, // 17 — licm<allowspeculation>; O3's second LICM pass; hoists aggressively
     //
     // Loop canonicalization (prerequisite for vectorization and unrolling)
-    IndVars,                    // 18 — canonicalizes induction variables
-    LoopIdiom,                  // 19 — recognises memset/memcpy idioms; very common in C
-    LoopDeletion,               // 20 — deletes provably empty or infinite-but-unused loops
+    IndVars,      // 18 — canonicalizes induction variables
+    LoopIdiom,    // 19 — recognises memset/memcpy idioms; very common in C
+    LoopDeletion, // 20 — deletes provably empty or infinite-but-unused loops
     //
     // Loop unswitching (two variants)
-    SimpleLoopUnswitch,         // 21 — trivial unswitching only (cheap, always safe)
+    SimpleLoopUnswitch, // 21 — trivial unswitching only (cheap, always safe)
     SimpleLoopUnswitchNontrivial, // 22 — simple-loop-unswitch<nontrivial;trivial>; O3 form, duplicates body
     //
     // Loop unrolling (two variants; model learns when aggressive thresholds hurt vs help)
-    LoopUnroll,                 // 23 — partial unrolling at default thresholds
-    LoopUnrollO3,               // 24 — loop-unroll<O3>; much higher threshold; O3's late unroll pass
+    LoopUnroll,   // 23 — partial unrolling at default thresholds
+    LoopUnrollO3, // 24 — loop-unroll<O3>; much higher threshold; O3's late unroll pass
     //
     // Vectorization
-    LoopVectorize,              // 25 — auto-vectorizes counted loops; huge for C compute arrays
-    SlpVectorizer,              // 26 — superword-level parallelism; vectorises straight-line C code
-    Tailcallelim,               // 27 — tail call elimination; primary because tail_recursive.c and
+    LoopVectorize, // 25 — auto-vectorizes counted loops; huge for C compute arrays
+    SlpVectorizer, // 26 — superword-level parallelism; vectorises straight-line C code
+    Tailcallelim,  // 27 — tail call elimination; primary because tail_recursive.c and
     //      interpreter/recursive-descent patterns in the benchmark set benefit
     //      directly; the LSTM can learn to skip it for non-recursive benchmarks
 
     // ── Secondary passes (indices 29–84) ──────────────────────────────────────
     //
     // DEMOTED FROM OLD BASE — useful but not primary-tier for C:
-
     /// Plain early-cse without MemSSA.  Weaker than EarlyCseMemssa for
     /// pointer-heavy C; kept as secondary so the model can use the cheaper form.
     #[cfg(feature = "secondary_passes")]
-    EarlyCse,                   // 29
+    EarlyCse, // 29
 
     /// Bit-tracking dead code elimination.  Catches things instcombine misses
     /// (e.g. dead high bits) but rarely moves the needle alone.
     #[cfg(feature = "secondary_passes")]
-    Bdce,                       // 30
+    Bdce, // 30
 
     /// Argument promotion (pointer→value).  CGSCC-level; useful when inlining
     /// exposes pointer args that can be passed by value, but secondary because
     /// it requires callgraph context to matter much.
     #[cfg(feature = "secondary_passes")]
-    Argpromotion,               // 31
+    Argpromotion, // 31
 
     /// Global variable optimisation.  Module-level; rarely in the hot path of
     /// compute-focused C benchmarks which mostly operate on local/heap data.
     #[cfg(feature = "secondary_passes")]
-    GlobalOpt,                  // 32
+    GlobalOpt, // 32
 
     /// Correlated value propagation.  Propagates value ranges across branches;
     /// overlaps significantly with SCCP and GVN already in primary.
     #[cfg(feature = "secondary_passes")]
-    CorrelatedPropagation,      // 33
+    CorrelatedPropagation, // 33
 
     /// Aggressive instcombine.  A heavier instcombine sweep for patterns the
     /// standard pass misses.  Marginal gain over primary Instcombine for C.
     #[cfg(feature = "secondary_passes")]
-    AggressiveInstcombine,      // 34
+    AggressiveInstcombine, // 34
 
     /// Constraint-based range elimination.  Newer pass; niche use cases;
     /// overlaps with SCCP for most C programs.
     #[cfg(feature = "secondary_passes")]
-    ConstraintElimination,      // 35
+    ConstraintElimination, // 35
 
     /// Vector combine.  Recombines vector operations after SLP/loop-vectorize;
     /// only useful when vectorization already fired.
     #[cfg(feature = "secondary_passes")]
-    VectorCombine,              // 36
+    VectorCombine, // 36
 
     /// Float-to-int conversion.  Detects loops that accidentally use float
     /// arithmetic for integer semantics; very niche for hand-written C.
     #[cfg(feature = "secondary_passes")]
-    Float2int,                  // 37
+    Float2int, // 37
 
     // OLD EXTENDED SET — module-level analytics:
-
     #[cfg(feature = "secondary_passes")]
-    CalledValuePropagation,     // 38
+    CalledValuePropagation, // 38
     #[cfg(feature = "secondary_passes")]
-    ConstMerge,                 // 39
+    ConstMerge, // 39
     #[cfg(feature = "secondary_passes")]
-    Deadargelim,                // 40
+    Deadargelim, // 40
     #[cfg(feature = "secondary_passes")]
-    ElimAvailExtern,            // 41
+    ElimAvailExtern, // 41
     #[cfg(feature = "secondary_passes")]
-    GlobalDce,                  // 42
+    GlobalDce, // 42
     #[cfg(feature = "secondary_passes")]
-    InferAttrs,                 // 43
+    InferAttrs, // 43
     #[cfg(feature = "secondary_passes")]
-    Ipsccp,                     // 44
+    Ipsccp, // 44
     #[cfg(feature = "secondary_passes")]
-    RelLookupTableConverter,    // 45
+    RelLookupTableConverter, // 45
     #[cfg(feature = "secondary_passes")]
-    RpoFunctionAttrs,           // 46
+    RpoFunctionAttrs, // 46
     // CGSCC-level
     #[cfg(feature = "secondary_passes")]
-    AlwaysInline,               // 47
+    AlwaysInline, // 47
     #[cfg(feature = "secondary_passes")]
-    FunctionAttrs,              // 48
+    FunctionAttrs, // 48
     // Loop-level
     #[cfg(feature = "secondary_passes")]
     ExtraSimpleLoopUnswitchPasses, // 49
     #[cfg(feature = "secondary_passes")]
-    LoopInstsimplify,           // 50
+    LoopInstsimplify, // 50
     #[cfg(feature = "secondary_passes")]
-    LoopSimplifycfg,            // 51
+    LoopSimplifycfg, // 51
     #[cfg(feature = "secondary_passes")]
-    LoopUnrollFull,             // 52
+    LoopUnrollFull, // 52
     // Function-level
     #[cfg(feature = "secondary_passes")]
-    AlignmentFromAssumptions,   // 53
+    AlignmentFromAssumptions, // 53
     #[cfg(feature = "secondary_passes")]
-    CallsiteSplitting,          // 54
+    CallsiteSplitting, // 54
     #[cfg(feature = "secondary_passes")]
-    Chr,                        // 55
+    Chr, // 55
     #[cfg(feature = "secondary_passes")]
-    DivRemPairs,                // 56
+    DivRemPairs, // 56
     #[cfg(feature = "secondary_passes")]
-    InferAlignment,             // 57
+    InferAlignment, // 57
     #[cfg(feature = "secondary_passes")]
-    InjectTliMappings,          // 58
+    InjectTliMappings, // 58
     #[cfg(feature = "secondary_passes")]
-    InstSimplify,               // 59
+    InstSimplify, // 59
     #[cfg(feature = "secondary_passes")]
-    LibcallsShrinkwrap,         // 60
+    LibcallsShrinkwrap, // 60
     #[cfg(feature = "secondary_passes")]
-    LoopDistribute,             // 61
+    LoopDistribute, // 61
     #[cfg(feature = "secondary_passes")]
-    LoopLoadElim,               // 62
+    LoopLoadElim, // 62
     #[cfg(feature = "secondary_passes")]
-    LoopSink,                   // 63
+    LoopSink, // 63
     #[cfg(feature = "secondary_passes")]
-    LowerConstantIntrinsics,    // 64
+    LowerConstantIntrinsics, // 64
     #[cfg(feature = "secondary_passes")]
-    LowerExpect,                // 65
+    LowerExpect, // 65
     #[cfg(feature = "secondary_passes")]
-    MldstMotion,                // 66
+    MldstMotion, // 66
     #[cfg(feature = "secondary_passes")]
-    MoveAutoInit,               // 67
+    MoveAutoInit, // 67
     #[cfg(feature = "secondary_passes")]
-    SpeculativeExecution,       // 68
+    SpeculativeExecution, // 68
     #[cfg(feature = "secondary_passes")]
-    LoopUnrollAndJam,           // 69
+    LoopUnrollAndJam, // 69
     // O3-parameterised variant relegated to secondary
     /// simplifycfg with the full O3 flag set.  The speculate-blocks and
     /// simplify-cond-branch flags help most for irregular control flow; for
     /// compute-heavy C with regular loops the gain over plain simplifycfg is
     /// modest — not worth consuming a primary slot.
     #[cfg(feature = "secondary_passes")]
-    SimplifycfgO3,              // 70
+    SimplifycfgO3, // 70
 
     // ── Terminal action ───────────────────────────────────────────────────────
     Stop, // 28 (primary only) or 71 (secondary enabled)
@@ -425,7 +423,9 @@ impl Pass {
                     match **p {
                         // Primary loop passes
                         Pass::Licm => "loop-mssa(licm)".to_string(),
-                        Pass::LicmAllowSpeculation => "loop-mssa(licm<allowspeculation>)".to_string(),
+                        Pass::LicmAllowSpeculation => {
+                            "loop-mssa(licm<allowspeculation>)".to_string()
+                        }
                         Pass::LoopRotate => "loop(loop-rotate)".to_string(),
                         Pass::LoopRotateHeaderDup => {
                             "loop(loop-rotate<header-duplication;no-prepare-for-lto>)".to_string()
@@ -485,16 +485,16 @@ impl Pass {
     pub fn from_index(i: usize) -> Self {
         match i {
             // Primary
-            0  => Pass::Instcombine,
-            1  => Pass::Mem2reg,
-            2  => Pass::Adce,
-            3  => Pass::Dse,
-            4  => Pass::Sccp,
-            5  => Pass::Reassociate,
-            6  => Pass::JumpThreading,
-            7  => Pass::Gvn,
-            8  => Pass::Sroa,
-            9  => Pass::SroaModifyCfg,
+            0 => Pass::Instcombine,
+            1 => Pass::Mem2reg,
+            2 => Pass::Adce,
+            3 => Pass::Dse,
+            4 => Pass::Sccp,
+            5 => Pass::Reassociate,
+            6 => Pass::JumpThreading,
+            7 => Pass::Gvn,
+            8 => Pass::Sroa,
+            9 => Pass::SroaModifyCfg,
             10 => Pass::Memcpyopt,
             11 => Pass::Simplifycfg,
             12 => Pass::Inline,
@@ -727,9 +727,13 @@ impl Pass {
             Pass::SimplifycfgO3 => 70,
             Pass::Stop => {
                 #[cfg(not(feature = "secondary_passes"))]
-                { 28 }
+                {
+                    28
+                }
                 #[cfg(feature = "secondary_passes")]
-                { 71 }
+                {
+                    71
+                }
             }
         }
     }
@@ -854,4 +858,3 @@ impl fmt::Display for Pass {
         write!(f, "{}", self.opt_name())
     }
 }
-

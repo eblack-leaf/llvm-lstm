@@ -95,17 +95,13 @@ impl DataCollector {
             .functions
             .par_iter()
             .map(|func_path| {
-                let stem = func_path
-                    .file_stem()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
+                let stem = func_path.file_stem().unwrap().to_string_lossy().to_string();
 
                 // Per-function work directory so files don't collide
                 let work_dir = self.output_dir.join("_work").join(&stem);
                 fs::create_dir_all(&work_dir)?;
-                let pipeline = CompilationPipeline::new(work_dir)
-                    .with_bench_iters(self.bench_iters);
+                let pipeline =
+                    CompilationPipeline::new(work_dir).with_bench_iters(self.bench_iters);
 
                 // Emit IR once — it's the same for every sequence of this function.
                 let base_ir = pipeline.emit_ir(func_path)?;
@@ -117,7 +113,10 @@ impl DataCollector {
                 let mut rng = rand::thread_rng();
                 let transforms = Pass::all_transforms();
 
-                eprintln!("[{stem}] Starting {num} sequences...", num = self.num_sequences);
+                eprintln!(
+                    "[{stem}] Starting {num} sequences...",
+                    num = self.num_sequences
+                );
 
                 let mut func_count = 0usize;
                 for seq_idx in 0..self.num_sequences {
@@ -126,7 +125,12 @@ impl DataCollector {
                         .map(|_| transforms[rng.gen_range(0..transforms.len())])
                         .collect();
 
-                    match pipeline.full_pipeline(func_path, Some(&base_ir), &passes, self.benchmark_runs) {
+                    match pipeline.full_pipeline(
+                        func_path,
+                        Some(&base_ir),
+                        &passes,
+                        self.benchmark_runs,
+                    ) {
                         Ok(result) => {
                             let features = IrFeatures::from_ll_file(&result.opt_ir)?;
 
@@ -193,20 +197,18 @@ impl DataCollector {
         // Baselines are quick — run sequentially to avoid timing interference
         let work_dir = self.output_dir.join("_work").join("_baselines");
         fs::create_dir_all(&work_dir)?;
-        let pipeline = CompilationPipeline::new(work_dir)
-            .with_bench_iters(self.bench_iters);
+        let pipeline = CompilationPipeline::new(work_dir).with_bench_iters(self.bench_iters);
 
-        eprintln!("Computing baselines ({} runs per binary, {} iters each)...", self.baseline_runs, self.bench_iters);
+        eprintln!(
+            "Computing baselines ({} runs per binary, {} iters each)...",
+            self.baseline_runs, self.bench_iters
+        );
 
         let file = File::create(&baseline_path)?;
         let mut writer = BufWriter::new(file);
 
         for func_path in &self.functions {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let stem = func_path.file_stem().unwrap().to_string_lossy().to_string();
 
             eprintln!("  {stem}...");
 

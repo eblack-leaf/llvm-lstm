@@ -63,13 +63,7 @@ impl CompilationPipeline {
         // Skip clang if the IR already exists — base IR for a given source is deterministic.
         if !ll_path.exists() {
             let output = Command::new(&self.clang)
-                .args([
-                    "-O3",
-                    "-Xclang",
-                    "-disable-llvm-optzns",
-                    "-emit-llvm",
-                    "-S",
-                ])
+                .args(["-O3", "-Xclang", "-disable-llvm-optzns", "-emit-llvm", "-S"])
                 .arg(c_source)
                 .arg("-o")
                 .arg(&ll_path)
@@ -128,10 +122,7 @@ impl CompilationPipeline {
     /// Compile optimized IR to a native binary using O3 backend code generation.
     /// -disable-llvm-passes prevents clang from re-running IR passes on the already-optimized IR.
     pub fn compile_ir(&self, ir: &Path) -> Result<PathBuf> {
-        let stem = ir
-            .file_stem()
-            .context("no file stem")?
-            .to_string_lossy();
+        let stem = ir.file_stem().context("no file stem")?.to_string_lossy();
         let bin_path = self.work_dir.join(format!("{stem}.bin"));
 
         let output = Command::new(&self.clang)
@@ -155,9 +146,7 @@ impl CompilationPipeline {
 
     /// Run a compiled binary and collect timing results.
     pub fn benchmark(&self, binary: &Path, runs: usize) -> Result<BenchmarkResult> {
-        let binary_size = std::fs::metadata(binary)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let binary_size = std::fs::metadata(binary).map(|m| m.len()).unwrap_or(0);
 
         let mut times: Vec<u64> = Vec::with_capacity(runs);
         let timeout = Duration::from_secs(self.timeout_secs);
@@ -176,11 +165,15 @@ impl CompilationPipeline {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         if !status.success() {
-                            let stderr = child.stderr.take().map(|mut e| {
-                                let mut s = String::new();
-                                std::io::Read::read_to_string(&mut e, &mut s).ok();
-                                s
-                            }).unwrap_or_default();
+                            let stderr = child
+                                .stderr
+                                .take()
+                                .map(|mut e| {
+                                    let mut s = String::new();
+                                    std::io::Read::read_to_string(&mut e, &mut s).ok();
+                                    s
+                                })
+                                .unwrap_or_default();
                             bail!("benchmark binary failed:\n{stderr}");
                         }
                         break;
@@ -196,16 +189,19 @@ impl CompilationPipeline {
                 }
             }
 
-            let stdout = child.stdout.take().map(|mut o| {
-                let mut s = String::new();
-                std::io::Read::read_to_string(&mut o, &mut s).ok();
-                s
-            }).unwrap_or_default();
+            let stdout = child
+                .stdout
+                .take()
+                .map(|mut o| {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut o, &mut s).ok();
+                    s
+                })
+                .unwrap_or_default();
 
-            let ns: u64 = stdout
-                .trim()
-                .parse()
-                .with_context(|| format!("failed to parse benchmark output: '{}'", stdout.trim()))?;
+            let ns: u64 = stdout.trim().parse().with_context(|| {
+                format!("failed to parse benchmark output: '{}'", stdout.trim())
+            })?;
             times.push(ns);
         }
 
@@ -290,7 +286,12 @@ impl CompilationPipeline {
     }
 
     /// Run baseline at a standard optimization level (-O0, -O2, -O3).
-    pub fn baseline(&self, c_source: &Path, opt_level: &str, runs: usize) -> Result<BenchmarkResult> {
+    pub fn baseline(
+        &self,
+        c_source: &Path,
+        opt_level: &str,
+        runs: usize,
+    ) -> Result<BenchmarkResult> {
         let stem = c_source
             .file_stem()
             .context("no file stem")?

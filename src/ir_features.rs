@@ -20,9 +20,9 @@ pub struct IrFeatures {
     pub icmp_count: u32,
     pub fcmp_count: u32,
     pub ret_count: u32,
-    pub select_count: u32,   // if-conversion / conditional-move opportunities
-    pub bitwise_count: u32,  // and, or, xor, shl, lshr, ashr — instcombine targets
-    pub cast_count: u32,     // zext, sext, trunc, bitcast, fp* conversions
+    pub select_count: u32,  // if-conversion / conditional-move opportunities
+    pub bitwise_count: u32, // and, or, xor, shl, lshr, ashr — instcombine targets
+    pub cast_count: u32,    // zext, sext, trunc, bitcast, fp* conversions
     pub other_inst_count: u32,
     // Structural features
     pub basic_block_count: u32,
@@ -30,21 +30,21 @@ pub struct IrFeatures {
     pub function_count: u32,
     pub loop_depth_approx: u32,
     // Derived ratios — scale-invariant signals
-    pub load_store_ratio: f32,  // load / store (memory read vs write balance)
-    pub mem_ratio: f32,         // (load+store) / total_inst (memory pressure)
-    pub call_ratio: f32,        // call / total_inst (inlining opportunity signal)
-    pub avg_bb_size: f32,       // total_inst / bb_count (block granularity)
+    pub load_store_ratio: f32, // load / store (memory read vs write balance)
+    pub mem_ratio: f32,        // (load+store) / total_inst (memory pressure)
+    pub call_ratio: f32,       // call / total_inst (inlining opportunity signal)
+    pub avg_bb_size: f32,      // total_inst / bb_count (block granularity)
     // Pass-opportunity indicators — metadata and structural signals
-    pub unreachable_count: u32,    // dead terminators → ADCE / simplifycfg
-    pub invoke_count: u32,         // exception-handling calls → inlining cost signal
-    pub switch_count: u32,         // switch stmts → jump-threading / lowering
-    pub intrinsic_count: u32,      // llvm.* calls (memcpy/memset/…) → loop-idiom / memcpyopt
-    pub tbaa_count: u32,           // !tbaa refs → alias-analysis richness (LICM/DSE quality)
-    pub loop_metadata_count: u32,  // llvm.loop refs → loop hints present (vectorise/unroll)
-    pub noalias_count: u32,        // noalias attrs → pointer-aliasing provable (LICM/DSE)
-    pub phi_ratio: f32,            // phi / bb → SSA density (GVN/instcombine readiness)
+    pub unreachable_count: u32,   // dead terminators → ADCE / simplifycfg
+    pub invoke_count: u32,        // exception-handling calls → inlining cost signal
+    pub switch_count: u32,        // switch stmts → jump-threading / lowering
+    pub intrinsic_count: u32,     // llvm.* calls (memcpy/memset/…) → loop-idiom / memcpyopt
+    pub tbaa_count: u32,          // !tbaa refs → alias-analysis richness (LICM/DSE quality)
+    pub loop_metadata_count: u32, // llvm.loop refs → loop hints present (vectorise/unroll)
+    pub noalias_count: u32,       // noalias attrs → pointer-aliasing provable (LICM/DSE)
+    pub phi_ratio: f32,           // phi / bb → SSA density (GVN/instcombine readiness)
     // Loop structure
-    pub cond_br_count: u32,        // conditional branches (br i1 ...) — control flow density
+    pub cond_br_count: u32, // conditional branches (br i1 ...) — control flow density
     pub max_loop_nest_approx: u32, // approx max loop nesting depth from back-edge positions
 }
 
@@ -67,9 +67,15 @@ impl IrFeatures {
         // Whole-file metadata counts — scan before the per-line loop.
         for line in content.lines() {
             let t = line.trim();
-            if t.contains("!tbaa")       { f.tbaa_count          += 1; }
-            if t.contains("llvm.loop")   { f.loop_metadata_count += 1; }
-            if t.contains("noalias")     { f.noalias_count        += 1; }
+            if t.contains("!tbaa") {
+                f.tbaa_count += 1;
+            }
+            if t.contains("llvm.loop") {
+                f.loop_metadata_count += 1;
+            }
+            if t.contains("noalias") {
+                f.noalias_count += 1;
+            }
         }
 
         for line in content.lines() {
@@ -122,7 +128,10 @@ impl IrFeatures {
                     _current_label = Some(label);
                     // Nesting depth at this block = number of loop headers at earlier positions
                     let current_pos = label_order.len() - 1;
-                    let depth = loop_header_positions.iter().filter(|&&p| p < current_pos).count();
+                    let depth = loop_header_positions
+                        .iter()
+                        .filter(|&&p| p < current_pos)
+                        .count();
                     f.max_loop_nest_approx = f.max_loop_nest_approx.max(depth as u32);
                     continue;
                 }
@@ -146,10 +155,19 @@ impl IrFeatures {
                         f.br_count += 1;
                         if op == "br" {
                             // Conditional branch: "br i1 ..."
-                            if trimmed.contains("i1 ") { f.cond_br_count += 1; }
-                            detect_back_edge(trimmed, &label_order, &mut f.loop_depth_approx, &mut loop_header_positions);
+                            if trimmed.contains("i1 ") {
+                                f.cond_br_count += 1;
+                            }
+                            detect_back_edge(
+                                trimmed,
+                                &label_order,
+                                &mut f.loop_depth_approx,
+                                &mut loop_header_positions,
+                            );
                         }
-                        if op == "switch" { f.switch_count += 1; }
+                        if op == "switch" {
+                            f.switch_count += 1;
+                        }
                     }
                     "unreachable" => {
                         f.total_instruction_count += 1;
@@ -157,9 +175,13 @@ impl IrFeatures {
                     }
                     "call" | "invoke" => {
                         f.call_count += 1;
-                        if op == "invoke" { f.invoke_count += 1; }
+                        if op == "invoke" {
+                            f.invoke_count += 1;
+                        }
                         // Intrinsics: call target begins with @llvm.
-                        if trimmed.contains("@llvm.") { f.intrinsic_count += 1; }
+                        if trimmed.contains("@llvm.") {
+                            f.intrinsic_count += 1;
+                        }
                     }
                     "phi" => f.phi_count += 1,
                     "alloca" => f.alloca_count += 1,
@@ -169,9 +191,9 @@ impl IrFeatures {
                     "ret" => f.ret_count += 1,
                     "select" => f.select_count += 1,
                     "and" | "or" | "xor" | "shl" | "lshr" | "ashr" => f.bitwise_count += 1,
-                    "zext" | "sext" | "trunc" | "bitcast" | "fpext" | "fptrunc"
-                    | "fptosi" | "fptoui" | "sitofp" | "uitofp"
-                    | "ptrtoint" | "inttoptr" | "addrspacecast" => f.cast_count += 1,
+                    "zext" | "sext" | "trunc" | "bitcast" | "fpext" | "fptrunc" | "fptosi"
+                    | "fptoui" | "sitofp" | "uitofp" | "ptrtoint" | "inttoptr"
+                    | "addrspacecast" => f.cast_count += 1,
                     _ => f.other_inst_count += 1,
                 }
             }
@@ -186,8 +208,16 @@ impl IrFeatures {
             0.0
         };
         let total = f.total_instruction_count as f32;
-        f.mem_ratio  = if total > 0.0 { (f.load_count + f.store_count) as f32 / total } else { 0.0 };
-        f.call_ratio = if total > 0.0 { f.call_count as f32 / total } else { 0.0 };
+        f.mem_ratio = if total > 0.0 {
+            (f.load_count + f.store_count) as f32 / total
+        } else {
+            0.0
+        };
+        f.call_ratio = if total > 0.0 {
+            f.call_count as f32 / total
+        } else {
+            0.0
+        };
         f.avg_bb_size = if f.basic_block_count > 0 {
             total / f.basic_block_count as f32
         } else {
@@ -251,7 +281,6 @@ impl IrFeatures {
             ln(self.max_loop_nest_approx),
         ]
     }
-
 }
 
 /// Extract the opcode from an LLVM IR instruction line.
@@ -306,7 +335,9 @@ fn detect_back_edge(
     loop_header_positions: &mut Vec<usize>,
 ) {
     for part in br_line.split("label %") {
-        if part == br_line { continue; }
+        if part == br_line {
+            continue;
+        }
         let target: String = part
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
@@ -352,6 +383,4 @@ entry:
         assert_eq!(features.ret_count, 1);
         assert_eq!(features.total_instruction_count, 5);
     }
-
-   
 }

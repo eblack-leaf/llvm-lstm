@@ -25,7 +25,11 @@ pub struct BestEpisodeStore {
 
 impl BestEpisodeStore {
     pub fn new(prune_threshold: f32, max_per_func: usize) -> Self {
-        Self { prune_threshold, max_per_func, store: HashMap::new() }
+        Self {
+            prune_threshold,
+            max_per_func,
+            store: HashMap::new(),
+        }
     }
 
     /// Insert an episode.  Re-sorts the per-function list and prunes.

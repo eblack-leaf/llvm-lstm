@@ -286,10 +286,7 @@ impl EdaAnalyzer {
         map
     }
 
-    fn baseline_landscape(
-        &self,
-        map: &HashMap<String, (u64, u64, u64)>,
-    ) -> Vec<BaselineEntry> {
+    fn baseline_landscape(&self, map: &HashMap<String, (u64, u64, u64)>) -> Vec<BaselineEntry> {
         let mut entries: Vec<BaselineEntry> = map
             .iter()
             .map(|(func, &(o0, o2, o3))| BaselineEntry {
@@ -324,14 +321,9 @@ impl EdaAnalyzer {
                 continue;
             }
 
-            let best = records
-                .iter()
-                .min_by_key(|r| r.execution_time_ns)
-                .unwrap();
-            let gap_vs_o3 =
-                (best.execution_time_ns as f64 - o3_ns as f64) / o3_ns as f64 * 100.0;
-            let gap_vs_o2 =
-                (best.execution_time_ns as f64 - o2_ns as f64) / o2_ns as f64 * 100.0;
+            let best = records.iter().min_by_key(|r| r.execution_time_ns).unwrap();
+            let gap_vs_o3 = (best.execution_time_ns as f64 - o3_ns as f64) / o3_ns as f64 * 100.0;
+            let gap_vs_o2 = (best.execution_time_ns as f64 - o2_ns as f64) / o2_ns as f64 * 100.0;
             let speedup_vs_o0 = o0_ns as f64 / best.execution_time_ns.max(1) as f64;
 
             let mut times: Vec<u64> = records.iter().map(|r| r.execution_time_ns).collect();
@@ -339,8 +331,7 @@ impl EdaAnalyzer {
             let n = times.len();
             let top10_n = (n / 10).max(1);
             let top10_median = times[top10_n / 2];
-            let top10_gap =
-                (top10_median as f64 - o3_ns as f64) / o3_ns as f64 * 100.0;
+            let top10_gap = (top10_median as f64 - o3_ns as f64) / o3_ns as f64 * 100.0;
 
             entries.push(CeilingEntry {
                 function: func.clone(),
@@ -382,7 +373,11 @@ impl EdaAnalyzer {
             }
 
             let mean = times.iter().sum::<u64>() as f64 / n as f64;
-            let variance = times.iter().map(|&t| (t as f64 - mean).powi(2)).sum::<f64>() / n as f64;
+            let variance = times
+                .iter()
+                .map(|&t| (t as f64 - mean).powi(2))
+                .sum::<f64>()
+                / n as f64;
             let std = variance.sqrt();
             let cv = if mean > 0.0 { std / mean * 100.0 } else { 0.0 };
 
@@ -510,7 +505,10 @@ impl EdaAnalyzer {
                     let med_without = median_u64(&without);
                     if med_with > 0 {
                         let log_sp = (med_without as f64 / med_with as f64).ln();
-                        pass_log_speedups.entry(pass.clone()).or_default().push(log_sp);
+                        pass_log_speedups
+                            .entry(pass.clone())
+                            .or_default()
+                            .push(log_sp);
                     }
                 }
 
@@ -594,7 +592,8 @@ impl EdaAnalyzer {
         }
 
         // Restrict to top-N enriched passes by presence
-        let mut by_count: Vec<(&String, usize)> = single_count.iter().map(|(k, &v)| (k, v)).collect();
+        let mut by_count: Vec<(&String, usize)> =
+            single_count.iter().map(|(k, &v)| (k, v)).collect();
         by_count.sort_by(|a, b| b.1.cmp(&a.1));
         let candidate_passes: Vec<String> = by_count
             .into_iter()
@@ -735,9 +734,24 @@ impl EdaAnalyzer {
         features: &[BenchmarkFeatureEntry],
     ) -> Vec<FeatureCorrelation> {
         let feature_names = [
-            "add", "mul", "load", "store", "br", "call", "phi",
-            "alloca", "gep", "icmp", "fcmp", "ret", "other",
-            "basic_blocks", "total_insts", "functions", "loops", "load_store_ratio",
+            "add",
+            "mul",
+            "load",
+            "store",
+            "br",
+            "call",
+            "phi",
+            "alloca",
+            "gep",
+            "icmp",
+            "fcmp",
+            "ret",
+            "other",
+            "basic_blocks",
+            "total_insts",
+            "functions",
+            "loops",
+            "load_store_ratio",
         ];
 
         let gaps: Vec<f64> = features.iter().map(|f| f.gap_vs_o3_pct).collect();
@@ -746,8 +760,10 @@ impl EdaAnalyzer {
             return Vec::new();
         }
 
-        let beats: Vec<&BenchmarkFeatureEntry> =
-            features.iter().filter(|f| f.difficulty == "beats-O3").collect();
+        let beats: Vec<&BenchmarkFeatureEntry> = features
+            .iter()
+            .filter(|f| f.difficulty == "beats-O3")
+            .collect();
         let hard: Vec<&BenchmarkFeatureEntry> =
             features.iter().filter(|f| f.difficulty == "hard").collect();
 
@@ -804,7 +820,9 @@ impl EdaAnalyzer {
     fn write_baseline_section(baselines: &[BaselineEntry], report: &mut String) {
         report.push_str("1. BASELINE LANDSCAPE\n");
         report.push_str("---------------------\n");
-        report.push_str("  O3/O0 = optimization headroom (higher = O3 does more work on this benchmark).\n\n");
+        report.push_str(
+            "  O3/O0 = optimization headroom (higher = O3 does more work on this benchmark).\n\n",
+        );
         report.push_str(&format!(
             "  {:<25} {:>10} {:>10} {:>10} {:>8} {:>8}\n",
             "Benchmark", "O0(ns)", "O2(ns)", "O3(ns)", "O3/O0", "O2/O0"
@@ -824,10 +842,19 @@ impl EdaAnalyzer {
         report.push_str("2. CEILING ANALYSIS (Best of Random Search vs Baselines)\n");
         report.push_str("--------------------------------------------------------\n");
         report.push_str("  Best = fastest from random pass sequences.\n");
-        report.push_str("  vs O3/O2 = % gap (negative = beats baseline). O0x = speedup over O0.\n\n");
+        report
+            .push_str("  vs O3/O2 = % gap (negative = beats baseline). O0x = speedup over O0.\n\n");
         report.push_str(&format!(
             "  {:<22} {:>9} {:>9} {:>8} {:>8} {:>6} {:>9} {:>8} {:>4}\n",
-            "Benchmark", "O3(ns)", "Best(ns)", "vs O3", "vs O2", "O0x", "Top10%(ns)", "T10vsO3", "Len"
+            "Benchmark",
+            "O3(ns)",
+            "Best(ns)",
+            "vs O3",
+            "vs O2",
+            "O0x",
+            "Top10%(ns)",
+            "T10vsO3",
+            "Len"
         ));
         report.push_str(&format!("  {}\n", "-".repeat(95)));
 
@@ -887,7 +914,9 @@ impl EdaAnalyzer {
         report.push_str("3. PERFORMANCE DISTRIBUTIONS\n");
         report.push_str("----------------------------\n");
         report.push_str("  Quantiles of execution times across random sequences.\n");
-        report.push_str("  CV = coefficient of variation (higher = more sensitive to pass choice).\n\n");
+        report.push_str(
+            "  CV = coefficient of variation (higher = more sensitive to pass choice).\n\n",
+        );
         report.push_str(&format!(
             "  {:<22} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>6}\n",
             "Benchmark", "N", "P10(ns)", "P25(ns)", "Med(ns)", "P75(ns)", "P90(ns)", "CV%"
@@ -906,9 +935,7 @@ impl EdaAnalyzer {
     fn write_enrichment_section(enrichment: &[PassEnrichment], report: &mut String) {
         report.push_str("4. PASS ENRICHMENT IN TOP SEQUENCES\n");
         report.push_str("------------------------------------\n");
-        report.push_str(
-            "  Presence rate (per-sequence, deduplicated) in top-10% vs overall.\n",
-        );
+        report.push_str("  Presence rate (per-sequence, deduplicated) in top-10% vs overall.\n");
         report.push_str("  Enrichment > 1.0 = overrepresented in good sequences.\n\n");
         report.push_str(&format!(
             "  {:<28} {:>10} {:>10} {:>10}\n",
@@ -973,12 +1000,8 @@ impl EdaAnalyzer {
     fn write_cooccurrence_section(pairs: &[PassCoOccurrence], report: &mut String) {
         report.push_str("6. PASS CO-OCCURRENCE IN TOP-10% SEQUENCES\n");
         report.push_str("-------------------------------------------\n");
-        report.push_str(
-            "  Lift = P(A∩B) / (P(A)*P(B)) — lift > 1 means synergistic pairing.\n",
-        );
-        report.push_str(
-            "  Only pairs with lift > 1.1 and ≥3 co-occurrences shown.\n\n",
-        );
+        report.push_str("  Lift = P(A∩B) / (P(A)*P(B)) — lift > 1 means synergistic pairing.\n");
+        report.push_str("  Only pairs with lift > 1.1 and ≥3 co-occurrences shown.\n\n");
         report.push_str(&format!(
             "  {:<28} {:<28} {:>6} {:>8}\n",
             "Pass A", "Pass B", "Count", "Lift"
@@ -997,7 +1020,9 @@ impl EdaAnalyzer {
     fn write_seq_length_section(tiers: &[SeqLengthTier], report: &mut String) {
         report.push_str("7. BEST SEQUENCE LENGTH BY DIFFICULTY TIER\n");
         report.push_str("-------------------------------------------\n");
-        report.push_str("  Length of best-found pass sequence per benchmark, grouped by difficulty.\n\n");
+        report.push_str(
+            "  Length of best-found pass sequence per benchmark, grouped by difficulty.\n\n",
+        );
         report.push_str(&format!(
             "  {:<12} {:>4} {:>8} {:>8} {:>6} {:>6}\n",
             "Tier", "N", "Mean", "Median", "P25", "P75"
@@ -1007,8 +1032,12 @@ impl EdaAnalyzer {
         for t in tiers {
             report.push_str(&format!(
                 "  {:<12} {:>4} {:>7.1} {:>8} {:>6} {:>6}\n",
-                t.difficulty, t.n_functions, t.mean_best_len,
-                t.median_best_len, t.p25_best_len, t.p75_best_len
+                t.difficulty,
+                t.n_functions,
+                t.mean_best_len,
+                t.median_best_len,
+                t.p25_best_len,
+                t.p75_best_len
             ));
         }
         report.push('\n');
@@ -1065,12 +1094,8 @@ impl EdaAnalyzer {
 
         report.push_str("9. FEATURE-PERFORMANCE CORRELATIONS\n");
         report.push_str("------------------------------------\n");
-        report.push_str(
-            "  Pearson r between raw IR feature and gap_vs_o3_pct.\n",
-        );
-        report.push_str(
-            "  Positive r = harder benchmarks have more of this feature.\n\n",
-        );
+        report.push_str("  Pearson r between raw IR feature and gap_vs_o3_pct.\n");
+        report.push_str("  Positive r = harder benchmarks have more of this feature.\n\n");
         report.push_str(&format!(
             "  {:<20} {:>10} {:>16} {:>12}\n",
             "Feature", "Pearson r", "Mean(beats-O3)", "Mean(hard)"
@@ -1100,8 +1125,10 @@ impl EdaAnalyzer {
             .iter()
             .filter(|c| c.gap_vs_o3_pct >= 20.0 && c.gap_vs_o3_pct < 100.0)
             .collect();
-        let unreachable: Vec<&CeilingEntry> =
-            ceiling.iter().filter(|c| c.gap_vs_o3_pct >= 100.0).collect();
+        let unreachable: Vec<&CeilingEntry> = ceiling
+            .iter()
+            .filter(|c| c.gap_vs_o3_pct >= 100.0)
+            .collect();
 
         if !beats.is_empty() {
             report.push_str(&format!(
@@ -1144,9 +1171,14 @@ impl EdaAnalyzer {
                 ));
             }
             report.push_str("\n  Root causes for large gaps:\n");
-            report.push_str("    - Missing pass parameters (simplifycfg flags, sroa<modify-cfg>, etc.)\n");
-            report.push_str("    - Missing DevirtSCCRepeatedPass nesting (O3 runs inner loop 4x)\n");
-            report.push_str("    - Missing passes not in our menu (loop-vectorize params, SLP, etc.)\n");
+            report.push_str(
+                "    - Missing pass parameters (simplifycfg flags, sroa<modify-cfg>, etc.)\n",
+            );
+            report
+                .push_str("    - Missing DevirtSCCRepeatedPass nesting (O3 runs inner loop 4x)\n");
+            report.push_str(
+                "    - Missing passes not in our menu (loop-vectorize params, SLP, etc.)\n",
+            );
         }
 
         report.push_str(&format!(
@@ -1178,7 +1210,11 @@ fn pearson_r(xs: &[f64], ys: &[f64]) -> f64 {
     }
     let mx = xs.iter().sum::<f64>() / n;
     let my = ys.iter().sum::<f64>() / n;
-    let num: f64 = xs.iter().zip(ys.iter()).map(|(x, y)| (x - mx) * (y - my)).sum();
+    let num: f64 = xs
+        .iter()
+        .zip(ys.iter())
+        .map(|(x, y)| (x - mx) * (y - my))
+        .sum();
     let dx: f64 = xs.iter().map(|x| (x - mx).powi(2)).sum::<f64>().sqrt();
     let dy: f64 = ys.iter().map(|y| (y - my).powi(2)).sum::<f64>().sqrt();
     if dx * dy < 1e-10 {
@@ -1196,6 +1232,11 @@ fn bar_str(r: f64, width: usize) -> String {
         format!("{}{}", " ".repeat(half), "+".repeat(filled))
     } else {
         let pad = half - filled;
-        format!("{}{}{}", " ".repeat(pad), "-".repeat(filled), " ".repeat(half))
+        format!(
+            "{}{}{}",
+            " ".repeat(pad),
+            "-".repeat(filled),
+            " ".repeat(half)
+        )
     }
 }

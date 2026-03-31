@@ -1,6 +1,8 @@
 use burn::config::Config;
 use burn::module::Module;
-use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, Int, Tensor, TensorData};
@@ -76,12 +78,12 @@ impl TransformerActorCriticConfig {
 /// step t.
 #[derive(Module, Debug)]
 pub struct TransformerActorCritic<B: Backend> {
-    ir_proj:      Linear<B>,
+    ir_proj: Linear<B>,
     action_embed: Embedding<B>,
-    action_proj:  Linear<B>,
-    pos_embed:    Embedding<B>,
-    transformer:  TransformerEncoder<B>,
-    policy_head:  Linear<B>,
+    action_proj: Linear<B>,
+    pos_embed: Embedding<B>,
+    transformer: TransformerEncoder<B>,
+    policy_head: Linear<B>,
 }
 
 impl<B: Backend> TransformerActorCritic<B> {
@@ -90,23 +92,18 @@ impl<B: Backend> TransformerActorCritic<B> {
     /// `base_features`: [batch, feat_dim]
     /// `actions`:       [batch, seq]  (seq ≥ 1; position 0 = zero-pad "no prior action")
     /// Returns:         [batch, 1+seq, d_model]
-    fn tokenize(
-        &self,
-        base_features: Tensor<B, 2>,
-        actions:       Tensor<B, 2, Int>,
-    ) -> Tensor<B, 3> {
+    fn tokenize(&self, base_features: Tensor<B, 2>, actions: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let [_, seq] = actions.dims();
-        let device   = base_features.device();
+        let device = base_features.device();
 
-        let ir_token  = self.ir_proj.forward(base_features).unsqueeze_dim::<3>(1); // [b,1,d]
-        let act_emb   = self.action_embed.forward(actions);                         // [b,seq,ae]
-        let act_tok   = self.action_proj.forward(act_emb);                          // [b,seq,d]
-        let tokens    = Tensor::cat(vec![ir_token, act_tok], 1);                    // [b,1+seq,d]
+        let ir_token = self.ir_proj.forward(base_features).unsqueeze_dim::<3>(1); // [b,1,d]
+        let act_emb = self.action_embed.forward(actions); // [b,seq,ae]
+        let act_tok = self.action_proj.forward(act_emb); // [b,seq,d]
+        let tokens = Tensor::cat(vec![ir_token, act_tok], 1); // [b,1+seq,d]
 
         let total = seq + 1;
-        let pos_ids = Tensor::<B, 1, Int>::arange(0..total as i64, &device)
-            .unsqueeze::<2>();                                                       // [1,1+seq]
-        let pos_emb = self.pos_embed.forward(pos_ids);                              // [1,1+seq,d]
+        let pos_ids = Tensor::<B, 1, Int>::arange(0..total as i64, &device).unsqueeze::<2>(); // [1,1+seq]
+        let pos_emb = self.pos_embed.forward(pos_ids); // [1,1+seq,d]
 
         tokens + pos_emb
     }
@@ -117,15 +114,13 @@ impl<B: Backend> TransformerActorCritic<B> {
     /// `actions`:       [1, t+1]      — zero-pad at index 0, then actions taken so far
     ///
     /// Returns policy logits for the current step (output at last position).
-    pub fn forward(
-        &self,
-        base_features: Tensor<B, 2>,
-        actions:       Tensor<B, 2, Int>,
-    ) -> Tensor<B, 2> {
+    pub fn forward(&self, base_features: Tensor<B, 2>, actions: Tensor<B, 2, Int>) -> Tensor<B, 2> {
         let tokens = self.tokenize(base_features, actions);
-        let out    = self.transformer.forward(TransformerEncoderInput::new(tokens));
+        let out = self
+            .transformer
+            .forward(TransformerEncoderInput::new(tokens));
         let [_, seq, d] = out.dims();
-        let last   = out.slice([0..1, (seq - 1)..seq, 0..d]).reshape([1, d]);
+        let last = out.slice([0..1, (seq - 1)..seq, 0..d]).reshape([1, d]);
         self.policy_head.forward(last)
     }
 
@@ -139,12 +134,12 @@ impl<B: Backend> TransformerActorCritic<B> {
     pub fn forward_batch(
         &self,
         base_features: Tensor<B, 2>,
-        prev_actions:  Tensor<B, 2, Int>,
+        prev_actions: Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
         let [n_ep, max_t] = prev_actions.dims();
-        let device        = base_features.device();
+        let device = base_features.device();
 
-        let tokens  = self.tokenize(base_features, prev_actions); // [n_ep, max_t+1, d]
+        let tokens = self.tokenize(base_features, prev_actions); // [n_ep, max_t+1, d]
         let seq_len = max_t + 1;
 
         let mut mask_data = vec![false; n_ep * seq_len * seq_len];
@@ -160,16 +155,16 @@ impl<B: Backend> TransformerActorCritic<B> {
             &device,
         );
 
-        let out = self.transformer.forward(
-            TransformerEncoderInput::new(tokens).mask_attn(causal),
-        ); // [n_ep, max_t+1, d]
+        let out = self
+            .transformer
+            .forward(TransformerEncoderInput::new(tokens).mask_attn(causal)); // [n_ep, max_t+1, d]
 
-        let d         = out.dims()[2];
+        let d = out.dims()[2];
         let out_steps = out.slice([0..n_ep, 1..(max_t + 1), 0..d]); // [n_ep, max_t, d]
-        let out_flat  = out_steps.reshape([n_ep * max_t, d]);
+        let out_flat = out_steps.reshape([n_ep * max_t, d]);
 
         let logits_flat = self.policy_head.forward(out_flat);
-        let n_act       = logits_flat.dims()[1];
+        let n_act = logits_flat.dims()[1];
         logits_flat.reshape([n_ep, max_t, n_act])
     }
 }

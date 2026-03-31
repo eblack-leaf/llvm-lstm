@@ -39,7 +39,6 @@ pub struct EnvConfig {
     pub bench_iters: usize,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineTimes {
     pub o0_ns: u64,
@@ -106,8 +105,8 @@ impl LlvmEnv {
             bail!("No .c files found in {}", config.functions_dir.display());
         }
 
-        let pipeline = CompilationPipeline::new(config.work_dir.clone())
-            .with_bench_iters(config.bench_iters);
+        let pipeline =
+            CompilationPipeline::new(config.work_dir.clone()).with_bench_iters(config.bench_iters);
 
         Ok(Self {
             pipeline,
@@ -125,13 +124,16 @@ impl LlvmEnv {
 
     /// Construct a worker env with pre-computed baselines (skips baseline computation).
     /// Use a unique `config.work_dir` per worker to avoid file collisions.
-    pub fn new_with_baselines(config: EnvConfig, baselines: HashMap<String, BaselineTimes>) -> Result<Self> {
+    pub fn new_with_baselines(
+        config: EnvConfig,
+        baselines: HashMap<String, BaselineTimes>,
+    ) -> Result<Self> {
         let functions = Self::discover_functions(&config.functions_dir)?;
         if functions.is_empty() {
             bail!("No .c files found in {}", config.functions_dir.display());
         }
-        let pipeline = CompilationPipeline::new(config.work_dir.clone())
-            .with_bench_iters(config.bench_iters);
+        let pipeline =
+            CompilationPipeline::new(config.work_dir.clone()).with_bench_iters(config.bench_iters);
         Ok(Self {
             pipeline,
             functions,
@@ -182,11 +184,7 @@ impl LlvmEnv {
         );
 
         for func_path in &self.functions.clone() {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let stem = func_path.file_stem().unwrap().to_string_lossy().to_string();
 
             pb.set_message(stem.clone());
 
@@ -238,7 +236,8 @@ impl LlvmEnv {
         let stem = func.file_stem().unwrap().to_string_lossy().to_string();
 
         // Check if done (STOP action or max length reached)
-        let done = pass == Pass::Stop || self.current_passes.len() + 1 >= self.config.max_seq_length;
+        let done =
+            pass == Pass::Stop || self.current_passes.len() + 1 >= self.config.max_seq_length;
 
         if pass != Pass::Stop {
             self.current_passes.push(pass);
@@ -266,11 +265,8 @@ impl LlvmEnv {
                     result
                 }
             } else {
-                self.pipeline.optimize_only(
-                    &func,
-                    self.current_opt_ir.as_deref(),
-                    &[pass],
-                )?
+                self.pipeline
+                    .optimize_only(&func, self.current_opt_ir.as_deref(), &[pass])?
             }
         } else {
             self.current_opt_ir.clone().context("no current IR")?
@@ -281,9 +277,16 @@ impl LlvmEnv {
         let (reward, exec_time, binary_size, breakdown) = if done {
             // Final step: always benchmark and return full breakdown.
             let binary = self.pipeline.compile_ir(&opt_ir)?;
-            let result = self.pipeline.benchmark(&binary, self.config.benchmark_runs)?;
+            let result = self
+                .pipeline
+                .benchmark(&binary, self.config.benchmark_runs)?;
             let (reward, bd) = self.compute_reward(&stem, result.median_ns);
-            (reward, Some(result.median_ns), Some(result.binary_size_bytes), bd)
+            (
+                reward,
+                Some(result.median_ns),
+                Some(result.binary_size_bytes),
+                bd,
+            )
         } else {
             match self.config.reward_mode {
                 RewardMode::Sparse => (0.0, None, None, None),
@@ -295,7 +298,12 @@ impl LlvmEnv {
                         .benchmark(&binary, self.config.benchmark_runs)?;
                     let reward = self.compute_step_reward(&stem, result.median_ns);
                     self.previous_time_ns = Some(result.median_ns);
-                    (reward, Some(result.median_ns), Some(result.binary_size_bytes), None)
+                    (
+                        reward,
+                        Some(result.median_ns),
+                        Some(result.binary_size_bytes),
+                        None,
+                    )
                 }
             }
         };
@@ -323,7 +331,8 @@ impl LlvmEnv {
     /// Returns None if caching is disabled or no function is set.
     fn ir_cache_path(&self, func_stem: &str) -> Option<PathBuf> {
         self.ir_cache_dir.as_ref().map(|dir| {
-            let key: String = self.current_passes
+            let key: String = self
+                .current_passes
                 .iter()
                 .map(|p| p.to_index().to_string())
                 .collect::<Vec<_>>()
@@ -340,7 +349,7 @@ impl LlvmEnv {
 
     fn compute_reward(&self, function: &str, time_ns: u64) -> (f32, Option<RewardBreakdown>) {
         if let Some(baselines) = self.baselines.get(function) {
-            let t  = time_ns as f64;
+            let t = time_ns as f64;
             let o0 = baselines.o0_ns as f64;
             let o2 = baselines.o2_ns as f64;
             let o3 = baselines.o3_ns as f64;
@@ -352,7 +361,11 @@ impl LlvmEnv {
             // Reward = (O3 - t) / O3: negative when slower than O3, positive when faster.
             // Zero is the goal line. Removes local optima from the O0→O3 gap framing
             // where the agent could settle at O2-quality (~0.5) and stop improving.
-            let bd = RewardBreakdown { vs_o0, vs_o2, vs_o3 };
+            let bd = RewardBreakdown {
+                vs_o0,
+                vs_o2,
+                vs_o3,
+            };
             (vs_o3, Some(bd))
         } else {
             (0.0, None)
@@ -362,9 +375,9 @@ impl LlvmEnv {
     fn compute_step_reward(&self, function: &str, time_ns: u64) -> f32 {
         // Compare against the previous step's time, or the O0 baseline on the
         // first step so the agent gets a real signal immediately rather than 0.
-        let prev = self.previous_time_ns.or_else(|| {
-            self.baselines.get(function).map(|b| b.o0_ns)
-        });
+        let prev = self
+            .previous_time_ns
+            .or_else(|| self.baselines.get(function).map(|b| b.o0_ns));
         if let Some(prev_ns) = prev {
             let improvement = (prev_ns as f64 - time_ns as f64) / prev_ns as f64;
             improvement as f32

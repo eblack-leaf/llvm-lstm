@@ -52,5 +52,4 @@ impl Rollout {
         }
         out
     }
-
 }

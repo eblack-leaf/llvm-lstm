@@ -16,7 +16,7 @@ impl ReturnMode {
     pub fn from_str(s: &str) -> Self {
         match s {
             "per-step" => ReturnMode::PerStep,
-            _          => ReturnMode::Episode,
+            _ => ReturnMode::Episode,
         }
     }
 }
@@ -34,25 +34,30 @@ pub struct Returns {
 
 impl Returns {
     pub fn compute(rollouts: &[Rollout], mode: &ReturnMode, gamma: f32) -> Self {
-        let mut values     = Vec::new();
-        let mut g0_per_ep  = Vec::new();
+        let mut values = Vec::new();
+        let mut g0_per_ep = Vec::new();
 
         for rollout in rollouts {
             let t_len = rollout.len();
             match mode {
                 ReturnMode::Episode => {
-                    let g0: f32 = rollout.rewards.iter().enumerate()
+                    let g0: f32 = rollout
+                        .rewards
+                        .iter()
+                        .enumerate()
                         .map(|(t, &r)| r * gamma.powi(t as i32))
                         .sum();
                     g0_per_ep.push(g0);
-                    for _ in 0..t_len { values.push(g0); }
+                    for _ in 0..t_len {
+                        values.push(g0);
+                    }
                 }
                 ReturnMode::PerStep => {
                     let mut per_step = vec![0.0f32; t_len];
-                    let mut running  = 0.0f32;
+                    let mut running = 0.0f32;
                     for t in (0..t_len).rev() {
-                        running      = rollout.rewards[t] + gamma * running;
-                        per_step[t]  = running;
+                        running = rollout.rewards[t] + gamma * running;
+                        per_step[t] = running;
                     }
                     let g0 = per_step[0];
                     g0_per_ep.push(g0);

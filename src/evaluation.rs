@@ -61,14 +61,12 @@ impl Evaluator {
         let mut results = Vec::new();
 
         for func_path in &self.functions {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let stem = func_path.file_stem().unwrap().to_string_lossy().to_string();
 
             for opt in ["-O0", "-O2", "-O3"] {
-                let bench = self.pipeline.baseline(func_path, opt, self.benchmark_runs)?;
+                let bench = self
+                    .pipeline
+                    .baseline(func_path, opt, self.benchmark_runs)?;
                 results.push(EvalResult {
                     function: stem.clone(),
                     method: opt.to_string(),
@@ -91,11 +89,7 @@ impl Evaluator {
         let transforms = Pass::all_transforms();
 
         for func_path in &self.functions {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let stem = func_path.file_stem().unwrap().to_string_lossy().to_string();
 
             let base_ir = self.pipeline.emit_ir(func_path)?;
             let mut best_time = u64::MAX;
@@ -108,10 +102,12 @@ impl Evaluator {
                     .map(|_| transforms[rng.gen_range(0..transforms.len())])
                     .collect();
 
-                match self
-                    .pipeline
-                    .full_pipeline(func_path, Some(&base_ir), &passes, self.benchmark_runs)
-                {
+                match self.pipeline.full_pipeline(
+                    func_path,
+                    Some(&base_ir),
+                    &passes,
+                    self.benchmark_runs,
+                ) {
                     Ok(result) => {
                         if result.benchmark.median_ns < best_time {
                             best_time = result.benchmark.median_ns;
@@ -127,7 +123,10 @@ impl Evaluator {
                 results.push(EvalResult {
                     function: stem,
                     method: format!("random_search_{num_trials}"),
-                    pass_sequence: best_passes.iter().map(|p| p.opt_name().to_string()).collect(),
+                    pass_sequence: best_passes
+                        .iter()
+                        .map(|p| p.opt_name().to_string())
+                        .collect(),
                     execution_time_ns: best_time,
                     binary_size_bytes: best_size,
                     speedup_vs_o0: 0.0,
@@ -145,11 +144,7 @@ impl Evaluator {
         let transforms = Pass::all_transforms();
 
         for func_path in &self.functions {
-            let stem = func_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let stem = func_path.file_stem().unwrap().to_string_lossy().to_string();
 
             let base_ir = self.pipeline.emit_ir(func_path)?;
             let mut best_time = u64::MAX;
@@ -157,10 +152,12 @@ impl Evaluator {
             let mut best_size = 0u64;
 
             for &pass in transforms {
-                match self
-                    .pipeline
-                    .full_pipeline(func_path, Some(&base_ir), &[pass], self.benchmark_runs)
-                {
+                match self.pipeline.full_pipeline(
+                    func_path,
+                    Some(&base_ir),
+                    &[pass],
+                    self.benchmark_runs,
+                ) {
                     Ok(result) => {
                         if result.benchmark.median_ns < best_time {
                             best_time = result.benchmark.median_ns;
@@ -218,8 +215,12 @@ impl Evaluator {
         let mut o3_times: HashMap<String, u64> = HashMap::new();
         for r in &baselines {
             match r.method.as_str() {
-                "-O0" => { o0_times.insert(r.function.clone(), r.execution_time_ns); }
-                "-O3" => { o3_times.insert(r.function.clone(), r.execution_time_ns); }
+                "-O0" => {
+                    o0_times.insert(r.function.clone(), r.execution_time_ns);
+                }
+                "-O3" => {
+                    o3_times.insert(r.function.clone(), r.execution_time_ns);
+                }
                 _ => {}
             }
         }
@@ -254,11 +255,8 @@ impl Evaluator {
 
         // Combine all results and compute speedups
         let mut all_results: Vec<EvalResult> = Vec::new();
-        let mut chains: Vec<EvalResult> = baselines
-            .into_iter()
-            .chain(random)
-            .chain(greedy)
-            .collect();
+        let mut chains: Vec<EvalResult> =
+            baselines.into_iter().chain(random).chain(greedy).collect();
         if let Some(agent) = agent_results {
             chains.extend(agent);
         }
@@ -285,14 +283,15 @@ impl Evaluator {
         };
 
         eprintln!("\n=== Evaluation Summary ===");
-        eprintln!("{:<25} {:>12} {:>12} {:>10}", "Method", "Avg vs -O0", "Avg vs -O3", "Beat -O3");
+        eprintln!(
+            "{:<25} {:>12} {:>12} {:>10}",
+            "Method", "Avg vs -O0", "Avg vs -O3", "Beat -O3"
+        );
         eprintln!("{}", "-".repeat(62));
 
         for method in &methods {
-            let method_results: Vec<&EvalResult> = all_results
-                .iter()
-                .filter(|r| r.method == *method)
-                .collect();
+            let method_results: Vec<&EvalResult> =
+                all_results.iter().filter(|r| r.method == *method).collect();
             if method_results.is_empty() {
                 continue;
             }
@@ -300,10 +299,17 @@ impl Evaluator {
                 / method_results.len() as f64;
             let avg_o3 = method_results.iter().map(|r| r.speedup_vs_o3).sum::<f64>()
                 / method_results.len() as f64;
-            let beat = method_results.iter().filter(|r| r.speedup_vs_o3 > 1.0).count();
+            let beat = method_results
+                .iter()
+                .filter(|r| r.speedup_vs_o3 > 1.0)
+                .count();
             eprintln!(
                 "{:<25} {:>11.2}x {:>11.2}x {:>5}/{:<4}",
-                method, avg_o0, avg_o3, beat, method_results.len()
+                method,
+                avg_o0,
+                avg_o3,
+                beat,
+                method_results.len()
             );
         }
 
@@ -312,7 +318,10 @@ impl Evaluator {
                 .iter()
                 .filter(|r| !r.method.starts_with('-'))
                 .collect();
-            let beat = non_baseline.iter().filter(|r| r.speedup_vs_o3 > 1.0).count();
+            let beat = non_baseline
+                .iter()
+                .filter(|r| r.speedup_vs_o3 > 1.0)
+                .count();
             if non_baseline.is_empty() {
                 (0.0, 0.0, 0usize)
             } else {

@@ -12,7 +12,7 @@ use burn::backend::wgpu::{Wgpu, WgpuDevice};
 // Default: NdArray (CPU).  GPU: add `wgpu` to burn features in Cargo.toml and
 // recompile.  No code changes needed — the type aliases below wire it through.
 #[cfg(not(feature = "wgpu"))]
-use burn::backend::{ndarray::NdArrayDevice, NdArray};
+use burn::backend::{NdArray, ndarray::NdArrayDevice};
 
 #[cfg(not(feature = "wgpu"))]
 type Inner = NdArray;
@@ -33,8 +33,10 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
-use crate::baseline::{broadcast_to_steps, build_advantages, Baseline, BaselineMode, FnStats};
-use crate::critic::{Critic, HybridCritic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic};
+use crate::baseline::{Baseline, BaselineMode, FnStats, broadcast_to_steps, build_advantages};
+use crate::critic::{
+    Critic, HybridCritic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic,
+};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
@@ -47,18 +49,22 @@ type B = Autodiff<Inner>;
 pub fn train(config: TrainConfig) -> Result<()> {
     let device = Dev::default();
 
-    let worker_functions_dir  = config.env.functions_dir.clone();
-    let worker_work_dir       = config.env.work_dir.clone();
-    let worker_reward_mode    = config.env.reward_mode.clone();
+    let worker_functions_dir = config.env.functions_dir.clone();
+    let worker_work_dir = config.env.work_dir.clone();
+    let worker_reward_mode = config.env.reward_mode.clone();
     let worker_max_seq_length = config.env.max_seq_length;
     let worker_benchmark_runs = config.env.benchmark_runs;
-    let worker_ir_mode        = config.ir_mode.clone();
+    let worker_ir_mode = config.ir_mode.clone();
 
     let mut env = LlvmEnv::new(config.env)?;
     env.compute_baselines()?;
 
     // "base+current" concatenates base and current IR → input_dim doubles to 68.
-    let input_dim = if config.ir_mode == "base+current" { 68 } else { 34 };
+    let input_dim = if config.ir_mode == "base+current" {
+        68
+    } else {
+        34
+    };
     // pos_embed table must exceed max episode length + 1 (IR token) + action zero-pad.
     let pos_table = worker_max_seq_length + 4;
     let mut model = TransformerActorCriticConfig::new()
@@ -70,7 +76,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
         .with_grad_clipping(grad_clip)
         .init::<B, TransformerActorCritic<B>>();
 
-    let multi   = MultiProgress::new();
+    let multi = MultiProgress::new();
     let train_pb = multi.add(ProgressBar::new(config.total_iterations as u64));
     train_pb.set_style(
         ProgressStyle::default_bar()
@@ -91,26 +97,36 @@ pub fn train(config: TrainConfig) -> Result<()> {
     );
     step_pb.enable_steady_tick(Duration::from_millis(120));
 
-    let return_mode   = ReturnMode::from_str(&config.return_mode);
+    let return_mode = ReturnMode::from_str(&config.return_mode);
     let baseline_mode = BaselineMode::from_str(&config.baseline_mode);
-    let mut fn_stats      = FnStats::new();
-    let mut store         = BestEpisodeStore::new(config.prune_threshold, config.store_max_per_func);
+    let mut fn_stats = FnStats::new();
+    let mut store = BestEpisodeStore::new(config.prune_threshold, config.store_max_per_func);
     let mut best_mean_ema: f32 = 0.0;
 
     let num_actions = TransformerActorCriticConfig::new().num_actions;
-    let ir_dim      = if config.ir_mode == "base+current" { 68 } else { 34 };
+    let ir_dim = if config.ir_mode == "base+current" {
+        68
+    } else {
+        34
+    };
 
     let film_cfg = || IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim);
     let mut critic: Box<dyn Critic> = match config.critic_arch.as_str() {
         "ir-film" | "pattern-cnn" => Box::new(IrFilmCritic::<B>::new(
-            film_cfg(), config.ppo.learning_rate, device.clone(),
+            film_cfg(),
+            config.ppo.learning_rate,
+            device.clone(),
         )),
         "hybrid" => Box::new(HybridCritic::<B>::new(
-            film_cfg(), config.ppo.learning_rate, device.clone(),
+            film_cfg(),
+            config.ppo.learning_rate,
+            device.clone(),
             50,
         )),
         "per-func" => Box::new(PerFuncCritic::<B>::new(
-            film_cfg(), config.ppo.learning_rate, device.clone(),
+            film_cfg(),
+            config.ppo.learning_rate,
+            device.clone(),
         )),
         _ => Box::new(NullCritic),
     };
@@ -119,14 +135,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
     const HIST: usize = 20;
     let mut ema_mean_hist: Vec<f32> = Vec::new();
     let mut ent_frac_hist: Vec<f32> = Vec::new();
-    let mut ploss_hist:    Vec<f32> = Vec::new();
-    let mut kl_hist:       Vec<f32> = Vec::new();
-    let mut fn_ema_hist:   HashMap<String, Vec<f32>> = HashMap::new();
+    let mut ploss_hist: Vec<f32> = Vec::new();
+    let mut kl_hist: Vec<f32> = Vec::new();
+    let mut fn_ema_hist: HashMap<String, Vec<f32>> = HashMap::new();
 
     let max_entropy = (TransformerActorCriticConfig::new().num_actions as f32).ln();
 
     let baselines = env.baselines().clone();
-    let n_funcs   = env.num_functions();
+    let n_funcs = env.num_functions();
 
     // Build a name→index map so episode allocation can look up EMAs by function index.
     let fn_index_names: Vec<String> = (0..n_funcs).map(|i| env.function_name(i)).collect();
@@ -155,7 +171,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let min_per_func = (config.episodes_per_function / 4).max(2);
             let mut alloc = vec![min_per_func; n_funcs];
             let spare = total_episodes.saturating_sub(min_per_func * n_funcs);
-            let weights: Vec<f32> = fn_index_names.iter()
+            let weights: Vec<f32> = fn_index_names
+                .iter()
                 .map(|name| (-fn_stats.ema(name.as_str()).unwrap_or(0.0)).max(0.0))
                 .collect();
             let weight_sum: f32 = weights.iter().sum();
@@ -164,9 +181,13 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     alloc[i] += (spare as f32 * w / weight_sum).round() as usize;
                 }
             } else {
-                for i in 0..n_funcs { alloc[i] += spare / n_funcs; }
+                for i in 0..n_funcs {
+                    alloc[i] += spare / n_funcs;
+                }
             }
-            alloc.iter().enumerate()
+            alloc
+                .iter()
+                .enumerate()
                 .flat_map(|(fi, &count)| std::iter::repeat(fi).take(count))
                 .collect()
         } else {
@@ -181,7 +202,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // and re-runs the Transformer over the growing sequence at each step.
         // Compute cost is O(t²) per step vs O(t) for GRU, but entirely negligible
         // compared to compilation + benchmarking time.
-        let episode_results: Vec<(Rollout, String, f32, Option<RewardBreakdown>)> = (0..actual_episodes)
+        let episode_results: Vec<(Rollout, String, f32, Option<RewardBreakdown>)> = (0
+            ..actual_episodes)
             .into_par_iter()
             .map_with(
                 model_inf,
@@ -197,17 +219,20 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     .with_max_seq_length(worker_max_seq_length)
                     .with_benchmark_runs(worker_benchmark_runs);
 
-                    let mut worker_env = LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
-                    let mut state      = worker_env.reset_to(func_index)?;
-                    let func_name      = worker_env.current_function_name().unwrap_or_else(|| "?".into());
+                    let mut worker_env =
+                        LlvmEnv::new_with_baselines(worker_config, baselines.clone())?;
+                    let mut state = worker_env.reset_to(func_index)?;
+                    let func_name = worker_env
+                        .current_function_name()
+                        .unwrap_or_else(|| "?".into());
 
-                    let device  = Dev::default();
+                    let device = Dev::default();
                     let mut rng = rand::thread_rng();
 
-                    let mut rollout        = Rollout::new();
+                    let mut rollout = Rollout::new();
                     let mut episode_reward = 0.0f32;
-                    let feat_dim           = state.features.len();
-                    let ir_mode            = worker_ir_mode.as_str();
+                    let feat_dim = state.features.len();
+                    let ir_mode = worker_ir_mode.as_str();
 
                     // Shared across all modes: base IR captured once at episode start.
                     let base_features: Vec<f32> = state.features.clone();
@@ -245,7 +270,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                         };
 
                         let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
-                        let action   = sample_categorical(&logits_vec, &mut rng);
+                        let action = sample_categorical(&logits_vec, &mut rng);
                         let log_prob = log_softmax_at(&logits_vec, action);
 
                         let step = worker_env.step(action)?;
@@ -261,7 +286,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
                             state.features.clone()
                         };
 
-                        rollout.push(stored_features, action, log_prob, step.reward, 0.0, step.done);
+                        rollout.push(
+                            stored_features,
+                            action,
+                            log_prob,
+                            step.reward,
+                            0.0,
+                            step.done,
+                        );
 
                         if step.done {
                             ep_pb.inc(1);
@@ -284,8 +316,13 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         for (rollout, func_name, _episode_reward, bd) in episode_results {
             if let Some(b) = bd {
-                let e = fn_bd_sum.entry(func_name.clone()).or_insert((0.0, 0.0, 0.0, 0));
-                e.0 += b.vs_o0; e.1 += b.vs_o2; e.2 += b.vs_o3; e.3 += 1;
+                let e = fn_bd_sum
+                    .entry(func_name.clone())
+                    .or_insert((0.0, 0.0, 0.0, 0));
+                e.0 += b.vs_o0;
+                e.1 += b.vs_o2;
+                e.2 += b.vs_o3;
+                e.3 += 1;
             }
             rollout_funcs.push(func_name);
             rollouts.push(rollout);
@@ -295,7 +332,15 @@ pub fn train(config: TrainConfig) -> Result<()> {
         step_pb.set_message("computing advantages");
 
         // 1. Compute returns
-        let returns = Returns::compute(&rollouts, &return_mode, if return_mode == ReturnMode::Episode { 1.0 } else { config.ppo.gamma });
+        let returns = Returns::compute(
+            &rollouts,
+            &return_mode,
+            if return_mode == ReturnMode::Episode {
+                1.0
+            } else {
+                config.ppo.gamma
+            },
+        );
         let episode_g0s = returns.g0_per_ep.clone();
 
         // 2. Update fn_stats (EMA + best) and BestEpisodeStore
@@ -305,7 +350,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             // Step 0 state = base IR features for this episode
             let ir_features = rollout.states.first().cloned().unwrap_or_default();
             store.insert(Episode {
-                func:    func.clone(),
+                func: func.clone(),
                 actions: rollout.actions.clone(),
                 g0,
                 ir_features,
@@ -328,12 +373,17 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
         // 5. Per-episode advantage weights (downweight solved functions)
         let any_unsolved = fn_stats.fn_ema.values().any(|&e| e < 0.0);
-        let ep_weights: Vec<f32> = rollout_funcs.iter().map(|func| {
-            if config.adv_weighting && any_unsolved {
-                let ema_val = fn_stats.ema(func).unwrap_or(0.0);
-                (1.0 - ema_val.max(0.0) / 0.2).max(0.1)
-            } else { 1.0 }
-        }).collect();
+        let ep_weights: Vec<f32> = rollout_funcs
+            .iter()
+            .map(|func| {
+                if config.adv_weighting && any_unsolved {
+                    let ema_val = fn_stats.ema(func).unwrap_or(0.0);
+                    (1.0 - ema_val.max(0.0) / 0.2).max(0.1)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
         let ep_lens: Vec<usize> = rollouts.iter().map(|r| r.len()).collect();
         let step_weights = broadcast_to_steps(&ep_weights, &ep_lens);
 
@@ -363,18 +413,23 @@ pub fn train(config: TrainConfig) -> Result<()> {
         // ── Logging ───────────────────────────────────────────────────────────
         if iteration % config.log_interval == 0 {
             let ent_frac = stats.entropy / max_entropy;
-            let kl       = stats.approx_kl;
-            let clip     = stats.clip_fraction;
-            let ploss    = stats.policy_loss;
+            let kl = stats.approx_kl;
+            let clip = stats.clip_fraction;
+            let ploss = stats.policy_loss;
 
-            let mean_ema = if fn_stats.fn_ema.is_empty() { 0.0 }
-                           else { fn_stats.fn_ema.values().sum::<f32>() / fn_stats.fn_ema.len() as f32 };
+            let mean_ema = if fn_stats.fn_ema.is_empty() {
+                0.0
+            } else {
+                fn_stats.fn_ema.values().sum::<f32>() / fn_stats.fn_ema.len() as f32
+            };
 
             // Raw advantage std (return - baseline, before normalisation).
             // Measures how much outcome variance the baseline leaves unexplained.
             // Near 0 = all episodes had similar returns → weak learning signal.
             let adv_std = {
-                let raw: Vec<f32> = returns.values.iter()
+                let raw: Vec<f32> = returns
+                    .values
+                    .iter()
                     .zip(baseline.values.iter())
                     .map(|(r, b)| r - b)
                     .collect();
@@ -384,22 +439,45 @@ pub fn train(config: TrainConfig) -> Result<()> {
             };
 
             let g0_min = episode_g0s.iter().cloned().fold(f32::INFINITY, f32::min);
-            let g0_max = episode_g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let g0_max = episode_g0s
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
             let g0_spread = g0_max - g0_min;
 
             // ── Save metrics record ───────────────────────────────────────────
             {
-                let fn_ema_map: serde_json::Map<String, serde_json::Value> = fn_stats.fn_ema.iter()
+                let fn_ema_map: serde_json::Map<String, serde_json::Value> = fn_stats
+                    .fn_ema
+                    .iter()
                     .map(|(k, &v)| (k.clone(), serde_json::Value::from(v as f64)))
                     .collect();
-                let fn_vs_o0: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
-                    .map(|(k, &(s0, _, _, n))| (k.clone(), serde_json::Value::from(s0 as f64 / n.max(1) as f64 * 100.0)))
+                let fn_vs_o0: serde_json::Map<String, serde_json::Value> = fn_bd_sum
+                    .iter()
+                    .map(|(k, &(s0, _, _, n))| {
+                        (
+                            k.clone(),
+                            serde_json::Value::from(s0 as f64 / n.max(1) as f64 * 100.0),
+                        )
+                    })
                     .collect();
-                let fn_vs_o2: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
-                    .map(|(k, &(_, s2, _, n))| (k.clone(), serde_json::Value::from(s2 as f64 / n.max(1) as f64 * 100.0)))
+                let fn_vs_o2: serde_json::Map<String, serde_json::Value> = fn_bd_sum
+                    .iter()
+                    .map(|(k, &(_, s2, _, n))| {
+                        (
+                            k.clone(),
+                            serde_json::Value::from(s2 as f64 / n.max(1) as f64 * 100.0),
+                        )
+                    })
                     .collect();
-                let fn_vs_o3: serde_json::Map<String, serde_json::Value> = fn_bd_sum.iter()
-                    .map(|(k, &(_, _, s3, n))| (k.clone(), serde_json::Value::from(s3 as f64 / n.max(1) as f64 * 100.0)))
+                let fn_vs_o3: serde_json::Map<String, serde_json::Value> = fn_bd_sum
+                    .iter()
+                    .map(|(k, &(_, _, s3, n))| {
+                        (
+                            k.clone(),
+                            serde_json::Value::from(s3 as f64 / n.max(1) as f64 * 100.0),
+                        )
+                    })
                     .collect();
                 metric_records.push(serde_json::json!({
                     "iteration":    iteration,
@@ -425,32 +503,71 @@ pub fn train(config: TrainConfig) -> Result<()> {
             // Update rolling histories
             fn push(h: &mut Vec<f32>, v: f32, cap: usize) {
                 h.push(v);
-                if h.len() > cap { h.remove(0); }
+                if h.len() > cap {
+                    h.remove(0);
+                }
             }
             push(&mut ema_mean_hist, mean_ema, HIST);
             push(&mut ent_frac_hist, ent_frac, HIST);
-            push(&mut ploss_hist,    ploss,    HIST);
-            push(&mut kl_hist,       kl,       HIST);
+            push(&mut ploss_hist, ploss, HIST);
+            push(&mut kl_hist, kl, HIST);
             for (k, &v) in &fn_stats.fn_ema {
                 push(fn_ema_hist.entry(k.clone()).or_default(), v, HIST);
             }
 
             // colour helpers: c = higher is better, cr = lower is better
-            let c  = |v: f32, lo: f32, hi: f32| -> &'static str {
-                if v >= hi { "\x1b[32m" } else if v >= lo { "\x1b[33m" } else { "\x1b[31m" }
+            let c = |v: f32, lo: f32, hi: f32| -> &'static str {
+                if v >= hi {
+                    "\x1b[32m"
+                } else if v >= lo {
+                    "\x1b[33m"
+                } else {
+                    "\x1b[31m"
+                }
             };
             let cr = |v: f32, lo: f32, hi: f32| -> &'static str {
-                if v <= lo { "\x1b[32m" } else if v <= hi { "\x1b[33m" } else { "\x1b[31m" }
+                if v <= lo {
+                    "\x1b[32m"
+                } else if v <= hi {
+                    "\x1b[33m"
+                } else {
+                    "\x1b[31m"
+                }
             };
 
             let ema_delta = mean_ema - ema_mean_hist[0];
             let ploss_avg = ploss_hist.iter().sum::<f32>() / ploss_hist.len() as f32;
 
-            let ema_c    = if mean_ema > 0.05 { "\x1b[1;36m" } else if mean_ema > 0.0 { "\x1b[36m" }
-                           else if mean_ema > -0.05 { "\x1b[33m" } else { "\x1b[31m" };
-            let delta_c  = if ema_delta > 0.005 { "\x1b[32m" } else if ema_delta < -0.005 { "\x1b[31m" } else { "\x1b[2m" };
-            let ploss_c  = if ploss.abs() < 0.05 { "\x1b[32m" } else if ploss.abs() < 0.2 { "\x1b[33m" } else { "\x1b[31m" };
-            let pavg_c   = if ploss_avg.abs() < 0.05 { "\x1b[32m" } else if ploss_avg.abs() < 0.15 { "\x1b[33m" } else { "\x1b[31m" };
+            let ema_c = if mean_ema > 0.05 {
+                "\x1b[1;36m"
+            } else if mean_ema > 0.0 {
+                "\x1b[36m"
+            } else if mean_ema > -0.05 {
+                "\x1b[33m"
+            } else {
+                "\x1b[31m"
+            };
+            let delta_c = if ema_delta > 0.005 {
+                "\x1b[32m"
+            } else if ema_delta < -0.005 {
+                "\x1b[31m"
+            } else {
+                "\x1b[2m"
+            };
+            let ploss_c = if ploss.abs() < 0.05 {
+                "\x1b[32m"
+            } else if ploss.abs() < 0.2 {
+                "\x1b[33m"
+            } else {
+                "\x1b[31m"
+            };
+            let pavg_c = if ploss_avg.abs() < 0.05 {
+                "\x1b[32m"
+            } else if ploss_avg.abs() < 0.15 {
+                "\x1b[33m"
+            } else {
+                "\x1b[31m"
+            };
 
             // ── Line 1: policy progress ───────────────────────────────────
             // ema = smoothed return quality. delta = change over history window.
@@ -488,36 +605,75 @@ pub fn train(config: TrainConfig) -> Result<()> {
             fn_list.sort();
             for func in fn_list {
                 let ema_val = fn_stats.fn_ema[func];
-                let hist    = fn_ema_hist.get(func).map(|v| v.as_slice()).unwrap_or(&[]);
+                let hist = fn_ema_hist.get(func).map(|v| v.as_slice()).unwrap_or(&[]);
 
                 // trend arrow: compare old half vs new half of ema history
                 let arrow = if hist.len() >= 4 {
                     let mid = hist.len() / 2;
                     let d = hist[mid..].iter().sum::<f32>() / (hist.len() - mid) as f32
-                          - hist[..mid].iter().sum::<f32>() / mid as f32;
-                    if d > 0.008 { "↑" } else if d < -0.008 { "↓" } else { "→" }
-                } else { "·" };
+                        - hist[..mid].iter().sum::<f32>() / mid as f32;
+                    if d > 0.008 {
+                        "↑"
+                    } else if d < -0.008 {
+                        "↓"
+                    } else {
+                        "→"
+                    }
+                } else {
+                    "·"
+                };
 
-                let g0s: Vec<f32> = rollout_funcs.iter().zip(episode_g0s.iter())
+                let g0s: Vec<f32> = rollout_funcs
+                    .iter()
+                    .zip(episode_g0s.iter())
                     .filter(|(f, _)| f.as_str() == func)
                     .map(|(_, &g)| g)
                     .collect();
                 let fn_spread = if g0s.len() > 1 {
                     g0s.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
-                    - g0s.iter().cloned().fold(f32::INFINITY, f32::min)
-                } else { 0.0 };
+                        - g0s.iter().cloned().fold(f32::INFINITY, f32::min)
+                } else {
+                    0.0
+                };
 
                 let bd_str = if let Some(&(s0, s2, s3, n)) = fn_bd_sum.get(func) {
                     let n = n.max(1) as f32;
-                    let (p0, p2, p3) = (s0/n*100.0, s2/n*100.0, s3/n*100.0);
-                    let c0 = if p0 >= 1.0 { "\x1b[32m" } else if p0 > -1.0 { "\x1b[2m" } else { "\x1b[31m" };
-                    let c2 = if p2 >= 1.0 { "\x1b[32m" } else if p2 > -1.0 { "\x1b[2m" } else { "\x1b[31m" };
-                    let c3 = if p3 >= 1.0 { "\x1b[32m" } else if p3 > -1.0 { "\x1b[2m" } else { "\x1b[31m" };
-                    format!("  O0 {c0}{p0:+.0}%\x1b[0m  O2 {c2}{p2:+.0}%\x1b[0m  O3 {c3}{p3:+.0}%\x1b[0m")
-                } else { String::new() };
+                    let (p0, p2, p3) = (s0 / n * 100.0, s2 / n * 100.0, s3 / n * 100.0);
+                    let c0 = if p0 >= 1.0 {
+                        "\x1b[32m"
+                    } else if p0 > -1.0 {
+                        "\x1b[2m"
+                    } else {
+                        "\x1b[31m"
+                    };
+                    let c2 = if p2 >= 1.0 {
+                        "\x1b[32m"
+                    } else if p2 > -1.0 {
+                        "\x1b[2m"
+                    } else {
+                        "\x1b[31m"
+                    };
+                    let c3 = if p3 >= 1.0 {
+                        "\x1b[32m"
+                    } else if p3 > -1.0 {
+                        "\x1b[2m"
+                    } else {
+                        "\x1b[31m"
+                    };
+                    format!(
+                        "  O0 {c0}{p0:+.0}%\x1b[0m  O2 {c2}{p2:+.0}%\x1b[0m  O3 {c3}{p3:+.0}%\x1b[0m"
+                    )
+                } else {
+                    String::new()
+                };
 
-                let ec = if ema_val > 0.05 { "\x1b[36m" }
-                         else if ema_val > -0.05 { "\x1b[33m" } else { "\x1b[31m" };
+                let ec = if ema_val > 0.05 {
+                    "\x1b[36m"
+                } else if ema_val > -0.05 {
+                    "\x1b[33m"
+                } else {
+                    "\x1b[31m"
+                };
                 let sc = c(fn_spread, 0.03, 0.08);
                 train_pb.println(format!(
                     "  {func:>22}  ema {ec}{ema_val:+.4}\x1b[0m{arrow}  spread {sc}{fn_spread:.4}\x1b[0m{bd_str}",
@@ -531,9 +687,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
                 // ploss stuck positive: baseline too high or policy degrading
                 let ploss_mean = ploss_hist.iter().sum::<f32>() / ploss_hist.len() as f32;
-                let ploss_std  = {
+                let ploss_std = {
                     let m = ploss_mean;
-                    (ploss_hist.iter().map(|x| (x-m).powi(2)).sum::<f32>() / ploss_hist.len() as f32).sqrt()
+                    (ploss_hist.iter().map(|x| (x - m).powi(2)).sum::<f32>()
+                        / ploss_hist.len() as f32)
+                        .sqrt()
                 };
                 if ploss_mean > 0.08 {
                     let pos = ploss_hist.iter().filter(|&&x| x > 0.0).count();
@@ -550,40 +708,66 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 // ema flat or declining over window
                 let ema_delta = mean_ema - ema_mean_hist[0];
                 if ema_delta.abs() < 0.005 {
-                    flags.push(format!("\x1b[33mema flat (Δ{ema_delta:+.4} over {} iters)\x1b[0m", ema_mean_hist.len()));
+                    flags.push(format!(
+                        "\x1b[33mema flat (Δ{ema_delta:+.4} over {} iters)\x1b[0m",
+                        ema_mean_hist.len()
+                    ));
                 } else if ema_delta < -0.01 {
-                    flags.push(format!("\x1b[31mema declining (Δ{ema_delta:+.4} over {} iters)\x1b[0m", ema_mean_hist.len()));
+                    flags.push(format!(
+                        "\x1b[31mema declining (Δ{ema_delta:+.4} over {} iters)\x1b[0m",
+                        ema_mean_hist.len()
+                    ));
                 }
 
                 // entropy collapsing: new half of history significantly lower than old half
                 if ent_frac_hist.len() >= 4 {
                     let mid = ent_frac_hist.len() / 2;
                     let old_e = ent_frac_hist[..mid].iter().sum::<f32>() / mid as f32;
-                    let new_e = ent_frac_hist[mid..].iter().sum::<f32>() / (ent_frac_hist.len() - mid) as f32;
+                    let new_e = ent_frac_hist[mid..].iter().sum::<f32>()
+                        / (ent_frac_hist.len() - mid) as f32;
                     if old_e - new_e > 0.08 {
-                        flags.push(format!("\x1b[31ment collapsing ({:.1}% → {:.1}%)\x1b[0m", old_e*100.0, new_e*100.0));
+                        flags.push(format!(
+                            "\x1b[31ment collapsing ({:.1}% → {:.1}%)\x1b[0m",
+                            old_e * 100.0,
+                            new_e * 100.0
+                        ));
                     } else if new_e < 0.2 {
-                        flags.push(format!("\x1b[31ment critically low ({:.1}%)\x1b[0m", new_e*100.0));
+                        flags.push(format!(
+                            "\x1b[31ment critically low ({:.1}%)\x1b[0m",
+                            new_e * 100.0
+                        ));
                     }
                 }
 
                 // kl repeatedly skipping updates
                 if kl_hist.len() >= 4 {
-                    let skipped = kl_hist.iter().filter(|&&k| k > config.ppo.target_kl).count();
+                    let skipped = kl_hist
+                        .iter()
+                        .filter(|&&k| k > config.ppo.target_kl)
+                        .count();
                     if skipped > kl_hist.len() / 3 {
-                        flags.push(format!("\x1b[31mkl skipping updates ({skipped}/{} iters)\x1b[0m", kl_hist.len()));
+                        flags.push(format!(
+                            "\x1b[31mkl skipping updates ({skipped}/{} iters)\x1b[0m",
+                            kl_hist.len()
+                        ));
                     }
                 }
 
                 // signal dead: raw adv_std in reward units; < 0.01 means all
                 // episodes got nearly identical returns → no learning gradient
                 if adv_std < 0.01 {
-                    flags.push(format!("\x1b[1;31msignal dead (adv_std {adv_std:.5})\x1b[0m"));
+                    flags.push(format!(
+                        "\x1b[1;31msignal dead (adv_std {adv_std:.5})\x1b[0m"
+                    ));
                 }
 
                 // critic info
                 if critic.name() != "null" {
-                    flags.push(format!("\x1b[2mcritc={} store={}\x1b[0m", critic.name(), store.total_count()));
+                    flags.push(format!(
+                        "\x1b[2mcritc={} store={}\x1b[0m",
+                        critic.name(),
+                        store.total_count()
+                    ));
                 }
 
                 if !flags.is_empty() {
@@ -636,7 +820,9 @@ fn sample_categorical(logits: &[f32], rng: &mut impl Rng) -> usize {
     let mut cumsum = 0.0f32;
     for (i, e) in exp.iter().enumerate() {
         cumsum += e / sum;
-        if u <= cumsum { return i; }
+        if u <= cumsum {
+            return i;
+        }
     }
     logits.len() - 1
 }
@@ -646,5 +832,3 @@ fn log_softmax_at(logits: &[f32], action: usize) -> f32 {
     let log_sum_exp = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;
     logits[action] - log_sum_exp
 }
-
-

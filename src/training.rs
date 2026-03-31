@@ -62,4 +62,3 @@ pub struct TrainConfig {
     #[config(default = 32)]
     pub store_max_per_func: usize,
 }
-

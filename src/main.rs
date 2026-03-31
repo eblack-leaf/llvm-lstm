@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+mod actor_critic_tfx;
 mod baseline;
 mod critic;
 mod dataset;
@@ -7,7 +8,6 @@ mod env;
 mod episode_store;
 mod evaluation;
 mod ir_features;
-mod actor_critic_tfx;
 mod pass_menu;
 mod pipeline;
 mod plots;
@@ -203,7 +203,6 @@ enum Commands {
         #[arg(long, default_value = "checkpoints")]
         checkpoint_dir: PathBuf,
     },
-
 }
 
 fn main() -> Result<()> {
@@ -228,8 +227,14 @@ fn main() -> Result<()> {
 
             let wall_start = std::time::Instant::now();
 
-            let collector =
-                dataset::DataCollector::new(&functions, &output, num_sequences, runs, baseline_runs, bench_iters)?;
+            let collector = dataset::DataCollector::new(
+                &functions,
+                &output,
+                num_sequences,
+                runs,
+                baseline_runs,
+                bench_iters,
+            )?;
 
             let t0 = std::time::Instant::now();
             collector.collect_baselines()?;
@@ -247,25 +252,53 @@ fn main() -> Result<()> {
             eprintln!("Total wall time: {wall_min:.1} min ({seq_per_min:.0} sequences/min)");
         }
 
-        Commands::Eda { input, output, functions } => {
+        Commands::Eda {
+            input,
+            output,
+            functions,
+        } => {
             let analyzer = eda::EdaAnalyzer::load(&input)?;
             analyzer.write_all(&output, functions.as_deref())?;
         }
 
-        Commands::Baseline { functions, output, baseline_runs, bench_iters } => {
+        Commands::Baseline {
+            functions,
+            output,
+            baseline_runs,
+            bench_iters,
+        } => {
             let collector =
                 dataset::DataCollector::new(&functions, &output, 0, 1, baseline_runs, bench_iters)?;
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, dynamic_alloc, ir_mode, adv_weighting, return_mode, baseline_mode, critic_arch, prune_threshold, store_max_per_func } => {
+        Commands::Train {
+            functions,
+            work_dir,
+            checkpoint_dir,
+            iterations,
+            episodes,
+            entropy_coef,
+            benchmark_runs,
+            bench_iters,
+            max_seq_length,
+            reward_mode,
+            dynamic_alloc,
+            ir_mode,
+            adv_weighting,
+            return_mode,
+            baseline_mode,
+            critic_arch,
+            prune_threshold,
+            store_max_per_func,
+        } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::TrainConfig;
 
             let mode = match reward_mode.as_str() {
                 "per-step" => RewardMode::PerStep,
-                _          => RewardMode::Sparse,
+                _ => RewardMode::Sparse,
             };
 
             let config = TrainConfig::new(
@@ -301,13 +334,13 @@ fn main() -> Result<()> {
             let evaluator = evaluation::Evaluator::new(&functions, &work_dir, 3)?;
 
             let agent_results = if let Some(model_path) = model {
+                use actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
                 use burn::backend::{NdArray, ndarray::NdArrayDevice};
+                use burn::prelude::Module as _;
                 use burn::record::CompactRecorder;
                 use burn::tensor::{Int, Tensor, TensorData};
-                use evaluation::EvalResult;
                 use env::{EnvConfig, LlvmEnv, RewardMode};
-                use actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
-                use burn::prelude::Module as _;
+                use evaluation::EvalResult;
 
                 eprintln!("Loading model from {}...", model_path.display());
                 let device = NdArrayDevice::default();
@@ -327,11 +360,11 @@ fn main() -> Result<()> {
 
                 let mut results: Vec<EvalResult> = Vec::new();
                 for func_idx in 0..env.num_functions() {
-                    let state       = env.reset_to(func_idx)?;
-                    let func_name   = env.current_function_name().unwrap_or_else(|| "?".into());
+                    let state = env.reset_to(func_idx)?;
+                    let func_name = env.current_function_name().unwrap_or_else(|| "?".into());
                     eprintln!("  inference: {func_name}");
 
-                    let feat_dim   = state.features.len();
+                    let feat_dim = state.features.len();
                     let base_feats = state.features.clone();
                     let mut act_history: Vec<i64> = vec![0i64];
                     let mut passes: Vec<Pass> = Vec::new();
@@ -353,7 +386,9 @@ fn main() -> Result<()> {
                         let action = logits_vec
                             .iter()
                             .enumerate()
-                            .max_by(|(_, a): &(usize, &f32), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                            .max_by(|(_, a): &(usize, &f32), (_, b)| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            })
                             .map(|(i, _)| i)
                             .unwrap_or(0);
 
@@ -433,7 +468,6 @@ fn main() -> Result<()> {
             eprintln!("  All times: {:?}", result.all_times_ns);
             eprintln!("  Binary size: {} bytes", result.binary_size_bytes);
         }
-
 
         Commands::PlotTrain { checkpoint_dir } => {
             plots::plot_train(&checkpoint_dir)?;
