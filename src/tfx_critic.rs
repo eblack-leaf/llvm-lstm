@@ -6,6 +6,7 @@ use burn::nn::transformer::{
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::optim::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
+use burn::prelude::ElementConversion;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 
@@ -129,33 +130,29 @@ where
             .unwrap_or(0.0)
     }
 
-    fn update(&mut self, store: &BestEpisodeStore) {
-        const SAMPLE_SIZE: usize = 640;      // number of episodes per update
-        const BATCH_SIZE: usize = 64;       // mini‑batch size
-        const EPOCHS: usize = 3;             // passes over the sampled data
+    fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
+        const SAMPLE_SIZE: usize = 500;
+        const BATCH_SIZE: usize = 128;
+        const EPOCHS: usize = 1;
 
-        // 1. Collect episodes
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
             .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
             .collect();
 
         if episodes.is_empty() {
-            return;
+            return None;
         }
 
-        // 2. Sample a fixed number of episodes
         use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
         episodes.shuffle(&mut rng);
         episodes.truncate(SAMPLE_SIZE);
 
-        // 3. Determine max sequence length among sampled episodes
         let max_len = episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
         let total = episodes.len();
         let device = self.model.as_ref().unwrap().ir_proj.weight.device();
 
-        // 4. Build CPU buffers for the full sample
         let mut action_buf = vec![0i64; total * max_len];
         let mut ir_buf = vec![0.0f32; total * self.ir_dim];
         let mut target_buf = vec![0.0f32; total];
@@ -169,7 +166,6 @@ where
             target_buf[i] = *g0;
         }
 
-        // 5. Convert to full tensors on the device (once)
         let actions_full = Tensor::<B, 2, Int>::from_data(
             TensorData::new(action_buf, [total, max_len]),
             &device,
@@ -183,29 +179,31 @@ where
             &device,
         );
 
-        // 6. Shuffle indices for mini‑batch iteration
         let mut indices: Vec<usize> = (0..total).collect();
         indices.shuffle(&mut rng);
 
-        // 7. Train for the specified number of epochs
+        let mut total_loss = 0.0f32;
+        let mut n_batches = 0;
+
         for _ in 0..EPOCHS {
             for chunk in indices.chunks(BATCH_SIZE) {
                 let batch = chunk.len();
-                // Build index tensor for this mini‑batch
                 let idx = Tensor::<B, 1, Int>::from_data(
                     TensorData::new(chunk.iter().map(|&i| i as i64).collect::<Vec<_>>(), [batch]),
                     &device,
                 );
 
-                // Clone the full tensors, then select rows – clone is cheap (reference count)
                 let actions = actions_full.clone().select(0, idx.clone());
                 let ir = ir_full.clone().select(0, idx.clone());
                 let targets = targets_full.clone().select(0, idx);
 
-                // Train on this mini‑batch
                 let model = self.model.take().unwrap();
                 let predicted = model.forward(actions, ir);
                 let loss = (predicted - targets).powf_scalar(2.0).mean();
+
+                let l: f32 = loss.clone().into_scalar().elem();
+                total_loss += l;
+                n_batches += 1;
 
                 let grads = loss.backward();
                 let grad_params = GradientsParams::from_grads(grads, &model);
@@ -213,6 +211,8 @@ where
                 self.model = Some(model);
             }
         }
+
+        Some(total_loss / (n_batches as f32))
     }
 
     fn name(&self) -> &str {

@@ -371,7 +371,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
             };
 
         let start = std::time::Instant::now();
-        critic.update(&store);
+        let critic_loss = critic.update(&store); // now returns Option<f32>
         let critic_time = start.elapsed().as_secs_f64();
         train_pb.println(format!("critic update took {critic_time:.1}s"));
 
@@ -693,6 +693,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 train_pb.println(format!(
                     "  {func:>22}  ema {ec}{ema_val:+.4}\x1b[0m{arrow}  spread {sc}{fn_spread:.4}\x1b[0m{bd_str}",
                 ));
+            }
+
+            if let Some(loss) = critic_loss {
+                train_pb.println(format!("         critic loss = {loss:.4}"));
+                metric_records.last_mut().unwrap()["critic_loss"] = serde_json::Value::from(loss as f64);
             }
 
             // ── Pattern flags (detected across rolling history) ───────────

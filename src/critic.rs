@@ -4,6 +4,7 @@ use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, PaddingConfig1d};
 use burn::optim::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
+use burn::prelude::ElementConversion;
 use burn::tensor::activation::relu;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
@@ -18,7 +19,7 @@ use crate::episode_store::BestEpisodeStore;
 /// baseline value used to centre advantages.
 pub trait Critic: Send {
     fn score(&self, func: &str, actions: &[usize], ir_features: &[f32]) -> f32;
-    fn update(&mut self, store: &BestEpisodeStore);
+    fn update(&mut self, store: &BestEpisodeStore) -> Option<f32>;
     fn name(&self) -> &str;
 }
 
@@ -30,7 +31,9 @@ impl Critic for NullCritic {
     fn score(&self, _func: &str, _actions: &[usize], _ir: &[f32]) -> f32 {
         0.0
     }
-    fn update(&mut self, _store: &BestEpisodeStore) {}
+    fn update(&mut self, _store: &BestEpisodeStore) -> Option<f32> {
+        None
+    }
     fn name(&self) -> &str {
         "null"
     }
@@ -199,73 +202,57 @@ where
             .unwrap_or(0.0)
     }
 
-    fn update(&mut self, store: &BestEpisodeStore) {
-        // 1. Collect all episodes as (actions, ir_features, g0)
-        let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
+    fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
+        let all_episodes: Vec<(&Vec<usize>, &Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| {
-                eps.iter()
-                    .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
-            })
+            .flat_map(|(_, eps)| eps.iter().map(|e| (&e.actions, &e.ir_features, e.g0)))
             .collect();
 
-        if episodes.is_empty() {
-            return;
+        if all_episodes.is_empty() {
+            return None;
         }
 
-        // 2. Determine max sequence length for padding
-        let max_len = episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
+        let max_len = all_episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
+        let batch = all_episodes.len();
 
-        // 3. Training hyperparameters (you can make these configurable)
-        let batch_size = 64;
-        let epochs = 3;
-        let lr = self.lr; // already stored
+        let mut action_buf = vec![0i64; batch * max_len];
+        let mut ir_buf = vec![0.0f32; batch * self.ir_dim];
+        let mut target_buf = vec![0.0f32; batch];
 
-        for _ in 0..epochs {
-            // Shuffle episodes
-            use rand::seq::SliceRandom;
-            let mut rng = rand::thread_rng();
-            episodes.shuffle(&mut rng);
-
-            // Process in mini-batches
-            for chunk in episodes.chunks(batch_size) {
-                let batch = chunk.len();
-                let mut action_buf = vec![0i64; batch * max_len];
-                let mut ir_buf = vec![0.0f32; batch * self.ir_dim];
-                let mut target_buf = vec![0.0f32; batch];
-
-                for (i, (actions, ir, g0)) in chunk.iter().enumerate() {
-                    for (t, &a) in actions.iter().enumerate() {
-                        action_buf[i * max_len + t] = a as i64;
-                    }
-                    let src_len = ir.len().min(self.ir_dim);
-                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len]
-                        .copy_from_slice(&ir[..src_len]);
-                    target_buf[i] = *g0;
-                }
-
-                let device = self.model.as_ref().unwrap().action_embed.weight.device();
-                let actions_t = Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(action_buf, [batch, max_len]),
-                    &device,
-                );
-                let ir_t = Tensor::<B, 2>::from_data(
-                    TensorData::new(ir_buf, [batch, self.ir_dim]),
-                    &device,
-                );
-                let targets_t =
-                    Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &device);
-
-                let model = self.model.take().unwrap();
-                let predicted = model.forward(actions_t, ir_t);
-                let loss = (predicted - targets_t).powf_scalar(2.0).mean();
-
-                let grads = loss.backward();
-                let grad_params = GradientsParams::from_grads(grads, &model);
-                let model = self.optim.step(lr, model, grad_params);
-                self.model = Some(model);
+        for (i, (actions, ir, g0)) in all_episodes.iter().enumerate() {
+            for (t, &a) in actions.iter().enumerate() {
+                action_buf[i * max_len + t] = a as i64;
             }
+            let src_len = ir.len().min(self.ir_dim);
+            ir_buf[i * self.ir_dim..i * self.ir_dim + src_len].copy_from_slice(&ir[..src_len]);
+            target_buf[i] = *g0;
         }
+
+        let device = self.model.as_ref().unwrap().action_embed.weight.device();
+        let actions_t = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(action_buf, [batch, max_len]),
+            &device,
+        );
+        let ir_t = Tensor::<B, 2>::from_data(
+            TensorData::new(ir_buf, [batch, self.ir_dim]),
+            &device,
+        );
+        let targets_t = Tensor::<B, 1>::from_data(
+            TensorData::new(target_buf, [batch]),
+            &device,
+        );
+
+        let model = self.model.take().unwrap();
+        let predicted = model.forward(actions_t, ir_t);
+        let loss = (predicted - targets_t).powf_scalar(2.0).mean();
+        let loss_val = loss.clone().into_scalar().elem();
+
+        let grads = loss.backward();
+        let grad_params = GradientsParams::from_grads(grads, &model);
+        let model = self.optim.step(self.lr, model, grad_params);
+        self.model = Some(model);
+
+        Some(loss_val)
     }
 
     fn name(&self) -> &str {
@@ -387,7 +374,9 @@ where
             .unwrap_or(0.0)
     }
 
-    fn update(&mut self, store: &BestEpisodeStore) {
+    fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
+        let mut total_loss = 0.0;
+        let mut func_count = 0;
         for (func, episodes) in store.iter_funcs() {
             if episodes.is_empty() {
                 continue;
@@ -429,11 +418,15 @@ where
             let m = std::mem::replace(model, self.config.init::<B>(&self.device));
             let predicted = m.forward(actions_t, ir_t);
             let loss = (predicted - targets_t).powf_scalar(2.0f32).mean();
+            let loss_val: f32 = loss.clone().into_scalar().elem();
+            total_loss += loss_val;
+            func_count += 1;
             let grads = loss.backward();
             let grad_params = GradientsParams::from_grads(grads, &m);
             let m = optim.step(self.lr, m, grad_params);
             *model = m;
         }
+        Some(total_loss / func_count as f32)
     }
 
     fn name(&self) -> &str {

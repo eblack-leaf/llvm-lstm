@@ -114,7 +114,7 @@ enum Commands {
         #[arg(long, default_value = "300")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "16")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.005")]
@@ -147,7 +147,7 @@ enum Commands {
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
         /// Critic architecture: null | pattern-cnn | ir-film | per-func | transformer
-        #[arg(long, default_value = "transformer")]
+        #[arg(long, default_value = "per-func")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.1")]
@@ -156,7 +156,7 @@ enum Commands {
         #[arg(long, default_value = "256")]
         store_max_per_func: usize,
         /// How big the store needs to be before switching to critic scoring
-        #[arg(long, default_value = "500")]
+        #[arg(long, default_value = "300")]
         warmup_threshold: usize,
     },
 
