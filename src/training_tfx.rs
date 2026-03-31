@@ -91,23 +91,20 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let return_mode   = ReturnMode::from_str(&config.return_mode);
     let baseline_mode = BaselineMode::from_str(&config.baseline_mode);
     let mut fn_stats      = FnStats::new();
-    let mut store         = BestEpisodeStore::new(config.prune_threshold);
+    let mut store         = BestEpisodeStore::new(config.prune_threshold, config.store_max_per_func);
     let mut best_mean_ema: f32 = 0.0;
 
     let num_actions = TransformerActorCriticConfig::new().num_actions;
     let ir_dim      = if config.ir_mode == "base+current" { 68 } else { 34 };
 
+    let film_cfg = || IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim);
     let mut critic: Box<dyn Critic> = match config.critic_arch.as_str() {
-        "ir-film" => Box::new(IrFilmCritic::<B>::new(
-            IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim),
-            config.ppo.learning_rate,
-            device.clone(),
+        "ir-film" | "pattern-cnn" => Box::new(IrFilmCritic::<B>::new(
+            film_cfg(), config.ppo.learning_rate, device.clone(),
         )),
         "hybrid" => Box::new(HybridCritic::<B>::new(
-            IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim),
-            config.ppo.learning_rate,
-            device.clone(),
-            50, // switch to CNN after 50 stored episodes
+            film_cfg(), config.ppo.learning_rate, device.clone(),
+            50,
         )),
         _ => Box::new(NullCritic),
     };
@@ -367,10 +364,17 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let mean_ema = if fn_stats.fn_ema.is_empty() { 0.0 }
                            else { fn_stats.fn_ema.values().sum::<f32>() / fn_stats.fn_ema.len() as f32 };
 
+            // Raw advantage std (return - baseline, before normalisation).
+            // Measures how much outcome variance the baseline leaves unexplained.
+            // Near 0 = all episodes had similar returns → weak learning signal.
             let adv_std = {
-                let n = all_advantages.len().max(1) as f32;
-                let m = all_advantages.iter().sum::<f32>() / n;
-                (all_advantages.iter().map(|x| (x - m).powi(2)).sum::<f32>() / n).sqrt()
+                let raw: Vec<f32> = returns.values.iter()
+                    .zip(baseline.values.iter())
+                    .map(|(r, b)| r - b)
+                    .collect();
+                let n = raw.len().max(1) as f32;
+                let m = raw.iter().sum::<f32>() / n;
+                (raw.iter().map(|x| (x - m).powi(2)).sum::<f32>() / n).sqrt()
             };
 
             let g0_min = episode_g0s.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -464,11 +468,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
             ));
 
             // ── Line 3: signal diagnostics ────────────────────────────────
-            // adv_std<0.015 = episodes too similar, gradient noise dominates.
-            // g0 spread = range in this batch. n = total steps updated.
+            // adv_std = raw (return-baseline) std, reward units.
+            // <0.02 = weak signal. g0 spread = batch return range.
             train_pb.println(format!(
                 "         signal  adv± {}{adv_std:.4}\x1b[0m  g0 {}{g0_spread:.4}\x1b[0m [{g0_min:+.4}..{g0_max:+.4}]  n={}",
-                c(adv_std,   0.015, 0.05),
+                c(adv_std,   0.02, 0.08),
                 c(g0_spread, 0.05,  0.12),
                 combined.len(),
             ));
@@ -565,8 +569,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     }
                 }
 
-                // signal dead
-                if adv_std < 0.005 {
+                // signal dead: raw adv_std in reward units; < 0.01 means all
+                // episodes got nearly identical returns → no learning gradient
+                if adv_std < 0.01 {
                     flags.push(format!("\x1b[1;31msignal dead (adv_std {adv_std:.5})\x1b[0m"));
                 }
 

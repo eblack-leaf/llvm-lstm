@@ -58,5 +58,8 @@ pub struct TrainConfig {
     /// Episodes with g0 < (best_g0 - threshold) are dropped.
     #[config(default = 0.3)]
     pub prune_threshold: f32,
+    /// Hard cap on episodes kept per function (best-first after threshold pruning).
+    #[config(default = 32)]
+    pub store_max_per_func: usize,
 }
 

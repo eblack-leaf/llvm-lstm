@@ -18,12 +18,14 @@ pub struct Episode {
 pub struct BestEpisodeStore {
     /// Maximum allowed gap below the best g0; episodes outside are pruned.
     pub prune_threshold: f32,
+    /// Hard cap: keep at most this many episodes per function (best-first).
+    pub max_per_func: usize,
     pub(crate) store: HashMap<String, Vec<Episode>>,
 }
 
 impl BestEpisodeStore {
-    pub fn new(prune_threshold: f32) -> Self {
-        Self { prune_threshold, store: HashMap::new() }
+    pub fn new(prune_threshold: f32, max_per_func: usize) -> Self {
+        Self { prune_threshold, max_per_func, store: HashMap::new() }
     }
 
     /// Insert an episode.  Re-sorts the per-function list and prunes.
@@ -35,6 +37,7 @@ impl BestEpisodeStore {
             let cutoff = best_g0 - self.prune_threshold;
             entries.retain(|e| e.g0 >= cutoff);
         }
+        entries.truncate(self.max_per_func);
     }
 
     /// All surviving episodes for a function, sorted best-first.

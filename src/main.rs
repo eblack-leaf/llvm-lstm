@@ -151,6 +151,9 @@ enum Commands {
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.3")]
         prune_threshold: f32,
+        /// Hard cap on episodes kept per function in store (best-first)
+        #[arg(long, default_value = "32")]
+        store_max_per_func: usize,
     },
 
     /// Evaluate agent against baselines
@@ -255,7 +258,7 @@ fn main() -> Result<()> {
             collector.collect_baselines()?;
         }
 
-        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, dynamic_alloc, ir_mode, adv_weighting, return_mode, baseline_mode, critic_arch, prune_threshold } => {
+        Commands::Train { functions, work_dir, checkpoint_dir, iterations, episodes, entropy_coef, benchmark_runs, bench_iters, max_seq_length, reward_mode, dynamic_alloc, ir_mode, adv_weighting, return_mode, baseline_mode, critic_arch, prune_threshold, store_max_per_func } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
             use training::TrainConfig;
@@ -281,7 +284,8 @@ fn main() -> Result<()> {
             .with_return_mode(return_mode)
             .with_baseline_mode(baseline_mode)
             .with_critic_arch(critic_arch)
-            .with_prune_threshold(prune_threshold);
+            .with_prune_threshold(prune_threshold)
+            .with_store_max_per_func(store_max_per_func);
 
             training_tfx::train(config)?;
         }
