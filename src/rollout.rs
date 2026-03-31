@@ -53,41 +53,4 @@ impl Rollout {
         out
     }
 
-    /// Compute GAE advantages and discounted returns.
-    ///
-    /// `last_value` — critic's V(s) for the state *after* the final step.
-    /// Pass 0.0 if the last step was a terminal `done`, otherwise run the
-    /// model one extra time and pass that scalar.
-    ///
-    /// Returns `(advantages, returns)` both length `self.len()`.
-    /// `returns[t] = advantages[t] + values[t]` and is used as the value target.
-    pub fn compute_advantages(
-        &self,
-        gamma: f32,
-        lambda: f32,
-        last_value: f32,
-    ) -> (Vec<f32>, Vec<f32>) {
-        let n = self.len();
-        let mut advantages = vec![0f32; n];
-        let mut gae = 0f32;
-
-        // Bootstrap from the state after the final stored step.
-        let mut next_value = last_value;
-
-        for t in (0..n).rev() {
-            let mask = if self.dones[t] { 0.0 } else { 1.0 };
-            let delta = self.rewards[t] + gamma * next_value * mask - self.values[t];
-            gae = delta + gamma * lambda * mask * gae;
-            advantages[t] = gae;
-            next_value = self.values[t];
-        }
-
-        let returns = advantages
-            .iter()
-            .zip(self.values.iter())
-            .map(|(a, v)| a + v)
-            .collect();
-
-        (advantages, returns)
-    }
 }

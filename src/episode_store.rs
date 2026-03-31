@@ -42,19 +42,9 @@ impl BestEpisodeStore {
         self.store.get(func).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Best g0 seen for a function, or `None` if no episodes yet.
-    pub fn best_g0(&self, func: &str) -> Option<f32> {
-        self.store.get(func)?.first().map(|e| e.g0)
-    }
-
     /// Number of surviving episodes across all functions.
     pub fn total_count(&self) -> usize {
         self.store.values().map(|v| v.len()).sum()
-    }
-
-    /// Whether we have at least one episode for a function.
-    pub fn has(&self, func: &str) -> bool {
-        self.store.get(func).map(|v| !v.is_empty()).unwrap_or(false)
     }
 
     /// Iterate over all (func_name, episodes) pairs.

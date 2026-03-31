@@ -56,8 +56,9 @@ pub struct IrFilmCnnConfig {
 ///   action_ids → embedding [b, seq, embed] → permute → [b, embed, seq]
 ///   → conv3/conv5/conv7 (same padding) → global mean-pool each
 ///   → concat [b, ch*3]
-///   FiLM: ir_features → Linear(ir_dim, ch*3*2) → split into (scale, bias)
-///   → h = relu(pooled * scale + bias)
+///   FiLM: ir_features → film_scale(ir_dim → ch*3)
+///                      → film_bias(ir_dim  → ch*3)
+///   → h = relu(pooled * (film_scale + 1) + film_bias)
 ///   → FC(ReLU) → scalar per sequence
 #[derive(Module, Debug)]
 pub struct IrFilmCNN<B: burn::tensor::backend::Backend> {
@@ -65,7 +66,8 @@ pub struct IrFilmCNN<B: burn::tensor::backend::Backend> {
     conv3:        Conv1d<B>,
     conv5:        Conv1d<B>,
     conv7:        Conv1d<B>,
-    film:         Linear<B>,   // ir_dim → conv_channels*3*2 (scale + bias)
+    film_scale:   Linear<B>,   // ir_dim → conv_channels*3
+    film_bias:    Linear<B>,   // ir_dim → conv_channels*3
     fc:           Linear<B>,
     value_out:    Linear<B>,
 }
@@ -79,15 +81,17 @@ impl IrFilmCnnConfig {
         let hidden       = concat_width * 2;
         IrFilmCNN {
             action_embed: EmbeddingConfig::new(self.num_actions, self.embed_dim).init(device),
+            // Valid + manual pre-pad: same semantics as Same but stable backward
             conv3: Conv1dConfig::new(self.embed_dim, self.conv_channels, 3)
-                .with_padding(PaddingConfig1d::Same).init(device),
+                .with_padding(PaddingConfig1d::Valid).init(device),
             conv5: Conv1dConfig::new(self.embed_dim, self.conv_channels, 5)
-                .with_padding(PaddingConfig1d::Same).init(device),
+                .with_padding(PaddingConfig1d::Valid).init(device),
             conv7: Conv1dConfig::new(self.embed_dim, self.conv_channels, 7)
-                .with_padding(PaddingConfig1d::Same).init(device),
-            film:      LinearConfig::new(self.ir_dim, concat_width * 2).init(device),
-            fc:        LinearConfig::new(concat_width, hidden).init(device),
-            value_out: LinearConfig::new(hidden, 1).init(device),
+                .with_padding(PaddingConfig1d::Valid).init(device),
+            film_scale: LinearConfig::new(self.ir_dim, concat_width).init(device),
+            film_bias:  LinearConfig::new(self.ir_dim, concat_width).init(device),
+            fc:         LinearConfig::new(concat_width, hidden).init(device),
+            value_out:  LinearConfig::new(hidden, 1).init(device),
         }
     }
 }
@@ -103,13 +107,20 @@ impl<B: burn::tensor::backend::Backend> IrFilmCNN<B> {
     ) -> Tensor<B, 1> {
         let [batch, _] = actions.dims();
 
-        // Convolve over action sequence
         let emb = self.action_embed.forward(actions);
-        let x   = emb.permute([0, 2, 1]);             // [b, embed, seq]
+        let x   = emb.permute([0, 2, 1]);           // [b, embed, seq]
+        let device = x.device();
+        let [xb, xc, _] = x.dims();
 
-        let c3 = relu(self.conv3.forward(x.clone())); // [b, ch, seq]
-        let c5 = relu(self.conv5.forward(x.clone()));
-        let c7 = relu(self.conv7.forward(x));
+        // Manual symmetric padding so Valid conv produces same-length output.
+        let pad = |t: Tensor<B, 3>, p: usize| -> Tensor<B, 3> {
+            let z = Tensor::zeros([xb, xc, p], &device);
+            Tensor::cat(vec![z.clone(), t, z], 2)
+        };
+
+        let c3 = relu(self.conv3.forward(pad(x.clone(), 1))); // [b, ch, seq]
+        let c5 = relu(self.conv5.forward(pad(x.clone(), 2)));
+        let c7 = relu(self.conv7.forward(pad(x,         3)));
 
         let [_, ch3, _] = c3.dims();
         let [_, ch5, _] = c5.dims();
@@ -120,13 +131,10 @@ impl<B: burn::tensor::backend::Backend> IrFilmCNN<B> {
 
         let pooled = Tensor::cat(vec![p3, p5, p7], 1); // [b, ch*3]
 
-        // FiLM conditioning: scale + bias from IR features
-        let film_out = self.film.forward(ir_features);             // [b, ch*3*2]
-        let cw       = pooled.shape().dims[1];
-        let scale    = film_out.clone().slice([0..batch, 0..cw]);  // [b, ch*3]
-        let bias     = film_out.slice([0..batch, cw..cw * 2]);     // [b, ch*3]
-
-        let modulated = relu(pooled * (scale + 1.0) + bias);       // [b, ch*3]
+        // FiLM conditioning: multiplicative scale + additive bias, both from IR
+        let scale     = self.film_scale.forward(ir_features.clone()); // [b, ch*3]
+        let bias      = self.film_bias.forward(ir_features);          // [b, ch*3]
+        let modulated = relu(pooled * (scale + 1.0) + bias);          // [b, ch*3]
         let h         = relu(self.fc.forward(modulated));
         self.value_out.forward(h).reshape([batch])
     }
@@ -233,11 +241,7 @@ where
     fn name(&self) -> &str { "ir-film" }
 }
 
-// ── RetrievalCritic ───────────────────────────────────────────────────────────
-//
-// Non-parametric k-NN baseline: Jaccard similarity on action-id sets,
-// weighted average of top-k G0 values from BestEpisodeStore.
-// No gradient, no parameters — always up to date.
+// ── k-NN retrieval ────────────────────────────────────────────────────────────
 
 const KNN_K: usize = 5;
 
@@ -257,22 +261,6 @@ fn jaccard(a: &[usize], b: &[usize]) -> f32 {
     }
     let union = sa.len() + sb.len() - inter;
     if union == 0 { 1.0 } else { inter as f32 / union as f32 }
-}
-
-pub struct RetrievalCritic;
-
-impl Critic for RetrievalCritic {
-    fn score(&self, func: &str, actions: &[usize], _ir: &[f32]) -> f32 {
-        // score() needs the store — but the Critic trait doesn't pass it.
-        // RetrievalCritic is only useful via BaselineMode::Retrieval which
-        // calls store directly; score() is a no-op here.
-        let _ = func;
-        let _ = actions;
-        0.0
-    }
-
-    fn update(&mut self, _store: &BestEpisodeStore) {}
-    fn name(&self) -> &str { "retrieval" }
 }
 
 /// Standalone retrieval score used by BaselineMode::Retrieval.
@@ -337,21 +325,3 @@ where
     }
 }
 
-/// Score function that respects the hybrid threshold:
-/// retrieval when store is sparse, film CNN when rich.
-pub fn hybrid_score<B: AutodiffBackend + 'static>(
-    hybrid:  &HybridCritic<B>,
-    store:   &BestEpisodeStore,
-    func:    &str,
-    actions: &[usize],
-    ir:      &[f32],
-) -> f32
-where
-    B::Device: Clone,
-{
-    if store.total_count() < hybrid.nn_threshold {
-        retrieval_score(store, func, actions)
-    } else {
-        hybrid.film.score(func, actions, ir)
-    }
-}
