@@ -200,53 +200,70 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) {
-        let all_episodes: Vec<(&Vec<usize>, &Vec<f32>, f32)> = store
+        // 1. Collect all episodes as (actions, ir_features, g0)
+        let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| eps.iter().map(|e| (&e.actions, &e.ir_features, e.g0)))
+            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
             .collect();
 
-        if all_episodes.is_empty() {
+        if episodes.is_empty() {
             return;
         }
 
-        let max_len = all_episodes
-            .iter()
-            .map(|(a, _, _)| a.len())
-            .max()
-            .unwrap_or(1);
-        let batch = all_episodes.len();
+        // 2. Determine max sequence length for padding
+        let max_len = episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
 
-        let mut action_buf = vec![0i64; batch * max_len];
-        let mut ir_buf = vec![0.0f32; batch * self.ir_dim];
-        let mut target_buf = vec![0.0f32; batch];
+        // 3. Training hyperparameters (you can make these configurable)
+        let batch_size = 64;
+        let epochs = 3;
+        let lr = self.lr; // already stored
 
-        for (i, (actions, ir, g0)) in all_episodes.iter().enumerate() {
-            for (t, &a) in actions.iter().enumerate() {
-                action_buf[i * max_len + t] = a as i64;
+        for _ in 0..epochs {
+            // Shuffle episodes
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            episodes.shuffle(&mut rng);
+
+            // Process in mini-batches
+            for chunk in episodes.chunks(batch_size) {
+                let batch = chunk.len();
+                let mut action_buf = vec![0i64; batch * max_len];
+                let mut ir_buf = vec![0.0f32; batch * self.ir_dim];
+                let mut target_buf = vec![0.0f32; batch];
+
+                for (i, (actions, ir, g0)) in chunk.iter().enumerate() {
+                    for (t, &a) in actions.iter().enumerate() {
+                        action_buf[i * max_len + t] = a as i64;
+                    }
+                    let src_len = ir.len().min(self.ir_dim);
+                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len].copy_from_slice(&ir[..src_len]);
+                    target_buf[i] = *g0;
+                }
+
+                let device = self.model.as_ref().unwrap().action_embed.weight.device();
+                let actions_t = Tensor::<B, 2, Int>::from_data(
+                    TensorData::new(action_buf, [batch, max_len]),
+                    &device,
+                );
+                let ir_t = Tensor::<B, 2>::from_data(
+                    TensorData::new(ir_buf, [batch, self.ir_dim]),
+                    &device,
+                );
+                let targets_t = Tensor::<B, 1>::from_data(
+                    TensorData::new(target_buf, [batch]),
+                    &device,
+                );
+
+                let model = self.model.take().unwrap();
+                let predicted = model.forward(actions_t, ir_t);
+                let loss = (predicted - targets_t).powf_scalar(2.0).mean();
+
+                let grads = loss.backward();
+                let grad_params = GradientsParams::from_grads(grads, &model);
+                let model = self.optim.step(lr, model, grad_params);
+                self.model = Some(model);
             }
-            let ir_slice = &mut ir_buf[i * self.ir_dim..(i + 1) * self.ir_dim];
-            let src_len = ir.len().min(self.ir_dim);
-            ir_slice[..src_len].copy_from_slice(&ir[..src_len]);
-            target_buf[i] = *g0;
         }
-
-        let actions_t = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(action_buf, [batch, max_len]),
-            &self.device,
-        );
-        let ir_t =
-            Tensor::<B, 2>::from_data(TensorData::new(ir_buf, [batch, self.ir_dim]), &self.device);
-        let targets_t =
-            Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &self.device);
-
-        let model = self.model.take().unwrap();
-        let predicted = model.forward(actions_t, ir_t);
-        let loss = (predicted - targets_t).powf_scalar(2.0f32).mean();
-
-        let grads = loss.backward();
-        let grad_params = GradientsParams::from_grads(grads, &model);
-        let model = self.optim.step(self.lr, model, grad_params);
-        self.model = Some(model);
     }
 
     fn name(&self) -> &str {

@@ -114,7 +114,7 @@ enum Commands {
         #[arg(long, default_value = "200")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "128")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.005")]
@@ -138,7 +138,7 @@ enum Commands {
         #[arg(long, default_value = "base")]
         ir_mode: String,
         /// Downweight solved functions' advantages when batch mixes solved/unsolved
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "true")]
         adv_weighting: bool,
         /// Return computation mode: episode | per-step
         #[arg(long, default_value = "episode")]
@@ -153,7 +153,7 @@ enum Commands {
         #[arg(long, default_value = "0.1")]
         prune_threshold: f32,
         /// Hard cap on episodes kept per function in store (best-first)
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "256")]
         store_max_per_func: usize,
     },
 
