@@ -114,7 +114,7 @@ enum Commands {
         #[arg(long, default_value = "200")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "32")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.005")]
