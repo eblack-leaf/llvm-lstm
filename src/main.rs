@@ -16,6 +16,7 @@ mod returns;
 mod rollout;
 mod training;
 mod training_tfx;
+mod tfx_critic;
 
 use std::path::PathBuf;
 
@@ -145,8 +146,8 @@ enum Commands {
         /// Baseline mode: intra-batch | best | critic | retrieval
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
-        /// Critic architecture: null | pattern-cnn | ir-film | hybrid | per-func
-        #[arg(long, default_value = "hybrid")]
+        /// Critic architecture: null | pattern-cnn | ir-film | hybrid | per-func | transformer
+        #[arg(long, default_value = "transformer")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.1")]

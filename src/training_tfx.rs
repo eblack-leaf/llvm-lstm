@@ -42,6 +42,7 @@ use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
 use crate::returns::{ReturnMode, Returns};
 use crate::rollout::Rollout;
+use crate::tfx_critic::TransformerCritic;
 use crate::training::TrainConfig;
 
 type B = Autodiff<Inner>;
@@ -128,6 +129,16 @@ pub fn train(config: TrainConfig) -> Result<()> {
             config.ppo.learning_rate,
             device.clone(),
         )),
+        "transformer" => {
+            let actor_cfg = TransformerActorCriticConfig::new()
+                .with_input_dim(input_dim)
+                .with_max_seq_len(pos_table);
+            Box::new(TransformerCritic::<B>::new(
+                actor_cfg,
+                config.ppo.learning_rate,
+                &device,
+            ))
+        }
         _ => Box::new(NullCritic),
     };
 
