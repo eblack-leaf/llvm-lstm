@@ -110,22 +110,22 @@ enum Commands {
         #[arg(long, default_value = "checkpoints")]
         checkpoint_dir: String,
         /// Total number of collect+update iterations
-        #[arg(long, default_value = "1000")]
+        #[arg(long, default_value = "200")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "16")]
+        #[arg(long, default_value = "32")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.005")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "3")]
         benchmark_runs: usize,
         /// Internal timing iterations inside each benchmark binary
         #[arg(long, default_value = "51")]
         bench_iters: usize,
         /// Max pass sequence length per episode
-        #[arg(long, default_value = "40")]
+        #[arg(long, default_value = "50")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
@@ -146,13 +146,13 @@ enum Commands {
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
         /// Critic architecture: null | pattern-cnn | ir-film | hybrid
-        #[arg(long, default_value = "pattern-cnn")]
+        #[arg(long, default_value = "hybrid")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.3")]
         prune_threshold: f32,
         /// Hard cap on episodes kept per function in store (best-first)
-        #[arg(long, default_value = "32")]
+        #[arg(long, default_value = "64")]
         store_max_per_func: usize,
     },
 
