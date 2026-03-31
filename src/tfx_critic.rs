@@ -130,61 +130,82 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) {
-        // 1. Collect all episodes
+        const SAMPLE_SIZE: usize = 640;      // number of episodes per update
+        const BATCH_SIZE: usize = 64;       // mini‑batch size
+        const EPOCHS: usize = 3;             // passes over the sampled data
+
+        // 1. Collect episodes
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| {
-                eps.iter()
-                    .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
-            })
+            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
             .collect();
 
         if episodes.is_empty() {
             return;
         }
 
+        // 2. Sample a fixed number of episodes
+        use rand::seq::SliceRandom;
+        let mut rng = rand::thread_rng();
+        episodes.shuffle(&mut rng);
+        episodes.truncate(SAMPLE_SIZE);
+
+        // 3. Determine max sequence length among sampled episodes
         let max_len = episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
-        let batch_size = 64; // tune as needed
-        let epochs = 3; // number of passes over the store per iteration
+        let total = episodes.len();
+        let device = self.model.as_ref().unwrap().ir_proj.weight.device();
 
-        for _ in 0..epochs {
-            // Shuffle episodes
-            use rand::seq::SliceRandom;
-            let mut rng = rand::thread_rng();
-            episodes.shuffle(&mut rng);
+        // 4. Build CPU buffers for the full sample
+        let mut action_buf = vec![0i64; total * max_len];
+        let mut ir_buf = vec![0.0f32; total * self.ir_dim];
+        let mut target_buf = vec![0.0f32; total];
 
-            // Process in mini-batches
-            for chunk in episodes.chunks(batch_size) {
+        for (i, (actions, ir, g0)) in episodes.iter().enumerate() {
+            for (t, &a) in actions.iter().enumerate() {
+                action_buf[i * max_len + t] = a as i64;
+            }
+            let src_len = ir.len().min(self.ir_dim);
+            ir_buf[i * self.ir_dim..i * self.ir_dim + src_len].copy_from_slice(&ir[..src_len]);
+            target_buf[i] = *g0;
+        }
+
+        // 5. Convert to full tensors on the device (once)
+        let actions_full = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(action_buf, [total, max_len]),
+            &device,
+        );
+        let ir_full = Tensor::<B, 2>::from_data(
+            TensorData::new(ir_buf, [total, self.ir_dim]),
+            &device,
+        );
+        let targets_full = Tensor::<B, 1>::from_data(
+            TensorData::new(target_buf, [total]),
+            &device,
+        );
+
+        // 6. Shuffle indices for mini‑batch iteration
+        let mut indices: Vec<usize> = (0..total).collect();
+        indices.shuffle(&mut rng);
+
+        // 7. Train for the specified number of epochs
+        for _ in 0..EPOCHS {
+            for chunk in indices.chunks(BATCH_SIZE) {
                 let batch = chunk.len();
-                let mut action_buf = vec![0i64; batch * max_len];
-                let mut ir_buf = vec![0.0f32; batch * self.ir_dim];
-                let mut target_buf = vec![0.0f32; batch];
-
-                for (i, (actions, ir, g0)) in chunk.iter().enumerate() {
-                    for (t, &a) in actions.iter().enumerate() {
-                        action_buf[i * max_len + t] = a as i64;
-                    }
-                    let src_len = ir.len().min(self.ir_dim);
-                    ir_buf[i * self.ir_dim..i * self.ir_dim + src_len]
-                        .copy_from_slice(&ir[..src_len]);
-                    target_buf[i] = *g0;
-                }
-
-                let device = self.model.as_ref().unwrap().ir_proj.weight.device();
-                let actions_t = Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(action_buf, [batch, max_len]),
+                // Build index tensor for this mini‑batch
+                let idx = Tensor::<B, 1, Int>::from_data(
+                    TensorData::new(chunk.iter().map(|&i| i as i64).collect::<Vec<_>>(), [batch]),
                     &device,
                 );
-                let ir_t = Tensor::<B, 2>::from_data(
-                    TensorData::new(ir_buf, [batch, self.ir_dim]),
-                    &device,
-                );
-                let targets_t =
-                    Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &device);
 
+                // Clone the full tensors, then select rows – clone is cheap (reference count)
+                let actions = actions_full.clone().select(0, idx.clone());
+                let ir = ir_full.clone().select(0, idx.clone());
+                let targets = targets_full.clone().select(0, idx);
+
+                // Train on this mini‑batch
                 let model = self.model.take().unwrap();
-                let predicted = model.forward(actions_t, ir_t);
-                let loss = (predicted - targets_t).powf_scalar(2.0).mean();
+                let predicted = model.forward(actions, ir);
+                let loss = (predicted - targets).powf_scalar(2.0).mean();
 
                 let grads = loss.backward();
                 let grad_params = GradientsParams::from_grads(grads, &model);
