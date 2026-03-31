@@ -59,8 +59,11 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
     // "base+current" concatenates base and current IR → input_dim doubles to 68.
     let input_dim = if config.ir_mode == "base+current" { 68 } else { 34 };
+    // pos_embed table must exceed max episode length + 1 (IR token) + action zero-pad.
+    let pos_table = worker_max_seq_length + 4;
     let mut model = TransformerActorCriticConfig::new()
         .with_input_dim(input_dim)
+        .with_max_seq_len(pos_table)
         .init::<B>(&device);
     let grad_clip = Some(GradientClippingConfig::Norm(0.5));
     let mut optim = AdamConfig::new()
