@@ -34,7 +34,7 @@ use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
 use crate::baseline::{broadcast_to_steps, build_advantages, Baseline, BaselineMode, FnStats};
-use crate::critic::{Critic, HybridCritic, IrFilmCnnConfig, IrFilmCritic, NullCritic};
+use crate::critic::{Critic, HybridCritic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
@@ -108,6 +108,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
         "hybrid" => Box::new(HybridCritic::<B>::new(
             film_cfg(), config.ppo.learning_rate, device.clone(),
             50,
+        )),
+        "per-func" => Box::new(PerFuncCritic::<B>::new(
+            film_cfg(), config.ppo.learning_rate, device.clone(),
         )),
         _ => Box::new(NullCritic),
     };

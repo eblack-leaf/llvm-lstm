@@ -125,7 +125,7 @@ enum Commands {
         #[arg(long, default_value = "51")]
         bench_iters: usize,
         /// Max pass sequence length per episode
-        #[arg(long, default_value = "100")]
+        #[arg(long, default_value = "40")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
@@ -145,8 +145,8 @@ enum Commands {
         /// Baseline mode: intra-batch | best | critic | retrieval
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
-        /// Critic architecture: null | pattern-cnn | ir-film | hybrid
-        #[arg(long, default_value = "hybrid")]
+        /// Critic architecture: null | pattern-cnn | ir-film | hybrid | per-func
+        #[arg(long, default_value = "per-func")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.1")]

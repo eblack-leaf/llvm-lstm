@@ -245,22 +245,25 @@ where
 
 const KNN_K: usize = 5;
 
-fn jaccard(a: &[usize], b: &[usize]) -> f32 {
+/// LCS-based sequence similarity: 2*lcs / (|a| + |b|).
+/// Order-aware — treats the action sequence as a sequence, not a set.
+fn seq_sim(a: &[usize], b: &[usize]) -> f32 {
     if a.is_empty() && b.is_empty() { return 1.0; }
-    // Use sorted deduplication for set ops without heap allocation
-    let mut sa: Vec<usize> = a.to_vec(); sa.sort_unstable(); sa.dedup();
-    let mut sb: Vec<usize> = b.to_vec(); sb.sort_unstable(); sb.dedup();
-    let mut inter = 0usize;
-    let (mut i, mut j) = (0, 0);
-    while i < sa.len() && j < sb.len() {
-        match sa[i].cmp(&sb[j]) {
-            std::cmp::Ordering::Equal => { inter += 1; i += 1; j += 1; }
-            std::cmp::Ordering::Less  => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
+    let denom = (a.len() + b.len()) as f32;
+    if denom == 0.0 { return 1.0; }
+    // DP LCS — O(n*m), sequences are short (≤ max_seq_length)
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![0u32; (n + 1) * (m + 1)];
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i * (m + 1) + j] = if a[i - 1] == b[j - 1] {
+                dp[(i - 1) * (m + 1) + (j - 1)] + 1
+            } else {
+                dp[(i - 1) * (m + 1) + j].max(dp[i * (m + 1) + (j - 1)])
+            };
         }
     }
-    let union = sa.len() + sb.len() - inter;
-    if union == 0 { 1.0 } else { inter as f32 / union as f32 }
+    2.0 * dp[n * (m + 1) + m] as f32 / denom
 }
 
 /// Standalone retrieval score used by BaselineMode::Retrieval.
@@ -271,7 +274,7 @@ pub fn retrieval_score(store: &BestEpisodeStore, func: &str, actions: &[usize]) 
     if episodes.is_empty() { return 0.0; }
 
     let mut sims: Vec<(f32, f32)> = episodes.iter()
-        .map(|e| (jaccard(actions, &e.actions), e.g0))
+        .map(|e| (seq_sim(actions, &e.actions), e.g0))
         .collect();
 
     // Take top-k by similarity
@@ -288,10 +291,6 @@ pub fn retrieval_score(store: &BestEpisodeStore, func: &str, actions: &[usize]) 
 }
 
 // ── HybridCritic ─────────────────────────────────────────────────────────────
-//
-// Uses retrieval when the store is sparse (< nn_threshold episodes),
-// then switches to the IR-FiLM CNN once enough data has accumulated.
-// Both run in parallel after the switch point; CNN takes precedence.
 
 pub struct HybridCritic<B: AutodiffBackend> {
     film:         IrFilmCritic<B>,
@@ -309,19 +308,89 @@ where
     B::Device: Clone,
 {
     fn score(&self, func: &str, actions: &[usize], ir_features: &[f32]) -> f32 {
-        // score() without store: fall back to film score.
-        // Retrieval is only meaningful via BaselineMode::Retrieval.
         self.film.score(func, actions, ir_features)
+    }
+    fn update(&mut self, store: &BestEpisodeStore) {
+        if store.total_count() >= self.nn_threshold { self.film.update(store); }
+    }
+    fn name(&self) -> &str { "hybrid" }
+}
+
+// ── PerFuncCritic ─────────────────────────────────────────────────────────────
+
+pub struct PerFuncCritic<B: AutodiffBackend> {
+    models: std::collections::HashMap<String, IrFilmCNN<B>>,
+    optims: std::collections::HashMap<String, OptimizerAdaptor<Adam, IrFilmCNN<B>, B>>,
+    config: IrFilmCnnConfig,
+    device: B::Device,
+    lr:     f64,
+}
+
+impl<B: AutodiffBackend> PerFuncCritic<B> {
+    pub fn new(config: IrFilmCnnConfig, lr: f64, device: B::Device) -> Self {
+        Self { models: Default::default(), optims: Default::default(), config, device, lr }
+    }
+}
+
+impl<B: AutodiffBackend + 'static> Critic for PerFuncCritic<B>
+where
+    B::Device: Clone,
+{
+    fn score(&self, func: &str, actions: &[usize], ir_features: &[f32]) -> f32 {
+        let Some(model) = self.models.get(func) else { return 0.0 };
+        if actions.is_empty() { return 0.0; }
+        let model_inf  = model.valid();
+        let seq        = actions.len();
+        let mut ir     = ir_features.to_vec();
+        ir.resize(self.config.ir_dim, 0.0);
+        let actions_t = Tensor::<B::InnerBackend, 2, Int>::from_data(
+            TensorData::new(actions.iter().map(|&a| a as i64).collect::<Vec<_>>(), [1, seq]),
+            &self.device,
+        );
+        let ir_t = Tensor::<B::InnerBackend, 2>::from_data(
+            TensorData::new(ir, [1, self.config.ir_dim]), &self.device,
+        );
+        model_inf.forward(actions_t, ir_t)
+            .into_data().to_vec::<f32>().unwrap_or_default()
+            .first().copied().unwrap_or(0.0)
     }
 
     fn update(&mut self, store: &BestEpisodeStore) {
-        if store.total_count() >= self.nn_threshold {
-            self.film.update(store);
+        for (func, episodes) in store.iter_funcs() {
+            if episodes.is_empty() { continue; }
+            let model = self.models.entry(func.to_string())
+                .or_insert_with(|| self.config.init::<B>(&self.device));
+            let optim = self.optims.entry(func.to_string())
+                .or_insert_with(|| AdamConfig::new().init::<B, IrFilmCNN<B>>());
+
+            let max_len = episodes.iter().map(|e| e.actions.len()).max().unwrap_or(1);
+            let batch   = episodes.len();
+            let ir_dim  = self.config.ir_dim;
+            let mut action_buf = vec![0i64;  batch * max_len];
+            let mut ir_buf     = vec![0.0f32; batch * ir_dim];
+            let mut target_buf = vec![0.0f32; batch];
+            for (i, ep) in episodes.iter().enumerate() {
+                for (t, &a) in ep.actions.iter().enumerate() { action_buf[i * max_len + t] = a as i64; }
+                let src = ep.ir_features.len().min(ir_dim);
+                ir_buf[i * ir_dim..i * ir_dim + src].copy_from_slice(&ep.ir_features[..src]);
+                target_buf[i] = ep.g0;
+            }
+            let actions_t = Tensor::<B, 2, Int>::from_data(TensorData::new(action_buf, [batch, max_len]), &self.device);
+            let ir_t      = Tensor::<B, 2>::from_data(TensorData::new(ir_buf, [batch, ir_dim]), &self.device);
+            let targets_t = Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &self.device);
+
+            // Need to take ownership for burn autodiff
+            // SAFETY: we re-insert immediately after
+            let m = std::mem::replace(model, self.config.init::<B>(&self.device));
+            let predicted = m.forward(actions_t, ir_t);
+            let loss      = (predicted - targets_t).powf_scalar(2.0f32).mean();
+            let grads       = loss.backward();
+            let grad_params = GradientsParams::from_grads(grads, &m);
+            let m           = optim.step(self.lr, m, grad_params);
+            *model          = m;
         }
     }
 
-    fn name(&self) -> &str {
-        "hybrid"
-    }
+    fn name(&self) -> &str { "per-func" }
 }
 
