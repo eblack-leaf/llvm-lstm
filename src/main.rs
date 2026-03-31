@@ -113,7 +113,7 @@ enum Commands {
         #[arg(long, default_value = "200")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "32")]
+        #[arg(long, default_value = "64")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.005")]
@@ -125,13 +125,13 @@ enum Commands {
         #[arg(long, default_value = "51")]
         bench_iters: usize,
         /// Max pass sequence length per episode
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "100")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
         reward_mode: String,
         /// Allocate more episodes to functions still below O3, fewer to solved ones
-        #[arg(long, default_value = "false")]
+        #[arg(long, default_value = "true")]
         dynamic_alloc: bool,
         /// IR featurisation mode: base | base+current
         #[arg(long, default_value = "base")]
@@ -143,10 +143,10 @@ enum Commands {
         #[arg(long, default_value = "episode")]
         return_mode: String,
         /// Baseline mode: intra-batch | best | critic | retrieval
-        #[arg(long, default_value = "intra-batch")]
+        #[arg(long, default_value = "critic")]
         baseline_mode: String,
         /// Critic architecture: null | pattern-cnn | ir-film | hybrid | per-func
-        #[arg(long, default_value = "null")]
+        #[arg(long, default_value = "hybrid")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.1")]
