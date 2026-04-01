@@ -13,10 +13,10 @@ pub struct PpoConfig {
     #[config(default = 0.3)]
     pub clip_epsilon: f32,
     /// Entropy bonus coefficient — encourages exploration.
-    #[config(default = 0.005)]
+    #[config(default = 0.02)]
     pub entropy_coef: f32,
     /// Adam learning rate.
-    #[config(default = 3e-4)]
+    #[config(default = 1e-3)]
     pub learning_rate: f64,
     /// Discount factor.
     #[config(default = 0.99)]
@@ -31,7 +31,7 @@ pub struct PpoConfig {
     #[config(default = 3)]
     pub num_epochs: usize,
     /// Stop updates when approx KL exceeds this threshold.
-    #[config(default = 0.15)]
+    #[config(default = 0.2)]
     pub target_kl: f32,
 }
 

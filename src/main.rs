@@ -114,16 +114,16 @@ enum Commands {
         #[arg(long, default_value = "300")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "24")]
+        #[arg(long, default_value = "32")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
-        #[arg(long, default_value = "0.005")]
+        #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
         #[arg(long, default_value = "1")]
         benchmark_runs: usize,
         /// Internal timing iterations inside each benchmark binary
-        #[arg(long, default_value = "51")]
+        #[arg(long, default_value = "50")]
         bench_iters: usize,
         /// Max pass sequence length per episode
         #[arg(long, default_value = "40")]
@@ -156,7 +156,7 @@ enum Commands {
         #[arg(long, default_value = "256")]
         store_max_per_func: usize,
         /// How big the store needs to be before switching to critic scoring
-        #[arg(long, default_value = "100")]
+        #[arg(long, default_value = "300")]
         warmup_threshold: usize,
     },
 
