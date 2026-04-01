@@ -366,7 +366,7 @@ impl LlvmEnv {
                 vs_o2,
                 vs_o3,
             };
-            (vs_o3, Some(bd))
+            (3.0 * vs_o3, Some(bd))
         } else {
             (0.0, None)
         }

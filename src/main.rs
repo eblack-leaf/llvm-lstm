@@ -147,7 +147,7 @@ enum Commands {
         #[arg(long, default_value = "best")]
         baseline_mode: String,
         /// Critic architecture: null | ir-film | per-func | transformer
-        #[arg(long, default_value = "transformer")]
+        #[arg(long, default_value = "null")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.2")]
