@@ -1,9 +1,11 @@
+use burn::grad_clipping::GradientClippingConfig;
 // File: src/tfx_critic.rs (or inside critic.rs)
 use burn::module::Module;
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
+use burn::optim::decay::WeightDecayConfig;
 use burn::optim::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::ElementConversion;
@@ -25,7 +27,10 @@ pub struct TransformerCritic<B: AutodiffBackend> {
 impl<B: AutodiffBackend> TransformerCritic<B> {
     pub fn new(actor_config: TransformerActorCriticConfig, lr: f64, device: &B::Device) -> Self {
         let model = TransformerCriticModel::new(actor_config.clone(), device);
-        let optim = AdamConfig::new().init::<B, TransformerCriticModel<B>>();
+        let optim = AdamConfig::new()
+            .with_grad_clipping(Option::from(GradientClippingConfig::Norm(0.5)))
+            .with_weight_decay(Some(WeightDecayConfig::new(0.01)))
+            .init::<B, TransformerCriticModel<B>>();
         Self {
             model: Some(model),
             optim,
@@ -131,13 +136,16 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
-        const SAMPLE_SIZE: usize = 500;
+        const SAMPLE_SIZE: usize = 300;
         const BATCH_SIZE: usize = 64;
         const EPOCHS: usize = 4;
 
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
+            .flat_map(|(_, eps)| {
+                eps.iter()
+                    .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
+            })
             .collect();
 
         if episodes.is_empty() {
@@ -166,18 +174,11 @@ where
             target_buf[i] = *g0;
         }
 
-        let actions_full = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(action_buf, [total, max_len]),
-            &device,
-        );
-        let ir_full = Tensor::<B, 2>::from_data(
-            TensorData::new(ir_buf, [total, self.ir_dim]),
-            &device,
-        );
-        let targets_full = Tensor::<B, 1>::from_data(
-            TensorData::new(target_buf, [total]),
-            &device,
-        );
+        let actions_full =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(action_buf, [total, max_len]), &device);
+        let ir_full =
+            Tensor::<B, 2>::from_data(TensorData::new(ir_buf, [total, self.ir_dim]), &device);
+        let targets_full = Tensor::<B, 1>::from_data(TensorData::new(target_buf, [total]), &device);
 
         let mut indices: Vec<usize> = (0..total).collect();
         indices.shuffle(&mut rng);

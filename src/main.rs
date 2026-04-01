@@ -120,7 +120,7 @@ enum Commands {
         #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "3")]
         benchmark_runs: usize,
         /// Internal timing iterations inside each benchmark binary
         #[arg(long, default_value = "50")]
@@ -147,7 +147,7 @@ enum Commands {
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
         /// Critic architecture: null | ir-film | per-func | transformer
-        #[arg(long, default_value = "per-func")]
+        #[arg(long, default_value = "transformer")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.2")]

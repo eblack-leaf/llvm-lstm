@@ -203,14 +203,17 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
-        const SAMPLE_SIZE: usize = 500;   // episodes per iteration
-        const BATCH_SIZE: usize = 64;    // mini‑batch size
-        const EPOCHS: usize = 4;          // passes over the sampled data
+        const SAMPLE_SIZE: usize = 500; // episodes per iteration
+        const BATCH_SIZE: usize = 64; // mini‑batch size
+        const EPOCHS: usize = 4; // passes over the sampled data
 
         // Collect episodes
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
+            .flat_map(|(_, eps)| {
+                eps.iter()
+                    .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
+            })
             .collect();
 
         if episodes.is_empty() {
@@ -241,18 +244,11 @@ where
 
         // Convert to GPU tensors once
         let device = self.model.as_ref().unwrap().action_embed.weight.device();
-        let actions_full = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(action_buf, [total, max_len]),
-            &device,
-        );
-        let ir_full = Tensor::<B, 2>::from_data(
-            TensorData::new(ir_buf, [total, self.ir_dim]),
-            &device,
-        );
-        let targets_full = Tensor::<B, 1>::from_data(
-            TensorData::new(target_buf, [total]),
-            &device,
-        );
+        let actions_full =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(action_buf, [total, max_len]), &device);
+        let ir_full =
+            Tensor::<B, 2>::from_data(TensorData::new(ir_buf, [total, self.ir_dim]), &device);
+        let targets_full = Tensor::<B, 1>::from_data(TensorData::new(target_buf, [total]), &device);
 
         let mut indices: Vec<usize> = (0..total).collect();
         indices.shuffle(&mut rng);
@@ -410,9 +406,9 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
-        const SAMPLE_SIZE: usize = 500;   // episodes per function per update
-        const BATCH_SIZE: usize = 64;     // mini‑batch size
-        const EPOCHS: usize = 4;          // passes over the sampled data
+        const SAMPLE_SIZE: usize = 500; // episodes per function per update
+        const BATCH_SIZE: usize = 64; // mini‑batch size
+        const EPOCHS: usize = 4; // passes over the sampled data
 
         let mut total_loss = 0.0;
         let mut func_count = 0;
@@ -464,10 +460,8 @@ where
                 TensorData::new(ir_buf, [total, self.config.ir_dim]),
                 &self.device,
             );
-            let targets_full = Tensor::<B, 1>::from_data(
-                TensorData::new(target_buf, [total]),
-                &self.device,
-            );
+            let targets_full =
+                Tensor::<B, 1>::from_data(TensorData::new(target_buf, [total]), &self.device);
 
             // Retrieve or create the model and optimizer for this function
             let mut model = self
@@ -489,7 +483,10 @@ where
                 for chunk in indices.chunks(BATCH_SIZE) {
                     let batch = chunk.len();
                     let idx = Tensor::<B, 1, Int>::from_data(
-                        TensorData::new(chunk.iter().map(|&i| i as i64).collect::<Vec<_>>(), [batch]),
+                        TensorData::new(
+                            chunk.iter().map(|&i| i as i64).collect::<Vec<_>>(),
+                            [batch],
+                        ),
                         &self.device,
                     );
 

@@ -34,9 +34,7 @@ use rand::Rng;
 
 use crate::actor_critic_tfx::{TransformerActorCritic, TransformerActorCriticConfig};
 use crate::baseline::{Baseline, BaselineMode, FnStats, broadcast_to_steps, build_advantages};
-use crate::critic::{
-    Critic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic,
-};
+use crate::critic::{Critic, IrFilmCnnConfig, IrFilmCritic, NullCritic, PerFuncCritic};
 use crate::env::{EnvConfig, LlvmEnv, RewardBreakdown};
 use crate::episode_store::{BestEpisodeStore, Episode};
 use crate::ppo::ppo_update_tfx;
