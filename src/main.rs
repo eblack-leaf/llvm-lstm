@@ -114,7 +114,7 @@ enum Commands {
         #[arg(long, default_value = "1000")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "64")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.05")]
@@ -153,7 +153,7 @@ enum Commands {
         #[arg(long, default_value = "0.2")]
         prune_threshold: f32,
         /// Hard cap on episodes kept per function in store (best-first)
-        #[arg(long, default_value = "256")]
+        #[arg(long, default_value = "1")]
         store_max_per_func: usize,
         /// How big the store needs to be before switching to critic scoring
         #[arg(long, default_value = "300")]
