@@ -123,7 +123,7 @@ enum Commands {
         #[arg(long, default_value = "3")]
         benchmark_runs: usize,
         /// Internal timing iterations inside each benchmark binary
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "200")]
         bench_iters: usize,
         /// Max pass sequence length per episode
         #[arg(long, default_value = "40")]
@@ -144,7 +144,7 @@ enum Commands {
         #[arg(long, default_value = "episode")]
         return_mode: String,
         /// Baseline mode: intra-batch | best | critic | retrieval
-        #[arg(long, default_value = "critic")]
+        #[arg(long, default_value = "best")]
         baseline_mode: String,
         /// Critic architecture: null | ir-film | per-func | transformer
         #[arg(long, default_value = "transformer")]
