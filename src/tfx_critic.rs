@@ -132,8 +132,8 @@ where
 
     fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
         const SAMPLE_SIZE: usize = 500;
-        const BATCH_SIZE: usize = 128;
-        const EPOCHS: usize = 1;
+        const BATCH_SIZE: usize = 64;
+        const EPOCHS: usize = 4;
 
         let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()

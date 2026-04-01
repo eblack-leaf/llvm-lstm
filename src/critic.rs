@@ -203,23 +203,34 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
-        let all_episodes: Vec<(&Vec<usize>, &Vec<f32>, f32)> = store
+        const SAMPLE_SIZE: usize = 500;   // episodes per iteration
+        const BATCH_SIZE: usize = 64;    // mini‑batch size
+        const EPOCHS: usize = 4;          // passes over the sampled data
+
+        // Collect episodes
+        let mut episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = store
             .iter_funcs()
-            .flat_map(|(_, eps)| eps.iter().map(|e| (&e.actions, &e.ir_features, e.g0)))
+            .flat_map(|(_, eps)| eps.iter().map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0)))
             .collect();
 
-        if all_episodes.is_empty() {
+        if episodes.is_empty() {
             return None;
         }
 
-        let max_len = all_episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
-        let batch = all_episodes.len();
+        use rand::seq::SliceRandom;
+        let mut rng = rand::thread_rng();
+        episodes.shuffle(&mut rng);
+        episodes.truncate(SAMPLE_SIZE);
 
-        let mut action_buf = vec![0i64; batch * max_len];
-        let mut ir_buf = vec![0.0f32; batch * self.ir_dim];
-        let mut target_buf = vec![0.0f32; batch];
+        let max_len = episodes.iter().map(|(a, _, _)| a.len()).max().unwrap_or(1);
+        let total = episodes.len();
 
-        for (i, (actions, ir, g0)) in all_episodes.iter().enumerate() {
+        // Pre‑allocate full buffers (CPU)
+        let mut action_buf = vec![0i64; total * max_len];
+        let mut ir_buf = vec![0.0f32; total * self.ir_dim];
+        let mut target_buf = vec![0.0f32; total];
+
+        for (i, (actions, ir, g0)) in episodes.iter().enumerate() {
             for (t, &a) in actions.iter().enumerate() {
                 action_buf[i * max_len + t] = a as i64;
             }
@@ -228,31 +239,55 @@ where
             target_buf[i] = *g0;
         }
 
+        // Convert to GPU tensors once
         let device = self.model.as_ref().unwrap().action_embed.weight.device();
-        let actions_t = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(action_buf, [batch, max_len]),
+        let actions_full = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(action_buf, [total, max_len]),
             &device,
         );
-        let ir_t = Tensor::<B, 2>::from_data(
-            TensorData::new(ir_buf, [batch, self.ir_dim]),
+        let ir_full = Tensor::<B, 2>::from_data(
+            TensorData::new(ir_buf, [total, self.ir_dim]),
             &device,
         );
-        let targets_t = Tensor::<B, 1>::from_data(
-            TensorData::new(target_buf, [batch]),
+        let targets_full = Tensor::<B, 1>::from_data(
+            TensorData::new(target_buf, [total]),
             &device,
         );
 
-        let model = self.model.take().unwrap();
-        let predicted = model.forward(actions_t, ir_t);
-        let loss = (predicted - targets_t).powf_scalar(2.0).mean();
-        let loss_val = loss.clone().into_scalar().elem();
+        let mut indices: Vec<usize> = (0..total).collect();
+        indices.shuffle(&mut rng);
 
-        let grads = loss.backward();
-        let grad_params = GradientsParams::from_grads(grads, &model);
-        let model = self.optim.step(self.lr, model, grad_params);
-        self.model = Some(model);
+        let mut total_loss = 0.0f32;
+        let mut n_batches = 0;
 
-        Some(loss_val)
+        for _ in 0..EPOCHS {
+            for chunk in indices.chunks(BATCH_SIZE) {
+                let batch = chunk.len();
+                let idx = Tensor::<B, 1, Int>::from_data(
+                    TensorData::new(chunk.iter().map(|&i| i as i64).collect::<Vec<_>>(), [batch]),
+                    &device,
+                );
+
+                let actions = actions_full.clone().select(0, idx.clone());
+                let ir = ir_full.clone().select(0, idx.clone());
+                let targets = targets_full.clone().select(0, idx);
+
+                let model = self.model.take().unwrap();
+                let predicted = model.forward(actions, ir);
+                let loss = (predicted - targets).powf_scalar(2.0).mean();
+                let loss_val: f32 = loss.clone().into_scalar().elem();
+
+                let grads = loss.backward();
+                let grad_params = GradientsParams::from_grads(grads, &model);
+                let model = self.optim.step(self.lr, model, grad_params);
+                self.model = Some(model);
+
+                total_loss += loss_val;
+                n_batches += 1;
+            }
+        }
+
+        Some(total_loss / (n_batches as f32))
     }
 
     fn name(&self) -> &str {
@@ -375,57 +410,114 @@ where
     }
 
     fn update(&mut self, store: &BestEpisodeStore) -> Option<f32> {
+        const SAMPLE_SIZE: usize = 500;   // episodes per function per update
+        const BATCH_SIZE: usize = 64;     // mini‑batch size
+        const EPOCHS: usize = 4;          // passes over the sampled data
+
         let mut total_loss = 0.0;
         let mut func_count = 0;
+
         for (func, episodes) in store.iter_funcs() {
             if episodes.is_empty() {
                 continue;
             }
-            let model = self
-                .models
-                .entry(func.to_string())
-                .or_insert_with(|| self.config.init::<B>(&self.device));
-            let optim = self
-                .optims
-                .entry(func.to_string())
-                .or_insert_with(|| AdamConfig::new().init::<B, IrFilmCNN<B>>());
 
-            let max_len = episodes.iter().map(|e| e.actions.len()).max().unwrap_or(1);
-            let batch = episodes.len();
-            let ir_dim = self.config.ir_dim;
-            let mut action_buf = vec![0i64; batch * max_len];
-            let mut ir_buf = vec![0.0f32; batch * ir_dim];
-            let mut target_buf = vec![0.0f32; batch];
-            for (i, ep) in episodes.iter().enumerate() {
-                for (t, &a) in ep.actions.iter().enumerate() {
+            // Collect episodes for this function
+            let mut func_episodes: Vec<(Vec<usize>, Vec<f32>, f32)> = episodes
+                .iter()
+                .map(|e| (e.actions.clone(), e.ir_features.clone(), e.g0))
+                .collect();
+
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            func_episodes.shuffle(&mut rng);
+            func_episodes.truncate(SAMPLE_SIZE);
+
+            let max_len = func_episodes
+                .iter()
+                .map(|(a, _, _)| a.len())
+                .max()
+                .unwrap_or(1);
+            let total = func_episodes.len();
+
+            // Pre‑allocate full buffers (CPU)
+            let mut action_buf = vec![0i64; total * max_len];
+            let mut ir_buf = vec![0.0f32; total * self.config.ir_dim];
+            let mut target_buf = vec![0.0f32; total];
+
+            for (i, (actions, ir, g0)) in func_episodes.iter().enumerate() {
+                for (t, &a) in actions.iter().enumerate() {
                     action_buf[i * max_len + t] = a as i64;
                 }
-                let src = ep.ir_features.len().min(ir_dim);
-                ir_buf[i * ir_dim..i * ir_dim + src].copy_from_slice(&ep.ir_features[..src]);
-                target_buf[i] = ep.g0;
+                let src_len = ir.len().min(self.config.ir_dim);
+                ir_buf[i * self.config.ir_dim..i * self.config.ir_dim + src_len]
+                    .copy_from_slice(&ir[..src_len]);
+                target_buf[i] = *g0;
             }
-            let actions_t = Tensor::<B, 2, Int>::from_data(
-                TensorData::new(action_buf, [batch, max_len]),
+
+            // Convert to GPU tensors once
+            let actions_full = Tensor::<B, 2, Int>::from_data(
+                TensorData::new(action_buf, [total, max_len]),
                 &self.device,
             );
-            let ir_t =
-                Tensor::<B, 2>::from_data(TensorData::new(ir_buf, [batch, ir_dim]), &self.device);
-            let targets_t =
-                Tensor::<B, 1>::from_data(TensorData::new(target_buf, [batch]), &self.device);
+            let ir_full = Tensor::<B, 2>::from_data(
+                TensorData::new(ir_buf, [total, self.config.ir_dim]),
+                &self.device,
+            );
+            let targets_full = Tensor::<B, 1>::from_data(
+                TensorData::new(target_buf, [total]),
+                &self.device,
+            );
 
-            // Need to take ownership for burn autodiff
-            // SAFETY: we re-insert immediately after
-            let m = std::mem::replace(model, self.config.init::<B>(&self.device));
-            let predicted = m.forward(actions_t, ir_t);
-            let loss = (predicted - targets_t).powf_scalar(2.0f32).mean();
-            let loss_val: f32 = loss.clone().into_scalar().elem();
-            total_loss += loss_val;
+            // Retrieve or create the model and optimizer for this function
+            let mut model = self
+                .models
+                .remove(func)
+                .unwrap_or_else(|| self.config.init::<B>(&self.device));
+            let mut optim = self
+                .optims
+                .remove(func)
+                .unwrap_or_else(|| AdamConfig::new().init::<B, IrFilmCNN<B>>());
+
+            let mut indices: Vec<usize> = (0..total).collect();
+            indices.shuffle(&mut rng);
+
+            let mut func_loss = 0.0;
+            let mut n_batches = 0;
+
+            for _ in 0..EPOCHS {
+                for chunk in indices.chunks(BATCH_SIZE) {
+                    let batch = chunk.len();
+                    let idx = Tensor::<B, 1, Int>::from_data(
+                        TensorData::new(chunk.iter().map(|&i| i as i64).collect::<Vec<_>>(), [batch]),
+                        &self.device,
+                    );
+
+                    let actions = actions_full.clone().select(0, idx.clone());
+                    let ir = ir_full.clone().select(0, idx.clone());
+                    let targets = targets_full.clone().select(0, idx);
+
+                    let predicted = model.forward(actions, ir);
+                    let loss = (predicted - targets).powf_scalar(2.0).mean();
+                    let loss_val: f32 = loss.clone().into_scalar().elem();
+
+                    let grads = loss.backward();
+                    let grad_params = GradientsParams::from_grads(grads, &model);
+                    model = optim.step(self.lr, model, grad_params);
+
+                    func_loss += loss_val;
+                    n_batches += 1;
+                }
+            }
+
+            // Store the updated model and optimizer back
+            self.models.insert(func.to_string(), model);
+            self.optims.insert(func.to_string(), optim);
+
+            total_loss += func_loss / (n_batches as f32);
             func_count += 1;
-            let grads = loss.backward();
-            let grad_params = GradientsParams::from_grads(grads, &m);
-            let m = optim.step(self.lr, m, grad_params);
-            *model = m;
         }
+
         Some(total_loss / func_count as f32)
     }
 

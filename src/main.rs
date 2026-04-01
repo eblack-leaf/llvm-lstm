@@ -150,7 +150,7 @@ enum Commands {
         #[arg(long, default_value = "per-func")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
-        #[arg(long, default_value = "0.1")]
+        #[arg(long, default_value = "0.2")]
         prune_threshold: f32,
         /// Hard cap on episodes kept per function in store (best-first)
         #[arg(long, default_value = "256")]
