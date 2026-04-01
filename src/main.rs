@@ -163,7 +163,7 @@ enum Commands {
     /// Evaluate agent against baselines
     Evaluate {
         /// Directory containing benchmark .c files
-        #[arg(long, default_value = "benchmarks")]
+        #[arg(long, default_value = "achievable")]
         functions: PathBuf,
 
         /// Output directory for evaluation results
