@@ -146,8 +146,8 @@ enum Commands {
         /// Baseline mode: intra-batch | best | critic | retrieval
         #[arg(long, default_value = "critic")]
         baseline_mode: String,
-        /// Critic architecture: null | pattern-cnn | ir-film | per-func | transformer
-        #[arg(long, default_value = "pattern-cnn")]
+        /// Critic architecture: null | ir-film | per-func | transformer
+        #[arg(long, default_value = "per-func")]
         critic_arch: String,
         /// BestEpisodeStore prune threshold: drop episodes below (best_g0 - threshold)
         #[arg(long, default_value = "0.1")]
