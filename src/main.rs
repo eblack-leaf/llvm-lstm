@@ -102,7 +102,7 @@ enum Commands {
     /// Train the actor-critic PPO agent
     Train {
         /// Directory containing benchmark .c files
-        #[arg(long, default_value = "sample-benchmarks")]
+        #[arg(long, default_value = "achievable")]
         functions: PathBuf,
         /// Working directory for compiled IR and binaries
         #[arg(long, default_value = "work")]
@@ -117,7 +117,7 @@ enum Commands {
         #[arg(long, default_value = "128")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
-        #[arg(long, default_value = "0.03")]
+        #[arg(long, default_value = "0.05")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
         #[arg(long, default_value = "3")]
