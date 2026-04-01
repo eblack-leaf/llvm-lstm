@@ -111,10 +111,10 @@ enum Commands {
         #[arg(long, default_value = "checkpoints")]
         checkpoint_dir: String,
         /// Total number of collect+update iterations
-        #[arg(long, default_value = "300")]
+        #[arg(long, default_value = "1000")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "32")]
+        #[arg(long, default_value = "128")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.03")]
@@ -126,7 +126,7 @@ enum Commands {
         #[arg(long, default_value = "200")]
         bench_iters: usize,
         /// Max pass sequence length per episode
-        #[arg(long, default_value = "40")]
+        #[arg(long, default_value = "100")]
         max_seq_length: usize,
         /// Reward mode: sparse | per-step
         #[arg(long, default_value = "sparse")]
@@ -138,7 +138,7 @@ enum Commands {
         #[arg(long, default_value = "base")]
         ir_mode: String,
         /// Downweight solved functions' advantages when batch mixes solved/unsolved
-        #[arg(long, default_value = "true")]
+        #[arg(long, default_value = "false")]
         adv_weighting: bool,
         /// Return computation mode: episode | per-step
         #[arg(long, default_value = "episode")]
