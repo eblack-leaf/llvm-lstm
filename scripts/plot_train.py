@@ -8,7 +8,7 @@ Figures generated:
   train_return.png      — mean EMA + per-function EMA over iterations
   train_policy.png      — policy loss (raw + rolling avg)
   train_entropy_kl.png  — entropy fraction and KL divergence
-  train_signal.png      — advantage std and g0 spread
+  train_signal.png      — advantage std, g0 spread, critic loss
   train_baselines.png   — per-function % vs O0 / O2 / O3 over iterations
 """
 
@@ -43,7 +43,7 @@ def load_metrics(checkpoint_dir: Path):
 
 
 def extract(records, key):
-    return [r[key] for r in records]
+    return [r.get(key, float("nan")) for r in records]   # use .get for missing keys
 
 
 def rolling_mean(xs, w=5):
@@ -155,12 +155,11 @@ def fig_signal(records, out_dir):
     iters     = extract(records, "iteration")
     adv_std   = extract(records, "adv_std")
     g0_spread = extract(records, "g0_spread")
-    has_ev    = any("explained_var" in r for r in records)
-    ev        = [r.get("explained_var", float("nan")) for r in records] if has_ev else None
+    critic_loss = extract(records, "critic_loss")   # new field
 
-    n_rows = 3 if has_ev else 2
-    fig, axes = plt.subplots(n_rows, 1, figsize=(10, 3 * n_rows), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 7), sharex=True)
 
+    # Advantage std
     axes[0].plot(iters, adv_std, color="#b07aa1", linewidth=1.4)
     axes[0].axhline(0.015, color="orange", linewidth=0.8, linestyle="--",
                     alpha=0.7, label="0.015 weak signal")
@@ -171,6 +170,7 @@ def fig_signal(records, out_dir):
     axes[0].legend(fontsize=8, loc="upper right")
     _style(axes[0])
 
+    # G0 spread
     axes[1].plot(iters, g0_spread, color="#76b7b2", linewidth=1.4)
     axes[1].axhline(0.05, color="orange", linewidth=0.8, linestyle="--",
                     alpha=0.7, label="0.05 low spread")
@@ -178,13 +178,12 @@ def fig_signal(records, out_dir):
     axes[1].legend(fontsize=8, loc="upper right")
     _style(axes[1])
 
-    if has_ev:
-        axes[2].plot(iters, ev, color="#edc948", linewidth=1.4)
-        axes[2].axhline(0.5, color="green",  linewidth=0.8, linestyle="--", alpha=0.7, label="0.5 good")
-        axes[2].axhline(0.0, color="red",    linewidth=0.8, linestyle="--", alpha=0.6, label="0 = mean baseline")
-        axes[2].set_ylabel("explained variance")
-        axes[2].legend(fontsize=8, loc="lower right")
-        _style(axes[2])
+    # Critic loss
+    axes[2].plot(iters, critic_loss, color="#edc948", linewidth=1.4)
+    axes[2].set_ylabel("critic loss (MSE)")
+    axes[2].set_title("Critic training loss")
+    axes[2].legend(["critic loss"], fontsize=8, loc="upper right")
+    _style(axes[2])
 
     axes[-1].set_xlabel("iteration")
     fig.tight_layout()
@@ -241,10 +240,14 @@ def _style(ax):
     for spine in ax.spines.values():
         spine.set_edgecolor("#333355")
     ax.grid(True, color="#2a2a4a", linewidth=0.5)
-    ax.legend_ and ax.legend(
-        facecolor="#1a1a2e", edgecolor="#333355",
-        labelcolor="#cccccc", fontsize=8,
-    )
+
+    leg = ax.get_legend()
+    if leg is not None:
+        frame = leg.get_frame()
+        frame.set_facecolor("#1a1a2e")
+        frame.set_edgecolor("#333355")
+        for text in leg.get_texts():
+            text.set_color("#cccccc")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

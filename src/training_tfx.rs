@@ -503,7 +503,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     "clip_fraction":clip as f64,
                     "adv_std":      adv_std as f64,
                     "g0_spread":    g0_spread as f64,
-                    "explained_var":0.0_f64,
+                    "critic_loss":  critic_loss.unwrap_or(1.0) as f64,
                     "iter_secs":    iter_secs as f64,
                     "fn_ema":       fn_ema_map,
                     "fn_vs_o0":     fn_vs_o0,
@@ -697,7 +697,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
             if let Some(loss) = critic_loss {
                 train_pb.println(format!("         critic loss = {loss:.4}"));
-                metric_records.last_mut().unwrap()["critic_loss"] = serde_json::Value::from(loss as f64);
             }
 
             // ── Pattern flags (detected across rolling history) ───────────
