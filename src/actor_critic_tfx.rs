@@ -21,7 +21,7 @@ pub struct TransformerActorCriticConfig {
     pub n_layers: usize,
     #[config(default = 512)]
     pub d_ff: usize,
-    #[config(default = 0.1)]
+    #[config(default = 0.3)]
     pub dropout: f64,
     /// Dimensionality of the learned action embedding.
     #[config(default = 32)]
