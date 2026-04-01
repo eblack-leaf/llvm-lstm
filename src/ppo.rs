@@ -16,7 +16,7 @@ pub struct PpoConfig {
     #[config(default = 0.005)]
     pub entropy_coef: f32,
     /// Adam learning rate.
-    #[config(default = 3e-3)]
+    #[config(default = 3e-4)]
     pub learning_rate: f64,
     /// Discount factor.
     #[config(default = 0.99)]

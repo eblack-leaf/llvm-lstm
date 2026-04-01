@@ -102,7 +102,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let baseline_mode = BaselineMode::from_str(&config.baseline_mode);
     let mut fn_stats = FnStats::new();
     let mut store = BestEpisodeStore::new(config.prune_threshold, config.store_max_per_func);
-    let mut best_mean_ema: f32 = 0.0;
+    let mut best_mean_ema: f32 = -f32::MAX;
 
     let num_actions = TransformerActorCriticConfig::new().num_actions;
     let ir_dim = if config.ir_mode == "base+current" {
@@ -113,7 +113,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
     let film_cfg = || IrFilmCnnConfig::new(num_actions).with_ir_dim(ir_dim);
     let mut critic: Box<dyn Critic> = match config.critic_arch.as_str() {
-        "ir-film" | "pattern-cnn" => Box::new(IrFilmCritic::<B>::new(
+        "ir-film" => Box::new(IrFilmCritic::<B>::new(
             film_cfg(),
             config.ppo.learning_rate,
             device.clone(),
@@ -373,7 +373,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
         let start = std::time::Instant::now();
         let critic_loss = critic.update(&store); // now returns Option<f32>
         let critic_time = start.elapsed().as_secs_f64();
-        train_pb.println(format!("critic update took {critic_time:.1}s"));
 
         // 4. Compute baselines
         let baseline = Baseline::select(
@@ -696,7 +695,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
             }
 
             if let Some(loss) = critic_loss {
-                train_pb.println(format!("         critic loss = {loss:.4}"));
+                let count = store.total_count();
+                let max = config.store_max_per_func * n_funcs;
+                let prune = config.prune_threshold;
+                train_pb.println(format!("         critic loss = {loss:.4}    critic update: {critic_time:.1}s    store: {count:.1} / {max:.1} @ {prune:.1}%"));
             }
 
             // ── Pattern flags (detected across rolling history) ───────────
@@ -777,15 +779,6 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 if adv_std < 0.01 {
                     flags.push(format!(
                         "\x1b[1;31msignal dead (adv_std {adv_std:.5})\x1b[0m"
-                    ));
-                }
-
-                // critic info
-                if critic.name() != "null" {
-                    flags.push(format!(
-                        "\x1b[2mcritc={} store={}\x1b[0m",
-                        critic.name(),
-                        store.total_count()
                     ));
                 }
 
