@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+#![allow(unused)]
 mod actor_critic_tfx;
 mod baseline;
 mod critic;
@@ -102,7 +103,7 @@ enum Commands {
     /// Train the actor-critic PPO agent
     Train {
         /// Directory containing benchmark .c files
-        #[arg(long, default_value = "achievable")]
+        #[arg(long, default_value = "sample-benchmarks")]
         functions: PathBuf,
         /// Working directory for compiled IR and binaries
         #[arg(long, default_value = "work")]
@@ -114,16 +115,16 @@ enum Commands {
         #[arg(long, default_value = "1000")]
         iterations: usize,
         /// Episodes to collect per function per iteration (total = episodes * num_functions)
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "16")]
         episodes: usize,
         /// Entropy bonus coefficient (higher = more exploration)
         #[arg(long, default_value = "0.05")]
         entropy_coef: f32,
         /// Benchmark invocations per episode final step (1 is enough for training)
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "2")]
         benchmark_runs: usize,
         /// Internal timing iterations inside each benchmark binary
-        #[arg(long, default_value = "200")]
+        #[arg(long, default_value = "51")]
         bench_iters: usize,
         /// Max pass sequence length per episode
         #[arg(long, default_value = "100")]
@@ -158,12 +159,14 @@ enum Commands {
         /// How big the store needs to be before switching to critic scoring
         #[arg(long, default_value = "300")]
         warmup_threshold: usize,
+        #[arg(long, default_value = "0")]
+        value_warmup_threshold: usize,
     },
 
     /// Evaluate agent against baselines
     Evaluate {
         /// Directory containing benchmark .c files
-        #[arg(long, default_value = "achievable")]
+        #[arg(long, default_value = "sample-benchmarks")]
         functions: PathBuf,
 
         /// Output directory for evaluation results
@@ -296,6 +299,7 @@ fn main() -> Result<()> {
             prune_threshold,
             store_max_per_func,
             warmup_threshold,
+            value_warmup_threshold
         } => {
             use env::{EnvConfig, RewardMode};
             use ppo::PpoConfig;
@@ -324,7 +328,8 @@ fn main() -> Result<()> {
             .with_critic_arch(critic_arch)
             .with_prune_threshold(prune_threshold)
             .with_store_max_per_func(store_max_per_func)
-            .with_warmup_threshold(warmup_threshold);
+            .with_warmup_threshold(warmup_threshold)
+                .with_value_warmup_iters(value_warmup_threshold);
 
             training_tfx::train(config)?;
         }

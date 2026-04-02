@@ -26,7 +26,7 @@ pub struct EnvConfig {
     /// Working directory for compiled IR and binaries.
     pub work_dir: PathBuf,
     /// Maximum number of passes per episode before forced termination.
-    #[config(default = 100)]
+    #[config(default = 20)]
     pub max_seq_length: usize,
     /// Whether to give reward at every step or only at episode end.
     /// No inline default — enum variants aren't Config literals.

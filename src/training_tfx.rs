@@ -24,9 +24,10 @@ type Dev = NdArrayDevice;
 #[cfg(feature = "wgpu")]
 type Dev = WgpuDevice;
 use burn::grad_clipping::GradientClippingConfig;
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
 use burn::optim::AdamConfig;
-use burn::prelude::Module as _;
+use burn::prelude::{ElementConversion, Module as _};
 use burn::record::CompactRecorder;
 use burn::tensor::{Int, Tensor, TensorData};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -74,7 +75,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
     let mut optim = AdamConfig::new()
         .with_grad_clipping(grad_clip)
         .init::<B, TransformerActorCritic<B>>();
-
+    let mut scheduler =
+        CosineAnnealingLrSchedulerConfig::new(config.ppo.learning_rate, config.total_iterations)
+            .init()
+            .expect("scheduler");
     let multi = MultiProgress::new();
     let train_pb = multi.add(ProgressBar::new(config.total_iterations as u64));
     train_pb.set_style(
@@ -243,9 +247,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     let mut act_history: Vec<i64> = vec![0i64];
 
                     let terminal_breakdown = loop {
-                        let logits = match ir_mode {
+                        let (logits_all, value) = match ir_mode {
                             "base+current" => {
-                                // IR token = concat(base, current) — 68-d input.
                                 let mut concat = base_features.clone();
                                 concat.extend_from_slice(&state.features);
                                 let base_t = Tensor::<Inner, 2>::from_data(
@@ -256,10 +259,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
                                     TensorData::new(act_history.clone(), [1, act_history.len()]),
                                     &device,
                                 );
-                                model_s.forward(base_t, acts_t)
+                                model_s.forward_with_value(base_t, acts_t)
                             }
                             _ => {
-                                // "base" (default): fixed base IR token + action sequence.
                                 let base_t = Tensor::<Inner, 2>::from_data(
                                     TensorData::new(base_features.clone(), [1, feat_dim]),
                                     &device,
@@ -268,13 +270,23 @@ pub fn train(config: TrainConfig) -> Result<()> {
                                     TensorData::new(act_history.clone(), [1, act_history.len()]),
                                     &device,
                                 );
-                                model_s.forward(base_t, acts_t)
+                                model_s.forward_with_value(base_t, acts_t)
                             }
                         };
 
-                        let logits_vec: Vec<f32> = logits.into_data().to_vec()?;
+                        let last_idx = act_history.len() - 1;
+                        let n_act = logits_all.dims()[2];
+                        let current_logits = logits_all.slice([0..1, last_idx..last_idx + 1, 0..n_act])
+                            .reshape([1, n_act]);
+                        let logits_vec: Vec<f32> = current_logits.into_data().to_vec()?;
+
                         let action = sample_categorical(&logits_vec, &mut rng);
                         let log_prob = log_softmax_at(&logits_vec, action);
+
+                        // Extract the corresponding value (same position)
+                        let current_value = value.slice([0..1, last_idx..last_idx + 1])
+                            .reshape([1]);
+                        let value_scalar: f32 = current_value.into_scalar().elem();
 
                         let step = worker_env.step(action)?;
                         episode_reward += step.reward;
@@ -294,7 +306,7 @@ pub fn train(config: TrainConfig) -> Result<()> {
                             action,
                             log_prob,
                             step.reward,
-                            0.0,
+                            value_scalar,
                             step.done,
                         );
 
@@ -351,56 +363,114 @@ pub fn train(config: TrainConfig) -> Result<()> {
             let g0 = returns.g0_per_ep[ep_idx];
             fn_stats.update(func, g0);
             // Step 0 state = base IR features for this episode
-            let ir_features = rollout.states.first().cloned().unwrap_or_default();
-            store.insert(Episode {
-                func: func.clone(),
-                actions: rollout.actions.clone(),
-                g0,
-                ir_features,
-            });
+            // let ir_features = rollout.states.first().cloned().unwrap_or_default();
+            // store.insert(Episode {
+            //     func: func.clone(),
+            //     actions: rollout.actions.clone(),
+            //     g0,
+            //     ir_features,
+            // });
         }
 
         // After store.insert loops...
-        let adaptive_baseline_mode =
-            if config.baseline_mode == "critic" && store.total_count() < config.warmup_threshold {
-                &BaselineMode::Retrieval
-            } else {
-                &baseline_mode
-            };
+        // let adaptive_baseline_mode =
+        //     if config.baseline_mode == "critic" && store.total_count() < config.warmup_threshold {
+        //         &BaselineMode::Retrieval
+        //     } else {
+        //         &baseline_mode
+        //     };
+        //
+        // let start = std::time::Instant::now();
+        // let critic_loss = critic.update(&store); // now returns Option<f32>
+        // let critic_time = start.elapsed().as_secs_f64();
+        //
+        // // 4. Compute baselines
+        // let baseline = Baseline::select(
+        //     &rollout_funcs,
+        //     &rollouts,
+        //     &returns,
+        //     adaptive_baseline_mode,
+        //     &fn_stats,
+        //     critic.as_ref(),
+        //     &store,
+        // );
 
-        let start = std::time::Instant::now();
-        let critic_loss = critic.update(&store); // now returns Option<f32>
-        let critic_time = start.elapsed().as_secs_f64();
+        // // 5. Per-episode advantage weights (downweight solved functions)
+        // let any_unsolved = fn_stats.fn_ema.values().any(|&e| e < 0.0);
+        // let ep_weights: Vec<f32> = rollout_funcs
+        //     .iter()
+        //     .map(|func| {
+        //         if config.adv_weighting && any_unsolved {
+        //             let ema_val = fn_stats.ema(func).unwrap_or(0.0);
+        //             (1.0 - ema_val.max(0.0) / 0.2).max(0.1)
+        //         } else {
+        //             1.0
+        //         }
+        //     })
+        //     .collect();
+        // let ep_lens: Vec<usize> = rollouts.iter().map(|r| r.len()).collect();
+        // let step_weights = broadcast_to_steps(&ep_weights, &ep_lens);
+        //
+        // // 6. Build normalised advantages
+        // let all_advantages = build_advantages(&returns.values, &baseline.values, &step_weights);
 
-        // 4. Compute baselines
-        let baseline = Baseline::select(
-            &rollout_funcs,
-            &rollouts,
-            &returns,
-            adaptive_baseline_mode,
-            &fn_stats,
-            critic.as_ref(),
-            &store,
-        );
+        let gamma = config.ppo.gamma;
+        let lambda = config.ppo.gae_lambda;   // only used in GAE branch
 
-        // 5. Per-episode advantage weights (downweight solved functions)
-        let any_unsolved = fn_stats.fn_ema.values().any(|&e| e < 0.0);
-        let ep_weights: Vec<f32> = rollout_funcs
-            .iter()
-            .map(|func| {
-                if config.adv_weighting && any_unsolved {
-                    let ema_val = fn_stats.ema(func).unwrap_or(0.0);
-                    (1.0 - ema_val.max(0.0) / 0.2).max(0.1)
-                } else {
-                    1.0
+        // Monte Carlo returns (used for value loss regardless)
+        let mut step_returns = Vec::new();
+        for rollout in &rollouts {
+            let rollout_len = rollout.len();
+            let mut ret = 0.0;
+            let mut returns = vec![0.0f32; rollout_len];
+            for t in (0..rollout_len).rev() {
+                ret = rollout.rewards[t] + gamma * ret;
+                returns[t] = ret;
+            }
+            step_returns.extend(returns);
+        }
+
+        let all_advantages = if iteration < config.value_warmup_iters {
+            // ===== Rank‑based advantages (stable, no value head) =====
+            let episode_returns = &returns.g0_per_ep;
+            let n_episodes = episode_returns.len();
+            let mut episode_advantages = vec![0.0f32; n_episodes];
+            if n_episodes > 1 {
+                let mut indices: Vec<usize> = (0..n_episodes).collect();
+                indices.sort_by(|&a, &b| episode_returns[a].partial_cmp(&episode_returns[b]).unwrap());
+                for (rank, &idx) in indices.iter().enumerate() {
+                    let adv = 2.0 * (rank as f32 / (n_episodes - 1) as f32) - 1.0;
+                    episode_advantages[idx] = adv;
                 }
-            })
-            .collect();
-        let ep_lens: Vec<usize> = rollouts.iter().map(|r| r.len()).collect();
-        let step_weights = broadcast_to_steps(&ep_weights, &ep_lens);
-
-        // 6. Build normalised advantages
-        let all_advantages = build_advantages(&returns.values, &baseline.values, &step_weights);
+            }
+            let mut step_advantages = Vec::new();
+            for (ep_idx, rollout) in rollouts.iter().enumerate() {
+                let adv = episode_advantages[ep_idx];
+                for _ in 0..rollout.len() {
+                    step_advantages.push(adv);
+                }
+            }
+            step_advantages
+        } else {
+            // ===== GAE advantages using value head =====
+            let mut step_advantages = Vec::new();
+            for rollout in &rollouts {
+                let rollout_len = rollout.len();
+                let mut advantages = vec![0.0f32; rollout_len];
+                let mut gae = 0.0;
+                for t in (0..rollout_len).rev() {
+                    let next_v = if t + 1 < rollout_len { rollout.values[t + 1] } else { 0.0 };
+                    let delta = rollout.rewards[t] + gamma * next_v - rollout.values[t];
+                    gae = delta + gamma * lambda * gae;
+                    advantages[t] = gae;
+                }
+                step_advantages.extend(advantages);
+            }
+            // Normalise advantages (standard PPO)
+            let mean = step_advantages.iter().sum::<f32>() / step_advantages.len() as f32;
+            let std = (step_advantages.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / step_advantages.len() as f32).sqrt();
+            step_advantages.iter().map(|&a| (a - mean) / (std + 1e-8)).collect()
+        };
 
         let combined = Rollout::merge(&rollouts);
 
@@ -411,8 +481,10 @@ pub fn train(config: TrainConfig) -> Result<()> {
         (model, stats) = ppo_update_tfx(
             model,
             &mut optim,
+            &mut scheduler,
             &combined,
             &all_advantages,
+            &step_returns,
             &config.ppo,
             &device,
         );
@@ -435,20 +507,14 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 fn_stats.fn_ema.values().sum::<f32>() / fn_stats.fn_ema.len() as f32
             };
 
-            // Raw advantage std (return - baseline, before normalisation).
-            // Measures how much outcome variance the baseline leaves unexplained.
-            // Near 0 = all episodes had similar returns → weak learning signal.
+            let adv_mean = all_advantages.iter().sum::<f32>() / all_advantages.len() as f32;
             let adv_std = {
-                let raw: Vec<f32> = returns
-                    .values
-                    .iter()
-                    .zip(baseline.values.iter())
-                    .map(|(r, b)| r - b)
-                    .collect();
-                let n = raw.len().max(1) as f32;
-                let m = raw.iter().sum::<f32>() / n;
-                (raw.iter().map(|x| (x - m).powi(2)).sum::<f32>() / n).sqrt()
+                let n = all_advantages.len() as f32;
+                let m = adv_mean;
+                (all_advantages.iter().map(|x| (x - m).powi(2)).sum::<f32>() / n).sqrt()
             };
+            let adv_pos_frac = all_advantages.iter().filter(|&&x| x > 0.0).count() as f32
+                / all_advantages.len() as f32;
 
             let g0_min = episode_g0s.iter().cloned().fold(f32::INFINITY, f32::min);
             let g0_max = episode_g0s
@@ -500,7 +566,8 @@ pub fn train(config: TrainConfig) -> Result<()> {
                     "clip_fraction":clip as f64,
                     "adv_std":      adv_std as f64,
                     "g0_spread":    g0_spread as f64,
-                    "critic_loss":  critic_loss.unwrap_or(1.0) as f64,
+                    "critic_loss":  stats.value_loss as f64,
+                    "explained_var": stats.explained_var as f64,
                     "iter_secs":    iter_secs as f64,
                     "fn_ema":       fn_ema_map,
                     "fn_vs_o0":     fn_vs_o0,
@@ -594,8 +661,9 @@ pub fn train(config: TrainConfig) -> Result<()> {
 
             // ── Line 2: update diagnostics ────────────────────────────────
             // kl>0.15 = epoch skipped. clip>30% = steps too large. ent<35% = collapsing.
+            let vl = stats.value_loss;
             train_pb.println(format!(
-                "         update  kl {}{kl:.4}\x1b[0m  clip {}{:.1}%\x1b[0m  ent {}{:.1}%\x1b[0m  critic={}",
+                "         update  kl {}{kl:.4}\x1b[0m  clip {}{:.1}%\x1b[0m  ent {}{:.1}%\x1b[0m  vloss {vl:.4} critic={}",
                 cr(kl,   0.05, 0.15),
                 cr(clip, 0.3,  0.5),  clip * 100.0,
                 c(ent_frac, 0.35, 0.55), ent_frac * 100.0,
@@ -605,11 +673,17 @@ pub fn train(config: TrainConfig) -> Result<()> {
             // ── Line 3: signal diagnostics ────────────────────────────────
             // adv_std = raw (return-baseline) std, reward units.
             // <0.02 = weak signal. g0 spread = batch return range.
+            let ev = stats.explained_var;
             train_pb.println(format!(
-                "         signal  adv± {}{adv_std:.4}\x1b[0m  g0 {}{g0_spread:.4}\x1b[0m [{g0_min:+.4}..{g0_max:+.4}]  n={}",
+                "         signal  adv± {}{adv_std:.4}\x1b[0m  g0 {}{g0_spread:.4}\x1b[0m [{g0_min:+.4}..{g0_max:+.4}]  n={} ev={ev:.1}",
                 c(adv_std,   0.02, 0.08),
                 c(g0_spread, 0.05,  0.12),
                 combined.len(),
+            ));
+
+            train_pb.println(format!(
+                "         rank adv  mean {adv_mean:+.3}  std {adv_std:.3}  pos {:.1}%",
+                adv_pos_frac * 100.0
             ));
 
             // ── Per-function lines ────────────────────────────────────────
@@ -692,12 +766,12 @@ pub fn train(config: TrainConfig) -> Result<()> {
                 ));
             }
 
-            if let Some(loss) = critic_loss {
-                let count = store.total_count();
-                let max = config.store_max_per_func * n_funcs;
-                let prune = config.prune_threshold;
-                train_pb.println(format!("         critic loss = {loss:.4}    critic update: {critic_time:.1}s    store: {count:.1} / {max:.1} @ {prune:.1}%"));
-            }
+            // if let Some(loss) = critic_loss {
+            //     let count = store.total_count();
+            //     let max = config.store_max_per_func * n_funcs;
+            //     let prune = config.prune_threshold;
+            //     train_pb.println(format!("         critic loss = {loss:.4}    critic update: {critic_time:.1}s    store: {count:.1} / {max:.1} @ {prune:.1}%"));
+            // }
 
             // ── Pattern flags (detected across rolling history) ───────────
             // Only printed when there is something to call out.

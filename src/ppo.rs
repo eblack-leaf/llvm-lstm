@@ -1,4 +1,6 @@
 use burn::config::Config;
+use burn::lr_scheduler::LrScheduler;
+use burn::lr_scheduler::cosine::CosineAnnealingLrScheduler;
 use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::ElementConversion;
 use burn::tensor::backend::AutodiffBackend;
@@ -13,10 +15,10 @@ pub struct PpoConfig {
     #[config(default = 0.3)]
     pub clip_epsilon: f32,
     /// Entropy bonus coefficient — encourages exploration.
-    #[config(default = 0.02)]
+    #[config(default = 0.05)]
     pub entropy_coef: f32,
     /// Adam learning rate.
-    #[config(default = 1e-3)]
+    #[config(default = 3e-4)]
     pub learning_rate: f64,
     /// Discount factor.
     #[config(default = 0.99)]
@@ -33,6 +35,8 @@ pub struct PpoConfig {
     /// Stop updates when approx KL exceeds this threshold.
     #[config(default = 0.25)]
     pub target_kl: f32,
+    #[config(default = 0.5)]
+    pub value_coef: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -42,6 +46,7 @@ pub struct PpoStats {
     pub entropy: f32,
     pub approx_kl: f32,
     pub clip_fraction: f32,
+    pub explained_var: f32
 }
 
 /// PPO update for the Transformer actor (pure policy, no value head).
@@ -51,8 +56,10 @@ pub struct PpoStats {
 pub fn ppo_update_tfx<Bx, O>(
     mut model: TransformerActorCritic<Bx>,
     optim: &mut O,
+    scheduler: &mut CosineAnnealingLrScheduler,
     rollout: &Rollout,
     advantages: &[f32],
+    returns: &[f32], // new argument
     config: &PpoConfig,
     device: &Bx::Device,
 ) -> (TransformerActorCritic<Bx>, PpoStats)
@@ -87,7 +94,6 @@ where
             Tensor::<Bx, 2, Int>::from_data(TensorData::new(prev_buf, [n_ep, max_t]), device);
 
         // Base features: one vector per episode from the episode's first state.
-        // Works for both "base" (34-d) and "base+current" (68-d) ir_modes.
         let mut base_feat_buf = vec![0.0f32; n_ep * feat_dim];
         for (ei, range) in episodes.iter().enumerate() {
             base_feat_buf[ei * feat_dim..(ei + 1) * feat_dim]
@@ -96,12 +102,14 @@ where
         let base_features =
             Tensor::<Bx, 2>::from_data(TensorData::new(base_feat_buf, [n_ep, feat_dim]), device);
 
-        let logits_3d = model.forward_batch(base_features, prev_pad);
+        let (logits_3d, values_3d) = model.forward_with_value(base_features, prev_pad);
         let n_act = logits_3d.shape().dims[2];
         let logits_flat = logits_3d.reshape([n_ep * max_t, n_act]);
+        let values_flat = values_3d.reshape([n_ep * max_t]);
 
         let idx = Tensor::<Bx, 1, Int>::from_data(TensorData::new(real_idx, [n]), device);
-        let logits = logits_flat.gather(0, idx.unsqueeze_dim::<2>(1).expand([n, n_act]));
+        let logits = logits_flat.gather(0, idx.clone().unsqueeze_dim::<2>(1).expand([n, n_act]));
+        let values = values_flat.gather(0, idx); // [n]
 
         let log_probs_all = activation::log_softmax(logits.clone(), 1);
         let probs_all = activation::softmax(logits, 1);
@@ -123,12 +131,8 @@ where
         let log_probs_old =
             Tensor::<Bx, 1>::from_data(TensorData::new(rollout.log_probs.clone(), [n]), device);
 
-        // Advantages are pre-normalised by build_advantages; re-normalise here
-        // to handle any residual mean introduced by the weighting pass.
+        // Advantages are already normalised; use directly
         let adv = Tensor::<Bx, 1>::from_data(TensorData::new(advantages.to_vec(), [n]), device);
-        // let adv_mean = adv.clone().mean();
-        // let adv_std  = (adv.clone() - adv_mean.clone()).powf_scalar(2.0f32).mean().sqrt();
-        // let adv      = (adv - adv_mean) / (adv_std + 1e-8);
 
         let log_ratio = log_probs_new - log_probs_old;
         let ratio = log_ratio.clone().exp();
@@ -146,12 +150,33 @@ where
         let obj2 = clipped * adv;
         let policy_loss = -((obj1.clone() + obj2.clone() - (obj1 - obj2).abs()) / 2.0).mean();
 
+        // Value loss
+        let returns_t = Tensor::<Bx, 1>::from_data(TensorData::new(returns.to_vec(), [n]), device);
+        let value_loss = (values.clone() - returns_t.clone()).powf_scalar(2.0).mean();
+
+        // Flatten both to 1D if they aren't already
+        let values_flat = values.clone().reshape([-1]);
+        let returns_flat = returns_t.clone().reshape([-1]);
+
+        // Compute variance of returns and residual
+        let var_returns = returns_flat.clone().var(0);
+        let var_residual = (returns_flat - values_flat).powf_scalar(2.0).mean();
+
+        // Convert to scalar
+        let var_returns_scalar: f32 = var_returns.into_scalar().elem();
+        let var_residual_scalar: f32 = var_residual.into_scalar().elem();
+
+        let explained_var = 1.0 - var_residual_scalar / (var_returns_scalar + 1e-8);
+        stats.explained_var = explained_var;
+
+        let total_loss = policy_loss.clone() + config.value_coef * value_loss.clone();
+
         let log_ratio_vec: Vec<f32> = log_ratio.into_data().to_vec().unwrap_or_default();
         let approx_kl_now: f32 = log_ratio_vec.iter().map(|&x| -x).sum::<f32>() / n as f32;
 
         if epoch + 1 == config.num_epochs {
             stats.policy_loss = policy_loss.clone().into_scalar().elem();
-            stats.value_loss = 0.0;
+            stats.value_loss = value_loss.clone().into_scalar().elem();
             stats.entropy = entropy.clone().into_scalar().elem();
             stats.approx_kl = approx_kl_now;
             stats.clip_fraction = ratio_vec
@@ -162,7 +187,6 @@ where
         }
 
         if approx_kl_now.abs() <= config.target_kl {
-            let total_loss = policy_loss - entropy.mul_scalar(config.entropy_coef);
             let grads = total_loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             model = optim.step(config.learning_rate, model, grads);

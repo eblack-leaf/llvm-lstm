@@ -55,6 +55,7 @@ impl TransformerActorCriticConfig {
             .with_dropout(self.dropout)
             .init(device),
             policy_head: LinearConfig::new(self.d_model, self.num_actions).init(device),
+            value_head: LinearConfig::new(self.d_model, 1).init(device),
         }
     }
 }
@@ -84,6 +85,7 @@ pub struct TransformerActorCritic<B: Backend> {
     pos_embed: Embedding<B>,
     transformer: TransformerEncoder<B>,
     policy_head: Linear<B>,
+    value_head: Linear<B>,
 }
 
 impl<B: Backend> TransformerActorCritic<B> {
@@ -106,6 +108,56 @@ impl<B: Backend> TransformerActorCritic<B> {
         let pos_emb = self.pos_embed.forward(pos_ids); // [1,1+seq,d]
 
         tokens + pos_emb
+    }
+
+    /// Forward pass returning (logits, values) for each step in the sequence.
+    /// `base_features`: [n_ep, d_feat]
+    /// `prev_actions`:  [n_ep, max_t] (padded with start token)
+    /// Returns:
+    ///   logits: [n_ep, max_t, n_act]
+    ///   values: [n_ep, max_t]
+    pub fn forward_with_value(
+        &self,
+        base_features: Tensor<B, 2>,
+        prev_actions: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 2>) {
+        let [batch, seq_len] = prev_actions.dims();
+        let device = base_features.device();
+
+        let tokens = self.tokenize(base_features, prev_actions); // [b, 1+seq, d]
+
+        // Build causal mask (same as in forward_batch)
+        let total_len = seq_len + 1;
+        let mut mask_data = vec![false; batch * total_len * total_len];
+        for ep in 0..batch {
+            for i in 0..total_len {
+                for j in (i + 1)..total_len {
+                    mask_data[ep * total_len * total_len + i * total_len + j] = true;
+                }
+            }
+        }
+        let causal = Tensor::<B, 3, Bool>::from_data(
+            TensorData::new(mask_data, [batch, total_len, total_len]),
+            &device,
+        );
+
+        let out = self
+            .transformer
+            .forward(TransformerEncoderInput::new(tokens).mask_attn(causal)); // [b, total_len, d]
+
+        let d = out.dims()[2];
+        // Skip the first token (IR token)
+        let out_steps = out.slice([0..batch, 1..total_len, 0..d]); // [b, seq, d]
+        let out_flat = out_steps.reshape([batch * seq_len, d]);
+
+        let logits_flat = self.policy_head.forward(out_flat.clone());
+        let values_flat = self.value_head.forward(out_flat);
+
+        let n_act = logits_flat.dims()[1];
+        let logits = logits_flat.reshape([batch, seq_len, n_act]);
+        let values = values_flat.reshape([batch, seq_len]);
+
+        (logits, values)
     }
 
     /// Single-episode forward used during rollout collection.

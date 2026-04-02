@@ -63,4 +63,6 @@ pub struct TrainConfig {
     pub store_max_per_func: usize,
     #[config(default = 500)]
     pub warmup_threshold: usize,
+    #[config(default = 300)]
+    pub value_warmup_iters: usize
 }
