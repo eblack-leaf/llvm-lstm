@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use crate::llvm::ir::{Ir, Source};
-
+#[derive(Clone)]
 pub(crate) struct Functions {
     pub(crate) functions: Vec<Function>,
 }
@@ -14,6 +14,7 @@ impl Functions {
         }
     }
 }
+#[derive(Clone)]
 pub(crate) struct Function {
     pub(crate) name: String,
     pub(crate) source: Source,

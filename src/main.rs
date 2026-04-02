@@ -16,8 +16,12 @@ struct LlvmLstm {
 #[derive(Subcommand)]
 enum Command {
     Train {
-        // options to cfg here\
+        #[arg(long, default_value = "benchmarks")]
         directory: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "opt-20")]
+        opt: String,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best.mpk")]
@@ -35,10 +39,12 @@ enum Command {
 fn main() {
     let args = LlvmLstm::parse();
     match args.command {
-        Command::Train { directory} => {
+        Command::Train { directory, clang, opt, .. } => {
             let mut cfg = Cfg::default();
             cfg.functions = directory;
-            let mut trainer = Trainer::new(cfg);
+            cfg.clang = clang;
+            cfg.opt = opt;
+            let trainer = Trainer::new(cfg);
             trainer.train();
         }
         Command::Evaluate { model } => {

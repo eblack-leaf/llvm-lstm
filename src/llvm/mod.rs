@@ -9,7 +9,7 @@ pub(crate) mod benchmark;
 pub(crate) mod ir;
 pub(crate) mod pass;
 pub(crate) mod functions;
-
+#[derive(Clone)]
 pub(crate) struct Llvm {
     pub(crate) clang: String,
     pub(crate) opt: String,
@@ -34,7 +34,7 @@ impl Llvm {
     pub(crate) fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
         todo!()
     }
-    pub(crate) fn benchmark(&self, bin: &Bin, runs: usize) -> Result<Benchmark> {
+    pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize) -> Result<Benchmark> {
         todo!()
     }
     pub(crate) fn baseline(&self, src: &Source, opt_level: &str, runs: usize) -> Result<Benchmark> {

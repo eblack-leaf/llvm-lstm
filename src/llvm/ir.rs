@@ -1,11 +1,12 @@
 use std::path::PathBuf;
-
+#[derive(Clone)]
 pub(crate) struct Source {
     pub(crate) file: PathBuf,
 }
 pub(crate) struct Bin {
     pub(crate) file: PathBuf,
 }
+#[derive(Clone)]
 pub(crate) struct Ir {
     pub(crate) file: PathBuf,
 }
