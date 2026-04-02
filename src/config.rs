@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Cfg {
     // llvm
     pub(crate) functions: PathBuf,
