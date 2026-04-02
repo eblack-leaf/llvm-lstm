@@ -1,16 +1,27 @@
-use std::path::{Path, PathBuf};
-use anyhow::Result;
+use std::path::PathBuf;
 use crate::llvm::benchmark::Benchmark;
 use crate::llvm::ir::{Bin, Ir, Source};
 use crate::llvm::pass::Pass;
+use anyhow::Result;
+use crate::llvm::functions::Functions;
 
-mod ir;
-mod pass;
-mod benchmark;
+pub(crate) mod benchmark;
+pub(crate) mod ir;
+pub(crate) mod pass;
+pub(crate) mod functions;
 
 pub(crate) struct Llvm {
     pub(crate) clang: String,
     pub(crate) opt: String,
+}
+
+impl Llvm {
+    pub(crate) fn new(clang: &str, opt: &str) -> Self {
+        Self {
+            clang: clang.to_string(),
+            opt: opt.to_string(),
+        }
+    }
 }
 
 impl Llvm {

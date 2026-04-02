@@ -1,5 +1,3 @@
 pub(crate) struct Ppo {}
 
-impl Ppo {
-    
-}
+impl Ppo {}
