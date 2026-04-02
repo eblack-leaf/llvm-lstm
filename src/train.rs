@@ -1,7 +1,7 @@
 use crate::config::Cfg;
+use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
-use crate::llvm::Llvm;
 use crate::ppo::episode::Episode;
 use crate::ppo::model::transformer::{TransformerActor, TransformerActorConfig};
 use crate::ppo::model::{Actor, Input};
@@ -45,16 +45,20 @@ impl Trainer {
                         );
                         workers.spawn(async move {
                             loop {
-                                let input = Input::<Diff>::new(&episode.device);
+                                let input = Input::<Diff>::new(&episode.device); // TODO tokenize first?
                                 let output = episode.actor.forward(&episode.cfg, input);
                                 let action = Pass::Stop; // TODO derive from output.policy
-                                let prob = (); // TODO log probability using action?
+                                let prob = 1.0; // TODO log probability using action?
+                                episode.actions.push(action);
+                                episode.probabilities.push(prob);
                                 // TODO value stuff
                                 let done = action == Pass::Stop;
                                 // TODO no skip if per-step bench? what is most concise flow of branch?
-                                if done {
-                                    let optimized =
-                                        episode.llvm.apply(&episode.ir, &[]).expect("apply passes");
+                                if done || self.cfg.per_step_benchmark {
+                                    let optimized = episode
+                                        .llvm
+                                        .apply(&episode.ir, &episode.actions)
+                                        .expect("apply passes");
                                     let bin = episode.llvm.compile(&optimized).expect("compile");
                                     let benchmark = episode
                                         .llvm
@@ -63,7 +67,9 @@ impl Trainer {
                                         .expect("benchmark");
                                     let step = Step::new(benchmark); // TODO add meta-data
                                     episode.steps.push(step);
-                                    break;
+                                    if done {
+                                        break;
+                                    }
                                 }
                             }
                             episode.results()
