@@ -1,9 +1,7 @@
-use std::sync::Arc;
 use crate::config::Cfg;
-use crate::llvm::functions::Functions;
 use crate::llvm::Llvm;
-use anyhow::Result;
-use tokio::join;
+use crate::llvm::functions::Functions;
+use std::sync::Arc;
 use tokio::task::JoinSet;
 
 pub(crate) struct Trainer {
@@ -12,9 +10,7 @@ pub(crate) struct Trainer {
 
 impl Trainer {
     pub(crate) fn new(cfg: Cfg) -> Self {
-        Self {
-            cfg,
-        }
+        Self { cfg }
     }
     pub(crate) fn train(self) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -34,7 +30,10 @@ impl Trainer {
                             // actor.forward();
                             let optimized = runner.apply(&ir, &[]).expect("apply passes");
                             let bin = runner.compile(&optimized).expect("compile");
-                            let result = runner.benchmark(&bin, self.cfg.benchmark_runs).await.expect("benchmark");
+                            let result = runner
+                                .benchmark(&bin, self.cfg.benchmark_runs)
+                                .await
+                                .expect("benchmark");
                             result
                         });
                     }

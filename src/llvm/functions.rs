@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::llvm::ir::{Ir, Source};
+use std::path::PathBuf;
 #[derive(Clone)]
 pub(crate) struct Functions {
     pub(crate) functions: Vec<Function>,
@@ -9,9 +9,7 @@ impl Functions {
         // read dir
         // parse into funcs with metadata
         let functions = vec![];
-        Self {
-            functions
-        }
+        Self { functions }
     }
 }
 #[derive(Clone)]

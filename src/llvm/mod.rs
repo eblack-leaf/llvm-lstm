@@ -1,14 +1,14 @@
-use std::path::PathBuf;
 use crate::llvm::benchmark::Benchmark;
+use crate::llvm::functions::Functions;
 use crate::llvm::ir::{Bin, Ir, Source};
 use crate::llvm::pass::Pass;
 use anyhow::Result;
-use crate::llvm::functions::Functions;
+use std::path::PathBuf;
 
 pub(crate) mod benchmark;
+pub(crate) mod functions;
 pub(crate) mod ir;
 pub(crate) mod pass;
-pub(crate) mod functions;
 #[derive(Clone)]
 pub(crate) struct Llvm {
     pub(crate) clang: String,
