@@ -5,10 +5,45 @@ use crate::config::{BurnBackend, BurnDevice, Cfg};
 use crate::llvm::ir::Ir;
 use crate::llvm::pass::Pass;
 use crate::ppo::tokens::Tokens;
-use burn::Tensor;
-use burn::prelude::Int;
+use burn::nn::{Linear, LinearConfig};
+use burn::prelude::Module;
 use burn::tensor::TensorData;
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::activation::relu;
+use burn::{Tensor, prelude::Int};
+
+// Shared 2-layer MLP head used by both GRU and Transformer actors.
+// forward: [batch, in_dim] → relu → [batch, out_dim]
+#[derive(Module, Debug, Clone)]
+pub(crate) struct MlpHead {
+    fc1: Linear<BurnBackend>,
+    fc2: Linear<BurnBackend>,
+}
+
+pub(crate) struct MlpHeadConfig {
+    pub(crate) in_dim: usize,
+    pub(crate) hidden_dim: usize,
+    pub(crate) out_dim: usize,
+}
+
+impl MlpHeadConfig {
+    pub(crate) fn new(in_dim: usize, hidden_dim: usize, out_dim: usize) -> Self {
+        Self { in_dim, hidden_dim, out_dim }
+    }
+    pub(crate) fn init(&self, device: &BurnDevice) -> MlpHead {
+        MlpHead {
+            fc1: LinearConfig::new(self.in_dim, self.hidden_dim).init(device),
+            fc2: LinearConfig::new(self.hidden_dim, self.out_dim).init(device),
+        }
+    }
+}
+
+impl MlpHead {
+    pub(crate) fn forward(&self, x: Tensor<BurnBackend, 2>) -> Tensor<BurnBackend, 2> {
+        let x = self.fc1.forward(x);
+        let x = relu(x);
+        self.fc2.forward(x)
+    }
+}
 
 pub(crate) struct Input {
     pub(crate) features: Tensor<BurnBackend, 2>,
