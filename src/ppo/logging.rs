@@ -138,6 +138,36 @@ impl Logger {
         self.epoch_bar.inc(1);
     }
 
+    /// Create a transient progress bar for the PPO update inner loop.
+    /// Caller should call `.finish_and_clear()` on the returned bar when done.
+    pub(crate) fn ppo_bar(&self, total_ppo_epochs: u64) -> ProgressBar {
+        let style = ProgressStyle::with_template(
+            "  ppo    {bar:30.magenta/black} {pos}/{len} epochs  loss={msg}",
+        )
+        .unwrap()
+        .progress_chars("=>-");
+        let bar = self.multi.insert_before(&self.epoch_bar, ProgressBar::new(total_ppo_epochs));
+        bar.set_style(style);
+        if matches!(self.mode, LogMode::FileOnly) {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        bar
+    }
+
+    /// Update the epoch bar message with episode collection progress.
+    pub(crate) fn set_collection_progress(&self, done: usize, total: usize) {
+        if !matches!(self.mode, LogMode::FileOnly) {
+            self.epoch_bar.set_message(format!("collecting {done}/{total}"));
+        }
+    }
+
+    /// Clear the collection progress message once all episodes are in.
+    pub(crate) fn clear_collection_progress(&self) {
+        if !matches!(self.mode, LogMode::FileOnly) {
+            self.epoch_bar.set_message("");
+        }
+    }
+
     /// Finish all progress bars and flush the log file.
     pub(crate) fn finish(&mut self) {
         self.epoch_bar.finish_with_message("done");

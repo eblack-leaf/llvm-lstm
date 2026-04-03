@@ -54,7 +54,11 @@ impl Trainer {
         }
     }
     pub(crate) fn train(mut self) {
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
         rt.block_on(async move {
             let mut functions = Functions::new(&self.cfg.functions).await;
             let mut logger = Logger::init(
@@ -195,7 +199,13 @@ impl Trainer {
                         });
                     }
                 }
-                let results = workers.join_all().await;
+                let total_episodes = workers.len();
+                let mut results = Vec::with_capacity(total_episodes);
+                while let Some(res) = workers.join_next().await {
+                    results.push(res.expect("worker panicked"));
+                    logger.set_collection_progress(results.len(), total_episodes);
+                }
+                logger.clear_collection_progress();
                 metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
                 metrics.update_episode(&results);
 
@@ -206,6 +216,7 @@ impl Trainer {
                 let lr = scheduler.step();
 
                 let t_ppo = Instant::now();
+                let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * batch.steps.len() as u64);
                 let (new_model, new_optimizer, losses) = self.ppo.update(
                     model,
                     optimizer,
@@ -213,7 +224,9 @@ impl Trainer {
                     lr,
                     &self.cfg,
                     &self.device,
+                    &ppo_bar,
                 );
+                ppo_bar.finish_and_clear();
                 model = new_model;
                 optimizer = new_optimizer;
                 metrics.record_ppo_ms(t_ppo.elapsed().as_millis() as u64);

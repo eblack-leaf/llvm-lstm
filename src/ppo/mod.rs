@@ -2,6 +2,7 @@ use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use crate::ppo::episode::Results;
 use crate::ppo::metrics::PpoLosses;
 use crate::ppo::model::{ACTIONS, Actor, Input};
+use indicatif::ProgressBar;
 use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::Int;
@@ -138,6 +139,7 @@ impl Ppo {
         lr: f64,
         cfg: &Cfg,
         device: &BurnDevice,
+        ppo_bar: &ProgressBar,
     ) -> (A, O, PpoLosses)
     where
         A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff>,
@@ -148,8 +150,10 @@ impl Ppo {
         let mut sum_entropy = 0.0_f32;
         let mut step_count = 0usize;
 
-        for _ in 0..self.ppo_epochs {
+        for ep in 0..self.ppo_epochs {
             let mut total: Option<Tensor<BurnAutoDiff, 1>> = None;
+            let mut epoch_loss_sum = 0.0f32;
+            let mut epoch_steps = 0usize;
 
             for step in &batch.steps {
                 let n = step.features.len();
@@ -186,23 +190,33 @@ impl Ppo {
                 let v = self.value_loss(pred_v, ret) * self.value_coef;
                 let e = self.entropy_loss(logits) * self.entropy_coef;
 
-                // Extract scalars before the tensors are consumed by addition.
-                // .inner() detaches from the autodiff graph — no effect on backprop.
-                sum_policy += p.clone().into_scalar();
-                sum_value += v.clone().into_scalar();
-                sum_entropy += e.clone().into_scalar();
+                let p_val = p.clone().into_scalar();
+                let v_val = v.clone().into_scalar();
+                let e_val = e.clone().into_scalar();
+                sum_policy += p_val;
+                sum_value += v_val;
+                sum_entropy += e_val;
+                epoch_loss_sum += p_val + v_val - e_val;
                 step_count += 1;
+                epoch_steps += 1;
 
                 let step_loss = p + v - e;
                 total = Some(match total.take() {
                     None => step_loss,
                     Some(acc) => acc + step_loss,
                 });
+
+                ppo_bar.set_message(format!(
+                    "epoch {}/{} loss={:.4}",
+                    ep + 1,
+                    self.ppo_epochs,
+                    epoch_loss_sum / epoch_steps as f32,
+                ));
+                ppo_bar.inc(1);
             }
 
             if let Some(loss) = total {
-                let loss = loss / batch.steps.len() as f32;
-                let grads = loss.backward();
+                let grads = (loss / batch.steps.len() as f32).backward();
                 let grads = GradientsParams::from_grads(grads, &model);
                 model = optimizer.step(lr, model, grads);
             }
