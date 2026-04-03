@@ -63,8 +63,12 @@ impl Trainer {
                         let actor = current.clone();
                         workers.spawn(async move {
                             loop {
-                                // TODO: pass episode.current_ir once incremental IR is wired up
-                                let input = Input::new(&self.device, &episode.ir, &episode.ir, &episode.actions).await;
+                                let input = Input::new(
+                                    &self.device,
+                                    &episode.ir,
+                                    &episode.current_ir,
+                                    &episode.actions,
+                                ).await;
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = output.action();
                                 let log_prob = output.log_prob(action);
@@ -74,24 +78,36 @@ impl Trainer {
                                 episode.values.push(value);
                                 let done = action == Pass::Stop
                                     || episode.actions.len() + 1 > episode.cfg.max_seq_len;
-                                if done || self.cfg.per_step_benchmark {
-                                    let optimized = episode
+                                let step_idx = episode.steps.len();
+                                // Apply the pass incrementally. Skip Stop — it terminates
+                                // the episode without changing the IR.
+                                if action != Pass::Stop {
+                                    let out = episode.llvm.work_dir.join(
+                                        format!("step_{step_idx}.ll")
+                                    );
+                                    episode.current_ir = episode
                                         .llvm
-                                        .apply(&episode.ir, &episode.actions)
+                                        .apply_one(&episode.current_ir, action, out)
                                         .await
-                                        .expect("apply passes");
-                                    let bin =
-                                        episode.llvm.compile(&optimized).await.expect("compile");
-                                    let benchmark = episode
+                                        .expect("apply_one");
+                                }
+                                let benchmark = if done || self.cfg.per_step_benchmark {
+                                    let bin = episode
+                                        .llvm
+                                        .compile(&episode.current_ir)
+                                        .await
+                                        .expect("compile");
+                                    Some(episode
                                         .llvm
                                         .benchmark(&bin, episode.cfg.benchmark_runs)
                                         .await
-                                        .expect("benchmark");
-                                    let step = Step::new(benchmark); // TODO add meta-data
-                                    episode.steps.push(step);
-                                    if done {
-                                        break;
-                                    }
+                                        .expect("benchmark"))
+                                } else {
+                                    None
+                                };
+                                episode.steps.push(Step::new(action, step_idx, benchmark));
+                                if done {
+                                    break;
                                 }
                             }
                             episode.results()

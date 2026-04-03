@@ -6,7 +6,11 @@ use crate::ppo::step::Step;
 
 pub(crate) struct Episode {
     pub(crate) llvm: Llvm,
+    /// Base (unoptimised) IR — constant for the episode lifetime.
     pub(crate) ir: Ir,
+    /// Current IR state, updated by apply_one after every step.
+    /// Starts as a clone of ir; diverges as passes are applied.
+    pub(crate) current_ir: Ir,
     pub(crate) cfg: Cfg,
     pub(crate) steps: Vec<Step>,
     // Initialised with Start so the model always sees a non-empty sequence.
@@ -17,8 +21,10 @@ pub(crate) struct Episode {
 }
 impl Episode {
     pub(crate) fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg) -> Self {
+        let current_ir = ir.clone();
         Self {
             llvm,
+            current_ir,
             ir,
             cfg,
             steps: vec![],

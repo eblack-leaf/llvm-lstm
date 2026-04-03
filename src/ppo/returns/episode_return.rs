@@ -20,8 +20,10 @@ impl Returns for EpisodeReturn {
         // marginal contributions, so we do not try to read causality into them here.
         let reward = results
             .steps
+            .iter()
+            .filter_map(|s| s.benchmark.as_ref())
             .last()
-            .map(|s| s.benchmark.speedup)
+            .map(|b| b.speedup)
             .unwrap_or(0.0);
         // One return per logged action (excluding the Start prefix).
         vec![reward; results.log_probs.len()]
