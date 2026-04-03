@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 #[derive(Clone)]
 pub(crate) struct Source {
     pub(crate) file: PathBuf,
@@ -355,4 +355,3 @@ fn detect_back_edge(
         }
     }
 }
-

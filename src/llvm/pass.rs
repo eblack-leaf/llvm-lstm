@@ -29,7 +29,7 @@ pub(crate) enum Pass {
     LoopVectorize,
     SlpVectorizer,
     Tailcallelim,
-    Stop
+    Stop,
 }
 impl Pass {
     pub(crate) fn to_opt(self) -> &'static str {
@@ -140,9 +140,7 @@ pub fn to_opt_pipeline(passes: &[Pass]) -> String {
                 match **p {
                     // Primary loop passes
                     Pass::Licm => "loop-mssa(licm)".to_string(),
-                    Pass::LicmAllowSpeculation => {
-                        "loop-mssa(licm<allowspeculation>)".to_string()
-                    }
+                    Pass::LicmAllowSpeculation => "loop-mssa(licm<allowspeculation>)".to_string(),
                     Pass::LoopRotate => "loop(loop-rotate)".to_string(),
                     Pass::LoopRotateHeaderDup => {
                         "loop(loop-rotate<header-duplication;no-prepare-for-lto>)".to_string()

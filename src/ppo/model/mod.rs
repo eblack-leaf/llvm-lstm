@@ -2,11 +2,11 @@ pub(crate) mod gru;
 pub(crate) mod transformer;
 
 use crate::config::{BurnBackend, BurnDevice, Cfg};
+use crate::llvm::ir::Ir;
+use crate::llvm::pass::Pass;
 use burn::Tensor;
 use burn::prelude::Int;
 use burn::tensor::backend::AutodiffBackend;
-use crate::llvm::ir::Ir;
-use crate::llvm::pass::Pass;
 
 pub(crate) struct Input {
     pub(crate) features: Tensor<BurnBackend, 2>,
