@@ -1,4 +1,4 @@
-use crate::config::{Cfg, Dev, Diff};
+use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
@@ -20,8 +20,8 @@ impl Trainer {
         rt.block_on(async move {
             let llvm = Llvm::new(&self.cfg.clang, &self.cfg.opt);
             let functions = Functions::new(&self.cfg.functions);
-            let device = Dev::default();
-            let model = A::init::<Diff>(A::cfg(&self.cfg), &device);
+            let device = BurnDevice::default();
+            let model = A::init(A::cfg(&self.cfg), &device);
             for epoch in 0..self.cfg.epochs {
                 let current = model.no_grads();
                 let mut workers = JoinSet::new();
@@ -34,10 +34,10 @@ impl Trainer {
                             self.cfg.clone(),
                         );
                         let actor = current.clone();
+                        let dev = device.clone();
                         workers.spawn(async move {
                             loop {
-                                let input =
-                                    Input::<Diff>::new(&device, &episode.ir, &episode.actions); // TODO tokenize first?
+                                let input = Input::new(&device, &episode.ir, &episode.actions); // TODO tokenize first?
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = Pass::Stop; // TODO derive from output.policy
                                 let prob = 1.0; // TODO log probability using action?

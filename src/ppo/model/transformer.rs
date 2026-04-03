@@ -1,4 +1,4 @@
-use crate::config::Cfg;
+use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::model::{Actor, Input, Output};
 use burn::config::Config;
 use burn::module::AutodiffModule;
@@ -7,39 +7,39 @@ use burn::prelude::{Backend, Module};
 use burn::tensor::backend::AutodiffBackend;
 
 #[derive(Config, Debug)]
-pub struct TransformerActorConfig {
+pub(crate) struct TransformerActorConfig {
     #[config(default = 34)]
-    pub input_dim: usize,
+    pub(crate) input_dim: usize,
     #[config(default = 29)]
-    pub num_actions: usize,
+    pub(crate) num_actions: usize,
     #[config(default = 256)]
-    pub d_model: usize,
+    pub(crate) d_model: usize,
     #[config(default = 8)]
-    pub n_heads: usize,
+    pub(crate) n_heads: usize,
     #[config(default = 3)]
-    pub n_layers: usize,
+    pub(crate) n_layers: usize,
     #[config(default = 512)]
-    pub d_ff: usize,
+    pub(crate) d_ff: usize,
     #[config(default = 0.3)]
-    pub dropout: f64,
+    pub(crate) dropout: f64,
     /// Dimensionality of the learned action embedding.
     #[config(default = 32)]
-    pub action_embed_dim: usize,
+    pub(crate) action_embed_dim: usize,
     /// Positional embedding table size — must exceed max episode length + 1.
     #[config(default = 64)]
-    pub max_seq_len: usize,
+    pub(crate) max_seq_len: usize,
 }
-#[derive(Module, Debug)]
-pub(crate) struct TransformerActor<B: Backend> {
-    value: Linear<B>,
+#[derive(Module, Debug, Clone)]
+pub(crate) struct TransformerActor {
+    value: Linear<BurnBackend>,
 }
 
-impl<AD: Backend + AutodiffBackend<InnerBackend = AD>> Actor for TransformerActor<AD> {
+impl Actor for TransformerActor {
     type Config = TransformerActorConfig;
-    fn init<B: Backend>(cfg: Self::Config, device: &B::Device) -> Self {
+    fn init(cfg: Self::Config, device: &BurnDevice) -> Self {
         todo!()
     }
-    fn forward<B: Backend>(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
+    fn forward(&self, cfg: &Cfg, input: Input) -> Output {
         todo!()
     }
 
@@ -48,6 +48,6 @@ impl<AD: Backend + AutodiffBackend<InnerBackend = AD>> Actor for TransformerActo
     }
 
     fn no_grads(&self) -> Self {
-        self.valid()
+        <TransformerActor as AutodiffModule<BurnAutoDiff>>::valid(&self)
     }
 }

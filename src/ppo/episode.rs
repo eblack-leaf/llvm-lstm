@@ -13,7 +13,7 @@ pub(crate) struct Episode {
     pub(crate) probabilities: Vec<f32>,
 }
 impl Episode {
-    pub fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg) -> Self {
+    pub(crate) fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg) -> Self {
         Self {
             llvm,
             ir,
@@ -28,4 +28,6 @@ impl Episode {
     }
 }
 
-pub(crate) struct Results {}
+pub(crate) struct Results {
+    // instead of all the data from episode, only what needs to be reported back
+}

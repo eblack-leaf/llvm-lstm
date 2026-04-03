@@ -1,22 +1,25 @@
-use crate::config::Cfg;
+use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::model::{Actor, Input, Output};
 use burn::module::AutodiffModule;
 use burn::nn::Linear;
-use burn::prelude::{Backend, Config, Module};
+use burn::prelude::{Config, Module};
 use burn::tensor::backend::AutodiffBackend;
 
 #[derive(Config, Debug)]
 pub(crate) struct GruActorConfig {}
-#[derive(Module, Debug)]
-pub(crate) struct GruActor<B: Backend> {
-    linear: Linear<B>,
+#[derive(Module, Debug, Clone)]
+pub(crate) struct GruActor {
+    linear: Linear<BurnBackend>,
 }
-impl<AD: Backend + AutodiffBackend<InnerBackend = AD>> Actor for GruActor<AD> {
+impl Actor for GruActor
+where
+    Self: AutodiffModule<BurnAutoDiff>,
+{
     type Config = GruActorConfig;
-    fn init<B: Backend>(cfg: Self::Config, device: &B::Device) -> Self {
+    fn init(cfg: Self::Config, device: &BurnDevice) -> Self {
         todo!()
     }
-    fn forward<B: Backend>(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
+    fn forward(&self, cfg: &Cfg, input: Input) -> Output {
         todo!()
     }
 
@@ -25,6 +28,6 @@ impl<AD: Backend + AutodiffBackend<InnerBackend = AD>> Actor for GruActor<AD> {
     }
 
     fn no_grads(&self) -> Self {
-        self.valid()
+        <GruActor as AutodiffModule<BurnAutoDiff>>::valid(&self)
     }
 }

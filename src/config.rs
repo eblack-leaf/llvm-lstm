@@ -2,9 +2,9 @@ use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::{Autodiff, NdArray};
 use clap::ValueEnum;
 use std::path::PathBuf;
-pub(crate) type Backend = NdArray;
-pub(crate) type Dev = NdArrayDevice;
-pub(crate) type Diff = Autodiff<Backend>;
+pub(crate) type BurnBackend = NdArray;
+pub(crate) type BurnDevice = NdArrayDevice;
+pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Cfg {
     pub(crate) functions: PathBuf,

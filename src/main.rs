@@ -1,4 +1,5 @@
-use crate::config::{ActorArch, Backend, Cfg, Diff};
+#![allow(unused)]
+use crate::config::{ActorArch, BurnAutoDiff, BurnBackend, Cfg};
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
 use crate::train::Trainer;
@@ -24,7 +25,7 @@ enum Command {
         clang: String,
         #[arg(long, default_value = "opt-20")]
         opt: String,
-        #[arg(long, default_value = "ActorArch::Tfx")]
+        #[arg(long, default_value = "tfx")]
         actor_arch: ActorArch,
     },
     Evaluate {
@@ -55,8 +56,8 @@ fn main() {
             cfg.opt = opt;
             let trainer = Trainer::new(cfg);
             match actor_arch {
-                ActorArch::Tfx => trainer.train::<TransformerActor<Diff>>(),
-                ActorArch::Gru => trainer.train::<GruActor<Diff>>(),
+                ActorArch::Tfx => trainer.train::<TransformerActor>(),
+                ActorArch::Gru => trainer.train::<GruActor>(),
             }
         }
         Command::Evaluate { model } => {
