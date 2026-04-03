@@ -132,11 +132,4 @@ pub(crate) trait Actor<B: Backend>: Module<B> + Sized {
     fn init(cfg: Self::Config, device: &B::Device) -> Self;
     fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B>;
     fn cfg(cfg: &Cfg) -> Self::Config;
-    /// Returns the inference (no-gradient) version. Only callable on the autodiff actor.
-    fn no_grads(&self) -> <Self as AutodiffModule<BurnAutoDiff>>::InnerModule
-    where
-        Self: AutodiffModule<BurnAutoDiff>,
-    {
-        self.valid()
-    }
 }
