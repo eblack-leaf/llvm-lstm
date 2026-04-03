@@ -43,8 +43,7 @@ impl<B: Backend> Actor<B> for GruActor<B> {
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
             ir_proj: LinearConfig::new(cfg.input_dim, cfg.hidden_size).init(device),
-            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim)
-                .init(device),
+            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim).init(device),
             action_proj: LinearConfig::new(cfg.action_embed_dim, cfg.hidden_size).init(device),
             gru: GruConfig::new(cfg.hidden_size, cfg.hidden_size, false).init(device),
             policy_head: MlpHeadConfig::new(cfg.hidden_size, cfg.head_hidden, cfg.num_actions)

@@ -60,8 +60,7 @@ impl<B: Backend> Actor<B> for TransformerActor<B> {
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
             ir_proj: LinearConfig::new(cfg.input_dim, cfg.d_model).init(device),
-            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim)
-                .init(device),
+            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim).init(device),
             action_proj: LinearConfig::new(cfg.action_embed_dim, cfg.d_model).init(device),
             pos_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
@@ -93,8 +92,8 @@ impl<B: Backend> Actor<B> for TransformerActor<B> {
         let x = Tensor::cat(vec![ir_tok, act], 1);
 
         // Positional encoding → [batch, seq_len+1, d_model]
-        let positions = Tensor::<B, 1, Int>::arange(0..(seq_len + 1) as i64, &device)
-            .unsqueeze_dim(0); // [1, seq_len+1]
+        let positions =
+            Tensor::<B, 1, Int>::arange(0..(seq_len + 1) as i64, &device).unsqueeze_dim(0); // [1, seq_len+1]
         let pos = self.pos_embed.forward(positions);
         let x = x + pos;
 

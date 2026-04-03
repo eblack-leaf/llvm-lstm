@@ -1,6 +1,6 @@
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use crate::ppo::episode::Results;
-use crate::ppo::model::{Actor, Input, ACTIONS};
+use crate::ppo::model::{ACTIONS, Actor, Input};
 use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::Int;
@@ -72,8 +72,7 @@ impl Ppo {
                     .copied()
                     .collect();
                 // actions[0] = Start prefix; actions[0..=t] is the sequence seen at step t
-                let action_seq: Vec<i64> =
-                    ep.actions[0..=t].iter().map(|p| *p as i64).collect();
+                let action_seq: Vec<i64> = ep.actions[0..=t].iter().map(|p| *p as i64).collect();
                 // actions[t+1] is the action taken at step t
                 let taken = ep.actions[t + 1];
                 let taken_action_idx = ACTIONS
@@ -160,8 +159,7 @@ impl Ppo {
 
                 // [num_actions] logits; slice the taken action's log-prob
                 let logits = output.policy.squeeze::<1>();
-                let new_lp =
-                    log_softmax(logits.clone(), 0).narrow(0, step.taken_action_idx, 1);
+                let new_lp = log_softmax(logits.clone(), 0).narrow(0, step.taken_action_idx, 1);
                 let pred_v = output.value.flatten::<1>(0, 1);
 
                 let old_lp = Tensor::<BurnAutoDiff, 1>::from_data(

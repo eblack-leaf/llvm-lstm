@@ -6,11 +6,12 @@ use crate::llvm::pass::Pass;
 use crate::ppo::Ppo;
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
+use crate::ppo::model::transformer::TransformerActor;
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::returns::Returns;
 use crate::ppo::step::Step;
-use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::lr_scheduler::LrScheduler;
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
 use burn::optim::{AdamW, AdamWConfig};
 use tokio::task::JoinSet;
@@ -46,9 +47,7 @@ impl Trainer {
     }
     pub(crate) fn train<A>(mut self)
     where
-        A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff> + Clone + Send + 'static,
-        <A as AutodiffModule<BurnAutoDiff>>::InnerModule:
-            Actor<BurnBackend> + Clone + Send + 'static,
+        A: Actor<BurnAutoDiff> + Clone + Send + 'static,
     {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
@@ -63,14 +62,19 @@ impl Trainer {
                 );
             }
 
-            let model = A::init(A::cfg(&self.cfg), &self.device);
-            let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, A>();
+            let model = TransformerActor::init(
+                TransformerActor::<BurnAutoDiff>::cfg(&self.cfg),
+                &self.device,
+            );
+            let mut optimizer =
+                AdamWConfig::new().init::<BurnAutoDiff, TransformerActor<BurnAutoDiff>>();
             let mut policy_scheduler =
                 CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
-                    .init().expect("scheduler init");
+                    .init()
+                    .expect("scheduler init");
 
             for _epoch in 0..self.cfg.epochs {
-                let current = model.no_grads();
+                let current = model.valid();
                 let mut workers = JoinSet::new();
                 for func in self.functions.functions.iter() {
                     let baselines = func.baselines.as_ref().expect("baselines not collected");
@@ -168,8 +172,14 @@ impl Trainer {
 
                 let batch = Ppo::batch(&results, &all_returns, &advantages);
                 let lr = policy_scheduler.step();
-                let (model, optimizer) =
-                    self.ppo.update(model, optimizer, &batch, lr, &self.cfg, &self.device);
+                let (model, optimizer) = self.ppo.update(
+                    model.clone(),
+                    optimizer.clone(),
+                    &batch,
+                    lr,
+                    &self.cfg,
+                    &self.device,
+                );
                 // TODO metrics updating + using to check best => Checkpoint::save(best) + patience on EMA
                 // TODO logging update + every N epochs => plot train
             }
