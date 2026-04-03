@@ -1,9 +1,9 @@
 use crate::config::{ActorArch, Backend, Cfg, Diff};
+use crate::ppo::model::gru::GruActor;
+use crate::ppo::model::transformer::TransformerActor;
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use crate::ppo::model::gru::GruActor;
-use crate::ppo::model::transformer::TransformerActor;
 
 mod config;
 mod llvm;
@@ -47,7 +47,7 @@ fn main() {
             directory,
             clang,
             opt,
-            actor_arch
+            actor_arch,
         } => {
             let mut cfg = Cfg::default();
             cfg.functions = directory;
@@ -55,8 +55,8 @@ fn main() {
             cfg.opt = opt;
             let trainer = Trainer::new(cfg);
             match actor_arch {
-                ActorArch::Tfx => trainer.train::<TransformerActor<Backend>>(),
-                ActorArch::Gru => trainer.train::<GruActor<Backend>>()
+                ActorArch::Tfx => trainer.train::<TransformerActor<Diff>>(),
+                ActorArch::Gru => trainer.train::<GruActor<Diff>>(),
             }
         }
         Command::Evaluate { model } => {

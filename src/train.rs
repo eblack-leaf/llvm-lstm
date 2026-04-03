@@ -1,12 +1,11 @@
 use crate::config::{Cfg, Dev, Diff};
+use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
-use crate::llvm::Llvm;
 use crate::ppo::episode::Episode;
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::step::Step;
 use tokio::task::JoinSet;
-
 
 pub(crate) struct Trainer {
     cfg: Cfg,
@@ -34,10 +33,11 @@ impl Trainer {
                             func.ir.clone(),
                             self.cfg.clone(),
                         );
-                        let actor = model.no_grads();
+                        let actor = current.clone();
                         workers.spawn(async move {
                             loop {
-                                let input = Input::<Diff>::new(&device); // TODO tokenize first?
+                                let input =
+                                    Input::<Diff>::new(&device, &episode.ir, &episode.actions); // TODO tokenize first?
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = Pass::Stop; // TODO derive from output.policy
                                 let prob = 1.0; // TODO log probability using action?
@@ -46,7 +46,6 @@ impl Trainer {
                                 // TODO value stuff
                                 let done = action == Pass::Stop
                                     || episode.actions.len() + 1 > episode.cfg.max_seq_len;
-                                // TODO no skip if per-step bench? what is most concise flow of branch?
                                 if done || self.cfg.per_step_benchmark {
                                     let optimized = episode
                                         .llvm

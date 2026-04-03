@@ -30,7 +30,7 @@ pub struct TransformerActorConfig {
     pub max_seq_len: usize,
 }
 #[derive(Module, Debug)]
-pub(crate) struct TransformerActor<B: Backend + AutodiffBackend<InnerBackend = B>> {
+pub(crate) struct TransformerActor<B: Backend> {
     value: Linear<B>,
 }
 
