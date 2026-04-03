@@ -1,7 +1,9 @@
-use crate::config::Cfg;
+use crate::config::{ActorArch, Backend, Cfg, Diff};
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use crate::ppo::model::gru::GruActor;
+use crate::ppo::model::transformer::TransformerActor;
 
 mod config;
 mod llvm;
@@ -22,6 +24,8 @@ enum Command {
         clang: String,
         #[arg(long, default_value = "opt-20")]
         opt: String,
+        #[arg(long, default_value = "ActorArch::Tfx")]
+        actor_arch: ActorArch,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -43,14 +47,17 @@ fn main() {
             directory,
             clang,
             opt,
-            ..
+            actor_arch
         } => {
             let mut cfg = Cfg::default();
             cfg.functions = directory;
             cfg.clang = clang;
             cfg.opt = opt;
             let trainer = Trainer::new(cfg);
-            trainer.train();
+            match actor_arch {
+                ActorArch::Tfx => trainer.train::<TransformerActor<Backend>>(),
+                ActorArch::Gru => trainer.train::<GruActor<Backend>>()
+            }
         }
         Command::Evaluate { model } => {
             // load model

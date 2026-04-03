@@ -1,8 +1,10 @@
 use crate::config::Cfg;
 use crate::ppo::model::{Actor, Input, Output};
 use burn::config::Config;
+use burn::module::AutodiffModule;
 use burn::nn::Linear;
 use burn::prelude::{Backend, Module};
+use burn::tensor::backend::AutodiffBackend;
 
 #[derive(Config, Debug)]
 pub struct TransformerActorConfig {
@@ -28,16 +30,24 @@ pub struct TransformerActorConfig {
     pub max_seq_len: usize,
 }
 #[derive(Module, Debug)]
-pub(crate) struct TransformerActor<B: Backend> {
+pub(crate) struct TransformerActor<B: Backend + AutodiffBackend<InnerBackend = B>> {
     value: Linear<B>,
 }
 
-impl<AD: Backend> Actor for TransformerActor<AD> {
+impl<AD: Backend + AutodiffBackend<InnerBackend = AD>> Actor for TransformerActor<AD> {
     type Config = TransformerActorConfig;
     fn init<B: Backend>(cfg: Self::Config, device: &B::Device) -> Self {
         todo!()
     }
     fn forward<B: Backend>(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
         todo!()
+    }
+
+    fn cfg(cfg: &Cfg) -> Self::Config {
+        todo!()
+    }
+
+    fn no_grads(&self) -> Self {
+        self.valid()
     }
 }

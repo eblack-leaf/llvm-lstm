@@ -29,7 +29,7 @@ impl Llvm {
 impl Llvm {
     pub(crate) fn with_env(&self, env: PathBuf) -> Self {
         Self {
-           clang: self.clang.clone(),
+            clang: self.clang.clone(),
             opt: self.opt.clone(),
             work_dir: env,
         }

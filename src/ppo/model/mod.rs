@@ -2,8 +2,9 @@ pub(crate) mod gru;
 pub(crate) mod transformer;
 
 use crate::config::Cfg;
-use burn::Tensor;
 use burn::prelude::{Backend, Int};
+use burn::Tensor;
+
 pub(crate) struct Input<B: Backend> {
     pub(crate) features: Tensor<B, 2>,
     pub(crate) actions: Tensor<B, 2, Int>,
@@ -24,4 +25,6 @@ pub(crate) trait Actor {
     type Config;
     fn init<B: Backend>(cfg: Self::Config, device: &B::Device) -> Self;
     fn forward<B: Backend>(&self, cfg: &Cfg, input: Input<B>) -> Output<B>;
+    fn cfg(cfg: &Cfg) -> Self::Config;
+    fn no_grads(&self) -> Self;
 }
