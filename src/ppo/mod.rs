@@ -165,7 +165,7 @@ impl Ppo {
                 let output = model.forward(cfg, Input { features, actions });
 
                 // [num_actions] logits; slice the taken action's log-prob
-                let logits = output.policy.squeeze::<1>();
+                let logits = output.policy.flatten::<1>(0, 2);
                 let new_lp = log_softmax(logits.clone(), 0).narrow(0, step.taken_action_idx, 1);
                 let pred_v = output.value.flatten::<1>(0, 1);
 

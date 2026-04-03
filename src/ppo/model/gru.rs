@@ -63,7 +63,7 @@ impl<B: Backend> Actor<B> for GruActor<B> {
 
         // GRU output [batch, seq_len, hidden_size]; take last step as context [batch, hidden_size]
         let out = self.gru.forward(seq, Some(h0));
-        let hn = out.narrow(1, seq_len - 1, 1).squeeze::<2>();
+        let hn = out.narrow(1, seq_len - 1, 1).flatten::<2>(1, 2);
 
         // 2-layer MLP heads
         let policy = self.policy_head.forward(hn.clone()).unsqueeze_dim(1); // [batch, 1, num_actions]

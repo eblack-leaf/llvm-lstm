@@ -53,6 +53,9 @@ impl Logger {
             LogMode::StdoutOnly => None,
             _ => {
                 let path = log_path.expect("log_path required for FileOnly / FileAndStdout");
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let f = OpenOptions::new().create(true).append(true).open(path)?;
                 Some(BufWriter::new(f))
             }

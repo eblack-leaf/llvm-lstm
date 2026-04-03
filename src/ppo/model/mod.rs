@@ -104,7 +104,7 @@ pub(crate) struct Output<B: Backend> {
 // Inference-only methods — sampling and scalar extraction require a concrete non-autodiff backend.
 impl Output<BurnBackend> {
     pub(crate) fn action(&self) -> Pass {
-        let logits = self.policy.clone().squeeze::<1>();
+        let logits = self.policy.clone().flatten::<1>(0, 2);
         let probs = softmax(logits, 0);
         let cumsum = probs.cumsum(0);
         let u: f32 = rand::random();
@@ -117,7 +117,7 @@ impl Output<BurnBackend> {
     }
 
     pub(crate) fn log_prob(&self, action: Pass) -> f32 {
-        let logits = self.policy.clone().squeeze::<1>();
+        let logits = self.policy.clone().flatten::<1>(0, 2);
         let log_probs = log_softmax(logits, 0);
         let idx = ACTIONS
             .iter()

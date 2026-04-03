@@ -57,7 +57,6 @@ impl Trainer {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
             let mut functions = Functions::new(&self.cfg.functions).await;
-
             let mut logger = Logger::init(
                 self.log_mode,
                 self.log_path.as_deref(),

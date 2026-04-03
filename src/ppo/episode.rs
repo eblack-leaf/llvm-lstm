@@ -34,6 +34,9 @@ impl Episode {
         cfg: Cfg,
         baselines: Baselines,
     ) -> Self {
+        tokio::fs::create_dir_all(&llvm.work_dir)
+            .await
+            .expect("failed to create worker dir");
         let content = tokio::fs::read_to_string(&ir.file)
             .await
             .expect("failed to read base IR");

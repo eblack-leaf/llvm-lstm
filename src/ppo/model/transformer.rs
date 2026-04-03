@@ -101,7 +101,7 @@ impl<B: Backend> Actor<B> for TransformerActor<B> {
         let out = self.transformer.forward(TransformerEncoderInput::new(x));
 
         // Pool the IR token (position 0) as the shared context [batch, d_model]
-        let ctx = out.narrow(1, 0, 1).squeeze::<2>();
+        let ctx = out.narrow(1, 0, 1).flatten::<2>(1, 2);
 
         // 2-layer MLP heads
         let policy = self.policy_head.forward(ctx.clone()).unsqueeze_dim(1); // [batch, 1, num_actions]
