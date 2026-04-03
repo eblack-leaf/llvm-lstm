@@ -1,6 +1,7 @@
 use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
+use crate::llvm::ir::Features;
 use crate::llvm::pass::Pass;
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
@@ -72,7 +73,7 @@ impl Trainer {
                             func.ir.clone(),
                             self.cfg.clone(),
                             baselines.clone(),
-                        );
+                        ).await;
                         let actor = current.clone();
                         workers.spawn(async move {
                             loop {
@@ -104,6 +105,21 @@ impl Trainer {
                                         .await
                                         .expect("apply_one");
                                 }
+                                // Compute delta_features from the current IR state.
+                                // Zero for Stop (IR unchanged); non-zero entries show
+                                // which IR characteristics the pass sequence has moved.
+                                let delta_features = {
+                                    let content = tokio::fs::read_to_string(&episode.current_ir.file)
+                                        .await
+                                        .expect("read current IR");
+                                    let current = Features::from_ll_str(&content)
+                                        .expect("parse current IR features")
+                                        .to_vec();
+                                    episode.base_features.iter()
+                                        .zip(&current)
+                                        .map(|(b, c)| c - b)
+                                        .collect()
+                                };
                                 let benchmark = if done || self.cfg.per_step_benchmark {
                                     let bin = episode
                                         .llvm
@@ -120,7 +136,7 @@ impl Trainer {
                                 } else {
                                     None
                                 };
-                                episode.steps.push(Step::new(action, step_idx, benchmark));
+                                episode.steps.push(Step::new(action, step_idx, benchmark, delta_features));
                                 if done {
                                     break;
                                 }

@@ -1,7 +1,7 @@
 use crate::config::Cfg;
 use crate::llvm::Llvm;
 use crate::llvm::benchmark::Baselines;
-use crate::llvm::ir::Ir;
+use crate::llvm::ir::{Features, Ir};
 use crate::llvm::pass::Pass;
 use crate::ppo::step::Step;
 
@@ -22,9 +22,18 @@ pub(crate) struct Episode {
     /// Per-function baseline timings; carried so the train loop can compute
     /// speedup and so Returns implementors can compare against any opt level.
     pub(crate) baselines: Baselines,
+    /// Feature vector of the base IR, parsed once at construction.
+    /// Subtracted from the current IR features each step to form delta_features on Step.
+    pub(crate) base_features: Vec<f32>,
 }
 impl Episode {
-    pub(crate) fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg, baselines: Baselines) -> Self {
+    pub(crate) async fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg, baselines: Baselines) -> Self {
+        let content = tokio::fs::read_to_string(&ir.file)
+            .await
+            .expect("failed to read base IR");
+        let base_features = Features::from_ll_str(&content)
+            .expect("failed to parse base IR features")
+            .to_vec();
         let current_ir = ir.clone();
         Self {
             llvm,
@@ -36,6 +45,7 @@ impl Episode {
             log_probs: vec![],
             values: vec![],
             baselines,
+            base_features,
         }
     }
     pub(crate) fn results(self) -> Results {
