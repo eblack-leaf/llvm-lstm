@@ -1,4 +1,5 @@
 use crate::ppo::advantages::Advantages;
+use crate::ppo::episode::Results;
 
 /// Rank-normalises returns across the batch before subtracting the value baseline.
 ///
@@ -26,17 +27,17 @@ impl RankAdvantage {
 }
 
 impl Advantages for RankAdvantage {
-    fn compute(&self, batch: &[(Vec<f32>, Vec<f32>)]) -> Vec<Vec<f32>> {
-        let n = batch.len();
+    fn compute(&self, returns: &[Vec<f32>], results: &[Results]) -> Vec<Vec<f32>> {
+        let n = returns.len();
         if n == 0 {
             return vec![];
         }
 
         // Each episode's "episode return" is the mean of its per-step returns.
-        // For EpisodeReturn all steps are the same value, so mean == that value.
-        let episode_scores: Vec<f32> = batch
+        // For EpisodeReturn all steps carry the same value, so mean == that value.
+        let episode_scores: Vec<f32> = returns
             .iter()
-            .map(|(returns, _)| returns.iter().sum::<f32>() / returns.len().max(1) as f32)
+            .map(|r| r.iter().sum::<f32>() / r.len().max(1) as f32)
             .collect();
 
         // Rank episodes by score (0 = worst, n-1 = best).
@@ -58,14 +59,16 @@ impl Advantages for RankAdvantage {
         };
 
         // Per-step advantage: rank score of the episode minus value estimate at that step.
-        let mut all_advantages: Vec<Vec<f32>> = batch
+        // results[i].values gives V(s_t); Step metadata is available via results[i].steps
+        // for future implementors that want finer attribution.
+        let mut all_advantages: Vec<Vec<f32>> = returns
             .iter()
             .enumerate()
-            .map(|(ep_idx, (returns, values))| {
+            .map(|(ep_idx, ep_returns)| {
                 let score = rank_score(ep_idx);
-                returns
+                ep_returns
                     .iter()
-                    .zip(values)
+                    .zip(&results[ep_idx].values)
                     .map(|(_, v)| score - v)
                     .collect()
             })

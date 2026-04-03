@@ -1,7 +1,9 @@
 #![allow(unused)]
 use crate::config::{Arch, Cfg};
+use crate::ppo::advantages::rank::RankAdvantage;
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
+use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -61,7 +63,11 @@ fn main() {
             cfg.arch = arch;
             cfg.max_seq_len = max_seq_len;
             // ...
-            let trainer = Trainer::new(cfg);
+            let trainer = Trainer::new(
+                cfg,
+                Box::new(EpisodeReturn),
+                Box::new(RankAdvantage::new(true)),
+            );
             match arch {
                 Arch::Tfx => trainer.train::<TransformerActor>(),
                 Arch::Gru => trainer.train::<GruActor>(),

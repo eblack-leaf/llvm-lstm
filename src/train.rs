@@ -1,17 +1,14 @@
 use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::llvm::Llvm;
-use crate::llvm::functions::{Function, Functions};
+use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
-use crate::ppo::advantages::rank::RankAdvantage;
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
 use crate::ppo::model::{Actor, Input};
-use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::ppo::returns::Returns;
 use crate::ppo::step::Step;
-use burn::lr_scheduler::cosine::{CosineAnnealingLrScheduler, CosineAnnealingLrSchedulerConfig};
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
-use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig};
 use tokio::task::JoinSet;
 
@@ -20,10 +17,16 @@ pub(crate) struct Trainer {
     llvm: Llvm,
     functions: Functions,
     device: BurnDevice,
+    returns: Box<dyn Returns>,
+    advantages: Box<dyn Advantages>,
 }
 
 impl Trainer {
-    pub(crate) fn new(cfg: Cfg) -> Self {
+    pub(crate) fn new(
+        cfg: Cfg,
+        returns: Box<dyn Returns>,
+        advantages: Box<dyn Advantages>,
+    ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
         let functions = Functions::new(&cfg.functions);
         Self {
@@ -31,6 +34,8 @@ impl Trainer {
             llvm,
             functions,
             device: Default::default(),
+            returns,
+            advantages,
         }
     }
     pub(crate) fn train<A: Actor + Clone + 'static + Send + AutodiffModule<BurnAutoDiff>>(self) {
@@ -58,7 +63,8 @@ impl Trainer {
                         let actor = current.clone();
                         workers.spawn(async move {
                             loop {
-                                let input = Input::new(&self.device, &episode.ir, &episode.actions).await;
+                                // TODO: pass episode.current_ir once incremental IR is wired up
+                                let input = Input::new(&self.device, &episode.ir, &episode.ir, &episode.actions).await;
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = output.action();
                                 let log_prob = output.log_prob(action);
@@ -93,19 +99,11 @@ impl Trainer {
                     }
                 }
                 let results = workers.join_all().await;
-                let returns_method = EpisodeReturn;
-                let advantages_method = RankAdvantage::new(true);
-                // Per-episode returns: one f32 per step.
                 let all_returns: Vec<Vec<f32>> = results
                     .iter()
-                    .map(|r| returns_method.compute(r))
+                    .map(|r| self.returns.compute(r))
                     .collect();
-                // Pair with value estimates for the advantages computation.
-                let batch: Vec<(Vec<f32>, Vec<f32>)> = all_returns
-                    .into_iter()
-                    .zip(results.iter().map(|r| r.values.clone()))
-                    .collect();
-                let advantages = advantages_method.compute(&batch);
+                let advantages = self.advantages.compute(&all_returns, &results);
                 // TODO PPO update
                 // metrics updating + using to check best => Checkpoint::save(best) + patience on EMA
                 // logging update + every N epochs => plot train

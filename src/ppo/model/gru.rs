@@ -7,7 +7,7 @@ use burn::prelude::{Config, Module};
 
 #[derive(Config, Debug)]
 pub(crate) struct GruActorConfig {
-    #[config(default = 34)]
+    #[config(default = 68)]
     pub(crate) input_dim: usize,
     #[config(default = 29)]
     pub(crate) num_actions: usize,
