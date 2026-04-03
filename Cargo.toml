@@ -9,7 +9,7 @@ edition = "2024"
 # Secondary (this feature): 57 additional passes covering interprocedural,
 # coroutine, module-level, and niche function passes + new Stop = 86 actions.
 # Enable when the primary set converges but still leaves room to improve.
-secondary_passes = []
+gru = []
 # Switch transformer training to the Wgpu GPU backend (Vulkan/Metal/DX12).
 # GRU training remains on CPU NdArray regardless.
 # Usage: cargo build --release --features wgpu

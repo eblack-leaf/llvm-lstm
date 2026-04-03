@@ -1,4 +1,4 @@
-use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
+use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::ir::Features;
@@ -45,10 +45,7 @@ impl Trainer {
             ppo,
         }
     }
-    pub(crate) fn train<A>(mut self)
-    where
-        A: Actor<BurnAutoDiff> + Clone + Send + 'static,
-    {
+    pub(crate) fn train(mut self) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
             // Collect per-function baselines before any episode collection.
@@ -62,12 +59,8 @@ impl Trainer {
                 );
             }
 
-            let model = TransformerActor::init(
-                TransformerActor::<BurnAutoDiff>::cfg(&self.cfg),
-                &self.device,
-            );
-            let mut optimizer =
-                AdamWConfig::new().init::<BurnAutoDiff, TransformerActor<BurnAutoDiff>>();
+            let model = Arch::init(Arch::cfg(&self.cfg), &self.device);
+            let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
             let mut policy_scheduler =
                 CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
                     .init()

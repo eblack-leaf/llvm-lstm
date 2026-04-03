@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::config::{Arch, BurnAutoDiff, Cfg};
+use crate::config::{BurnAutoDiff, Cfg};
 use crate::ppo::advantages::rank::RankAdvantage;
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
@@ -27,8 +27,6 @@ enum Command {
         clang: String,
         #[arg(long, default_value = "opt-20")]
         opt: String,
-        #[arg(long, default_value = "tfx")]
-        arch: Arch,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
         // ...
@@ -53,14 +51,12 @@ fn main() {
             directory,
             clang,
             opt,
-            arch,
             max_seq_len,
         } => {
             let mut cfg = Cfg::default();
             cfg.functions = directory;
             cfg.clang = clang;
             cfg.opt = opt;
-            cfg.arch = arch;
             cfg.max_seq_len = max_seq_len;
             // ...
             let trainer = Trainer::new(
@@ -68,10 +64,7 @@ fn main() {
                 Box::new(EpisodeReturn),
                 Box::new(RankAdvantage::new(true)),
             );
-            match arch {
-                Arch::Tfx => trainer.train::<TransformerActor<BurnAutoDiff>>(),
-                Arch::Gru => trainer.train::<GruActor<BurnAutoDiff>>(),
-            }
+            trainer.train();
         }
         Command::Evaluate { model } => {
             // load model
