@@ -10,7 +10,9 @@ pub(crate) struct Episode {
     pub(crate) cfg: Cfg,
     pub(crate) steps: Vec<Step>,
     pub(crate) actions: Vec<Pass>,
-    pub(crate) probabilities: Vec<f32>,
+    pub(crate) log_probs: Vec<f32>,
+    // V(s_t) estimate from the critic at each step; used to compute advantages
+    pub(crate) values: Vec<f32>,
 }
 impl Episode {
     pub(crate) fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg) -> Self {
@@ -20,7 +22,8 @@ impl Episode {
             cfg,
             steps: vec![],
             actions: vec![],
-            probabilities: vec![],
+            log_probs: vec![],
+            values: vec![],
         }
     }
     pub(crate) fn results(self) -> Results {

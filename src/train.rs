@@ -57,11 +57,12 @@ impl Trainer {
                             loop {
                                 let input = Input::new(&self.device, &episode.ir, &episode.actions).await;
                                 let output = actor.forward(&episode.cfg, input);
-                                let action = output.action(); // TODO derive from output.policy
-                                let prob = output.probability(action); // TODO log probability using action?
+                                let action = output.action();
+                                let log_prob = output.log_prob(action);
+                                let value = output.value_scalar();
                                 episode.actions.push(action);
-                                episode.probabilities.push(prob);
-                                // TODO value stuff
+                                episode.log_probs.push(log_prob);
+                                episode.values.push(value);
                                 let done = action == Pass::Stop
                                     || episode.actions.len() + 1 > episode.cfg.max_seq_len;
                                 if done || self.cfg.per_step_benchmark {
