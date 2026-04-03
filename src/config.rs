@@ -1,16 +1,22 @@
-use crate::ppo::model::transformer::TransformerActor;
+use crate::ppo::model::gru::GruActorConfig;
+use crate::ppo::model::transformer::{TransformerActor, TransformerActorConfig};
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::{Autodiff, NdArray};
-use clap::ValueEnum;
 use std::path::PathBuf;
 
 pub(crate) type BurnBackend = NdArray;
 pub(crate) type BurnDevice = NdArrayDevice;
 pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
+
 #[cfg(not(feature = "gru"))]
 pub(crate) type Arch = TransformerActor<BurnAutoDiff>;
 #[cfg(feature = "gru")]
 pub(crate) type Arch = GruActor<BurnAutoDiff>;
+
+#[cfg(not(feature = "gru"))]
+pub(crate) type ArchConfig = TransformerActorConfig;
+#[cfg(feature = "gru")]
+pub(crate) type ArchConfig = GruActorConfig;
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Cfg {
     pub(crate) functions: PathBuf,

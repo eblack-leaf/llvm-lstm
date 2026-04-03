@@ -129,6 +129,7 @@ impl Logger {
                 "lr":                     lr,
             });
             let _ = writeln!(f, "{}", record);
+            let _ = f.flush();
         }
 
         self.epoch_bar.inc(1);

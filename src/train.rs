@@ -1,4 +1,5 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
+use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::ir::Features;
@@ -90,7 +91,11 @@ impl Trainer {
             }
             logger.finish_baseline_phase();
 
-            let mut model = Arch::init(Arch::cfg(&self.cfg), &self.device);
+            let arch_cfg = Arch::cfg(&self.cfg);
+            let checkpoint_dir = self.cfg.work_dir.join("best");
+            let mut best_ema = f32::NEG_INFINITY;
+
+            let mut model = Arch::init(arch_cfg.clone(), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
             let mut scheduler =
                 CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
@@ -216,9 +221,23 @@ impl Trainer {
                 metrics.update_ppo(losses);
 
                 logger.log_epoch(epoch, &metrics, lr);
-                metrics.next_epoch();
 
-                // TODO checkpoint (best model by speedup_ema)
+                if metrics.speedup_ema() > best_ema {
+                    best_ema = metrics.speedup_ema();
+                    Checkpoint::save(
+                        &model,
+                        &arch_cfg,
+                        CheckpointMeta {
+                            epoch,
+                            speedup_ema: best_ema,
+                            max_seq_len: self.cfg.max_seq_len,
+                        },
+                        &checkpoint_dir,
+                    )
+                    .expect("checkpoint save");
+                }
+
+                metrics.next_epoch();
             }
 
             logger.finish();

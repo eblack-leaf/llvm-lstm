@@ -1,10 +1,12 @@
 #![allow(unused)]
-use crate::config::{BurnAutoDiff, Cfg};
+use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
+use burn::module::AutodiffModule;
 use crate::ppo::advantages::rank::RankAdvantage;
+use crate::ppo::checkpoint::Checkpoint;
+use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
 use crate::ppo::returns::episode_return::EpisodeReturn;
-use crate::ppo::logging::{LogMode, Logger};
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -71,12 +73,12 @@ fn main() {
             trainer.train();
         }
         Command::Evaluate { model } => {
-            // load model
-            // do baselines
-            // do greedy
-            // do random
-            // do model
-            // compare
+            let device = BurnDevice::default();
+            let (loaded_model, meta) =
+                Checkpoint::load(&model, &device).expect("failed to load checkpoint");
+            let inference_model = loaded_model.valid();
+            // meta.max_seq_len, meta.speedup_ema available for eval setup
+            // TODO: do baselines / greedy / random / model / compare
         }
         Command::PlotTrain { dir } => {
             // read dir + run python plotting
