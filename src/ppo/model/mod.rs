@@ -4,8 +4,10 @@ pub(crate) mod transformer;
 use crate::config::{BurnBackend, BurnDevice, Cfg};
 use crate::llvm::ir::Ir;
 use crate::llvm::pass::Pass;
+use crate::ppo::tokens::Tokens;
 use burn::Tensor;
 use burn::prelude::Int;
+use burn::tensor::TensorData;
 use burn::tensor::backend::AutodiffBackend;
 
 pub(crate) struct Input {
@@ -13,11 +15,19 @@ pub(crate) struct Input {
     pub(crate) actions: Tensor<BurnBackend, 2, Int>,
 }
 impl Input {
-    pub(crate) fn new(dev: &BurnDevice, ir: &Ir, actions: &[Pass]) -> Self {
-        Self {
-            features: Tensor::from_data([[1]], dev),
-            actions: Tensor::from_data([[1]], dev),
-        }
+    pub(crate) async fn new(dev: &BurnDevice, ir: &Ir, actions: &[Pass]) -> Self {
+        let tokens = Tokens::new(ir, actions).await;
+        let n_features = tokens.features.len();
+        let seq_len = tokens.actions.len();
+        let features = Tensor::from_data(
+            TensorData::new(tokens.features, [1, n_features]),
+            dev,
+        );
+        let actions = Tensor::from_data(
+            TensorData::new(tokens.actions, [1, seq_len]),
+            dev,
+        );
+        Self { features, actions }
     }
 }
 pub(crate) struct Output {

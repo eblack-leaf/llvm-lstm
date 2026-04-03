@@ -55,8 +55,7 @@ impl Trainer {
                         let actor = current.clone();
                         workers.spawn(async move {
                             loop {
-                                // let tokens = Tokens::new(&episode.ir, &episode.actions); // TODO is this needed?
-                                let input = Input::new(&self.device, &episode.ir, &episode.actions); // TODO tokenize first?
+                                let input = Input::new(&self.device, &episode.ir, &episode.actions).await;
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = output.action(); // TODO derive from output.policy
                                 let prob = output.probability(action); // TODO log probability using action?
