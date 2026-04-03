@@ -19,7 +19,6 @@ use tokio::task::JoinSet;
 pub(crate) struct Trainer {
     cfg: Cfg,
     llvm: Llvm,
-    functions: Functions,
     device: BurnDevice,
     returns: Box<dyn Returns>,
     advantages: Box<dyn Advantages>,
@@ -33,12 +32,10 @@ impl Trainer {
         advantages: Box<dyn Advantages>,
     ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
-        let functions = Functions::new(&cfg.functions);
         let ppo = Ppo::new(&cfg);
         Self {
             cfg,
             llvm,
-            functions,
             device: Default::default(),
             returns,
             advantages,
@@ -48,11 +45,20 @@ impl Trainer {
     pub(crate) fn train(mut self) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
-            // Collect per-function baselines before any episode collection.
-            // Run sequentially so timing is not polluted by parallel worker activity.
-            for func in &mut self.functions.functions {
+            let mut functions = Functions::new(&self.cfg.functions).await;
+            // Compile IR and collect baselines for each function before any episode
+            // collection. Run sequentially so timing is not polluted by parallel workers.
+            for func in &mut functions.functions {
+                let func_llvm = self.llvm.with_env(self.cfg.work_dir.join(&func.name));
+                tokio::fs::create_dir_all(&func_llvm.work_dir)
+                    .await
+                    .expect("create func work dir");
+                func.ir = func_llvm
+                    .ir(&func.source)
+                    .await
+                    .expect("ir");
                 func.baselines = Some(
-                    self.llvm
+                    func_llvm
                         .collect_baselines(&func.source, self.cfg.baseline_runs)
                         .await
                         .expect("collect_baselines"),
@@ -69,13 +75,13 @@ impl Trainer {
             for _epoch in 0..self.cfg.epochs {
                 let current = model.valid();
                 let mut workers = JoinSet::new();
-                for func in self.functions.functions.iter() {
+                for func in functions.functions.iter() {
                     let baselines = func.baselines.as_ref().expect("baselines not collected");
                     for ep in 0..self.cfg.episodes {
                         let mut episode = Episode::new(
                             ep,
                             self.llvm
-                                .with_env(self.cfg.work_dir.join(format!("worker_{ep}"))),
+                                .with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name))),
                             func.ir.clone(),
                             self.cfg.clone(),
                             baselines.clone(),
