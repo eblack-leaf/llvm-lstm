@@ -2,10 +2,13 @@ use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::{Function, Functions};
 use crate::llvm::pass::Pass;
+use crate::ppo::advantages::rank::RankAdvantage;
+use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
 use crate::ppo::model::{Actor, Input};
+use crate::ppo::returns::episode_return::EpisodeReturn;
+use crate::ppo::returns::Returns;
 use crate::ppo::step::Step;
-use crate::ppo::tokens::Tokens;
 use burn::lr_scheduler::cosine::{CosineAnnealingLrScheduler, CosineAnnealingLrSchedulerConfig};
 use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
@@ -90,8 +93,19 @@ impl Trainer {
                     }
                 }
                 let results = workers.join_all().await;
-                let returns = (); // step attributed returns
-                let advantages = (); // step based adv
+                let returns_method = EpisodeReturn;
+                let advantages_method = RankAdvantage::new(true);
+                // Per-episode returns: one f32 per step.
+                let all_returns: Vec<Vec<f32>> = results
+                    .iter()
+                    .map(|r| returns_method.compute(r))
+                    .collect();
+                // Pair with value estimates for the advantages computation.
+                let batch: Vec<(Vec<f32>, Vec<f32>)> = all_returns
+                    .into_iter()
+                    .zip(results.iter().map(|r| r.values.clone()))
+                    .collect();
+                let advantages = advantages_method.compute(&batch);
                 // TODO PPO update
                 // metrics updating + using to check best => Checkpoint::save(best) + patience on EMA
                 // logging update + every N epochs => plot train

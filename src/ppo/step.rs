@@ -1,7 +1,7 @@
 use crate::llvm::benchmark::Benchmark;
 
 pub(crate) struct Step {
-    benchmark: Benchmark,
+    pub(crate) benchmark: Benchmark,
     // metadata about the step, to inform later steps
 }
 impl Step {
