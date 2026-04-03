@@ -1,8 +1,4 @@
 use crate::ppo::returns::Returns;
 
-pub(crate) struct Best {
-    
-}
-impl Returns for Best {
-    
-}
+pub(crate) struct Best {}
+impl Returns for Best {}

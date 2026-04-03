@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::config::{ActorArch, BurnAutoDiff, BurnBackend, Cfg};
+use crate::config::{Arch, Cfg};
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
 use crate::train::Trainer;
@@ -26,7 +26,10 @@ enum Command {
         #[arg(long, default_value = "opt-20")]
         opt: String,
         #[arg(long, default_value = "tfx")]
-        actor_arch: ActorArch,
+        arch: Arch,
+        #[arg(long, default_value = "40")]
+        max_seq_len: usize,
+        // ...
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -48,16 +51,20 @@ fn main() {
             directory,
             clang,
             opt,
-            actor_arch,
+            arch,
+            max_seq_len,
         } => {
             let mut cfg = Cfg::default();
             cfg.functions = directory;
             cfg.clang = clang;
             cfg.opt = opt;
+            cfg.arch = arch;
+            cfg.max_seq_len = max_seq_len;
+            // ...
             let trainer = Trainer::new(cfg);
-            match actor_arch {
-                ActorArch::Tfx => trainer.train::<TransformerActor>(),
-                ActorArch::Gru => trainer.train::<GruActor>(),
+            match arch {
+                Arch::Tfx => trainer.train::<TransformerActor>(),
+                Arch::Gru => trainer.train::<GruActor>(),
             }
         }
         Command::Evaluate { model } => {

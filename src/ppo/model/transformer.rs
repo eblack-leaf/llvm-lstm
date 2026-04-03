@@ -4,7 +4,6 @@ use burn::config::Config;
 use burn::module::AutodiffModule;
 use burn::nn::Linear;
 use burn::prelude::{Backend, Module};
-use burn::tensor::backend::AutodiffBackend;
 
 #[derive(Config, Debug)]
 pub(crate) struct TransformerActorConfig {

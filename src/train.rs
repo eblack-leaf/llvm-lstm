@@ -1,10 +1,11 @@
-use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
+use crate::config::{BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
 use crate::ppo::episode::Episode;
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::step::Step;
+use crate::ppo::tokens::Tokens;
 use tokio::task::JoinSet;
 
 pub(crate) struct Trainer {
@@ -18,7 +19,7 @@ impl Trainer {
     pub(crate) fn train<A: Actor + Clone + 'static + Send>(self) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
-            let llvm = Llvm::new(&self.cfg.clang, &self.cfg.opt);
+            let llvm = Llvm::new(&self.cfg.clang, &self.cfg.opt, self.cfg.work_dir.clone());
             let functions = Functions::new(&self.cfg.functions);
             let device = BurnDevice::default();
             let model = A::init(A::cfg(&self.cfg), &device);
@@ -37,7 +38,8 @@ impl Trainer {
                         let dev = device.clone();
                         workers.spawn(async move {
                             loop {
-                                let input = Input::new(&device, &episode.ir, &episode.actions); // TODO tokenize first?
+                                let tokens = Tokens::new(&episode.ir, &episode.actions); // TODO is this needed?
+                                let input = Input::new(&device, tokens); // TODO tokenize first?
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = Pass::Stop; // TODO derive from output.policy
                                 let prob = 1.0; // TODO log probability using action?
@@ -74,7 +76,10 @@ impl Trainer {
                 let returns = (); // step attributed returns
                 let advantages = (); // step based adv
                 // TODO PPO update
+                // metrics updating + using to check best => Checkpoint::save(best)
+                // logging update + every N epochs => plot train
             }
+            // final cleanup + plot
             todo!()
         });
     }

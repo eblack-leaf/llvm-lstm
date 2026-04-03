@@ -1,5 +1,4 @@
 use crate::llvm::benchmark::Benchmark;
-use crate::llvm::functions::Functions;
 use crate::llvm::ir::{Bin, Ir, Source};
 use crate::llvm::pass::Pass;
 use anyhow::Result;
@@ -13,15 +12,15 @@ pub(crate) mod pass;
 pub(crate) struct Llvm {
     pub(crate) clang: String,
     pub(crate) opt: String,
-    pub(crate) work_dir: PathBuf,
+    pub(crate) work_dir: PathBuf, // used for output paths
 }
 
 impl Llvm {
-    pub(crate) fn new(clang: &str, opt: &str) -> Self {
+    pub(crate) fn new(clang: &str, opt: &str, work_dir: PathBuf) -> Self {
         Self {
             clang: clang.to_string(),
             opt: opt.to_string(),
-            work_dir: Default::default(),
+            work_dir,
         }
     }
 }

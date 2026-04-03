@@ -1,5 +1,3 @@
 mod best;
 
-pub(crate) trait Returns {
-    
-}
+pub(crate) trait Returns {}

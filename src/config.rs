@@ -17,10 +17,10 @@ pub(crate) struct Cfg {
     pub(crate) per_step_benchmark: bool,
     pub(crate) max_seq_len: usize,
     pub(crate) work_dir: PathBuf,
-    pub(crate) actor_arch: ActorArch,
+    pub(crate) arch: Arch,
 }
-#[derive(Debug, Default, Clone, ValueEnum)]
-pub(crate) enum ActorArch {
+#[derive(Debug, Default, Copy, Clone, ValueEnum)]
+pub(crate) enum Arch {
     Gru,
     #[default]
     Tfx,

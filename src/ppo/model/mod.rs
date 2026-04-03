@@ -2,8 +2,7 @@ pub(crate) mod gru;
 pub(crate) mod transformer;
 
 use crate::config::{BurnBackend, BurnDevice, Cfg};
-use crate::llvm::ir::Ir;
-use crate::llvm::pass::Pass;
+use crate::ppo::tokens::Tokens;
 use burn::Tensor;
 use burn::prelude::Int;
 use burn::tensor::backend::AutodiffBackend;
@@ -13,7 +12,7 @@ pub(crate) struct Input {
     pub(crate) actions: Tensor<BurnBackend, 2, Int>,
 }
 impl Input {
-    pub(crate) fn new(dev: &BurnDevice, ir: &Ir, actions: &[Pass]) -> Self {
+    pub(crate) fn new(dev: &BurnDevice, tokens: Tokens) -> Self {
         Self {
             features: Tensor::from_data([[1]], dev),
             actions: Tensor::from_data([[1]], dev),

@@ -3,7 +3,6 @@ use crate::ppo::model::{Actor, Input, Output};
 use burn::module::AutodiffModule;
 use burn::nn::Linear;
 use burn::prelude::{Config, Module};
-use burn::tensor::backend::AutodiffBackend;
 
 #[derive(Config, Debug)]
 pub(crate) struct GruActorConfig {}
