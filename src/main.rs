@@ -24,7 +24,7 @@ enum Command {
         opt: String,
     },
     Evaluate {
-        #[arg(long, default_value = "checkpoints/best.mpk")]
+        #[arg(long, default_value = "checkpoints/best")]
         model: PathBuf,
     },
     PlotTrain {

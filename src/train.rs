@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use crate::config::Cfg;
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
@@ -30,15 +31,15 @@ impl Trainer {
             let device = Dev::default();
             let model =
                 TransformerActor::<Diff>::init::<Diff>(TransformerActorConfig::new(), &device);
-            // create parallel episode collection
             for epoch in 0..self.cfg.epochs {
                 let current = model.valid();
                 let mut workers = JoinSet::new();
                 for func in functions.functions.iter() {
                     for ep in 0..self.cfg.episodes {
                         let mut episode = Episode::new(
+                            ep,
                             current.clone(),
-                            llvm.clone(),
+                            llvm.with_env(self.cfg.work_dir.join(format!("worker_{}", ep))),
                             func.ir.clone(),
                             device.clone(),
                             self.cfg.clone(),
@@ -52,14 +53,17 @@ impl Trainer {
                                 episode.actions.push(action);
                                 episode.probabilities.push(prob);
                                 // TODO value stuff
-                                let done = action == Pass::Stop;
+                                let done = action == Pass::Stop
+                                    || episode.actions.len() + 1 > episode.cfg.max_seq_len;
                                 // TODO no skip if per-step bench? what is most concise flow of branch?
                                 if done || self.cfg.per_step_benchmark {
                                     let optimized = episode
                                         .llvm
                                         .apply(&episode.ir, &episode.actions)
+                                        .await
                                         .expect("apply passes");
-                                    let bin = episode.llvm.compile(&optimized).expect("compile");
+                                    let bin =
+                                        episode.llvm.compile(&optimized).await.expect("compile");
                                     let benchmark = episode
                                         .llvm
                                         .benchmark(&bin, episode.cfg.benchmark_runs)
@@ -77,9 +81,9 @@ impl Trainer {
                     }
                 }
                 let results = workers.join_all().await;
-                // reward attribution
-                // advantages
-                // ppo.update
+                let returns = (); // step attributed returns
+                let advantages = (); // step based adv
+                // TODO PPO update
             }
             todo!()
         });

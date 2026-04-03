@@ -13,6 +13,7 @@ pub(crate) mod pass;
 pub(crate) struct Llvm {
     pub(crate) clang: String,
     pub(crate) opt: String,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl Llvm {
@@ -20,18 +21,28 @@ impl Llvm {
         Self {
             clang: clang.to_string(),
             opt: opt.to_string(),
+            work_dir: Default::default(),
         }
     }
 }
 
 impl Llvm {
+    pub(crate) fn with_env(&self, env: PathBuf) -> Self {
+        Self {
+           clang: self.clang.clone(),
+            opt: self.opt.clone(),
+            work_dir: env,
+        }
+    }
     pub(crate) fn ir(&self, src: &Source) -> Result<Ir> {
         todo!()
     }
-    pub(crate) fn compile(&self, ir: &Ir) -> Result<Bin> {
+    pub(crate) async fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
         todo!()
     }
-    pub(crate) fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
+    pub(crate) async fn compile(&self, ir: &Ir) -> Result<Bin> {
+        // tokio::process::Command
+        // tokio::fs::write
         todo!()
     }
     pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize) -> Result<Benchmark> {

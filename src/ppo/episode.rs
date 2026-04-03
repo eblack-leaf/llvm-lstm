@@ -18,6 +18,7 @@ pub(crate) struct Episode<B: Backend> {
 }
 impl<B: Backend> Episode<B> {
     pub fn new(
+        idx: usize,
         actor: TransformerActor<B>,
         llvm: Llvm,
         ir: Ir,
@@ -35,7 +36,11 @@ impl<B: Backend> Episode<B> {
             probabilities: vec![],
         }
     }
-    pub(crate) fn results(self) -> () {
+    pub(crate) fn results(self) -> Results {
         todo!()
     }
+}
+
+pub(crate) struct Results {
+    
 }
