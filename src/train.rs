@@ -61,7 +61,7 @@ impl Trainer {
 
             let model = Arch::init(Arch::cfg(&self.cfg), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
-            let mut policy_scheduler =
+            let mut scheduler =
                 CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
                     .init()
                     .expect("scheduler init");
@@ -164,7 +164,7 @@ impl Trainer {
                 let advantages = self.advantages.compute(&all_returns, &results);
 
                 let batch = Ppo::batch(&results, &all_returns, &advantages);
-                let lr = policy_scheduler.step();
+                let lr = scheduler.step();
                 let (model, optimizer) = self.ppo.update(
                     model.clone(),
                     optimizer.clone(),
