@@ -1,5 +1,6 @@
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use crate::ppo::episode::Results;
+use crate::ppo::metrics::PpoLosses;
 use crate::ppo::model::{ACTIONS, Actor, Input};
 use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
@@ -128,6 +129,7 @@ impl Ppo {
     /// Run `ppo_epochs` gradient steps over the batch.
     /// Each epoch iterates all steps sequentially, accumulates the combined loss,
     /// then does a single backward + optimizer step.
+    /// Returns the updated model, optimizer, and average losses across all ppo_epochs.
     pub(crate) fn update<A, O>(
         &self,
         mut model: A,
@@ -136,11 +138,16 @@ impl Ppo {
         lr: f64,
         cfg: &Cfg,
         device: &BurnDevice,
-    ) -> (A, O)
+    ) -> (A, O, PpoLosses)
     where
         A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff>,
         O: Optimizer<A, BurnAutoDiff>,
     {
+        let mut sum_policy = 0.0_f32;
+        let mut sum_value = 0.0_f32;
+        let mut sum_entropy = 0.0_f32;
+        let mut step_count = 0usize;
+
         for _ in 0..self.ppo_epochs {
             let mut total: Option<Tensor<BurnAutoDiff, 1>> = None;
 
@@ -178,8 +185,15 @@ impl Ppo {
                 let p = self.policy_loss(new_lp, old_lp, adv);
                 let v = self.value_loss(pred_v, ret) * self.value_coef;
                 let e = self.entropy_loss(logits) * self.entropy_coef;
-                let step_loss = p + v - e;
 
+                // Extract scalars before the tensors are consumed by addition.
+                // .inner() detaches from the autodiff graph — no effect on backprop.
+                sum_policy += p.clone().reshape([1]).into_scalar();
+                sum_value += v.clone().reshape([1]).into_scalar();
+                sum_entropy += e.clone().reshape([1]).into_scalar();
+                step_count += 1;
+
+                let step_loss = p + v - e;
                 total = Some(match total.take() {
                     None => step_loss,
                     Some(acc) => acc + step_loss,
@@ -193,6 +207,13 @@ impl Ppo {
                 model = optimizer.step(lr, model, grads);
             }
         }
-        (model, optimizer)
+
+        let n = step_count.max(1) as f32;
+        let losses = PpoLosses {
+            policy_loss: sum_policy / n,
+            value_loss: sum_value / n,
+            entropy: sum_entropy / n,
+        };
+        (model, optimizer, losses)
     }
 }

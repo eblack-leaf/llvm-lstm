@@ -4,6 +4,7 @@ use crate::ppo::advantages::rank::RankAdvantage;
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
 use crate::ppo::returns::episode_return::EpisodeReturn;
+use crate::ppo::logging::{LogMode, Logger};
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -59,10 +60,13 @@ fn main() {
             cfg.opt = opt;
             cfg.max_seq_len = max_seq_len;
             // ...
+            let log_path = cfg.work_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
                 Box::new(EpisodeReturn),
                 Box::new(RankAdvantage::new(true)),
+                LogMode::FileAndStdout,
+                Some(log_path),
             );
             trainer.train();
         }

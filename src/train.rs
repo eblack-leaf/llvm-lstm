@@ -6,6 +6,8 @@ use crate::llvm::pass::Pass;
 use crate::ppo::Ppo;
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
+use crate::ppo::logging::{LogMode, Logger};
+use crate::ppo::metrics::Metrics;
 use crate::ppo::model::transformer::TransformerActor;
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::returns::Returns;
@@ -14,6 +16,8 @@ use burn::lr_scheduler::LrScheduler;
 use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
 use burn::optim::{AdamW, AdamWConfig};
+use std::path::PathBuf;
+use std::time::Instant;
 use tokio::task::JoinSet;
 
 pub(crate) struct Trainer {
@@ -23,6 +27,8 @@ pub(crate) struct Trainer {
     returns: Box<dyn Returns>,
     advantages: Box<dyn Advantages>,
     ppo: Ppo,
+    log_mode: LogMode,
+    log_path: Option<PathBuf>,
 }
 
 impl Trainer {
@@ -30,6 +36,8 @@ impl Trainer {
         cfg: Cfg,
         returns: Box<dyn Returns>,
         advantages: Box<dyn Advantages>,
+        log_mode: LogMode,
+        log_path: Option<PathBuf>,
     ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
         let ppo = Ppo::new(&cfg);
@@ -40,15 +48,28 @@ impl Trainer {
             returns,
             advantages,
             ppo,
+            log_mode,
+            log_path,
         }
     }
     pub(crate) fn train(mut self) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
             let mut functions = Functions::new(&self.cfg.functions).await;
+
+            let mut logger = Logger::init(
+                self.log_mode,
+                self.log_path.as_deref(),
+                self.cfg.epochs as u64,
+                functions.functions.len() as u64,
+            )
+            .expect("logger init");
+            let mut metrics = Metrics::new(0.05);
+
             // Compile IR and collect baselines for each function before any episode
             // collection. Run sequentially so timing is not polluted by parallel workers.
             for func in &mut functions.functions {
+                let t0 = Instant::now();
                 let func_llvm = self.llvm.with_env(self.cfg.work_dir.join(&func.name));
                 tokio::fs::create_dir_all(&func_llvm.work_dir)
                     .await
@@ -63,16 +84,22 @@ impl Trainer {
                         .await
                         .expect("collect_baselines"),
                 );
+                let elapsed = t0.elapsed().as_millis() as u64;
+                metrics.record_func_ir_ms(elapsed);
+                logger.log_baseline_progress(&func.name, elapsed);
             }
+            logger.finish_baseline_phase();
 
-            let model = Arch::init(Arch::cfg(&self.cfg), &self.device);
+            let mut model = Arch::init(Arch::cfg(&self.cfg), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
             let mut scheduler =
                 CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
                     .init()
                     .expect("scheduler init");
 
-            for _epoch in 0..self.cfg.epochs {
+            for epoch in 0..self.cfg.epochs {
+                let t_collect = Instant::now();
+
                 let current = model.valid();
                 let mut workers = JoinSet::new();
                 for func in functions.functions.iter() {
@@ -165,23 +192,36 @@ impl Trainer {
                     }
                 }
                 let results = workers.join_all().await;
+                metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
+                metrics.update_episode(&results);
+
                 let all_returns: Vec<Vec<f32>> =
                     results.iter().map(|r| self.returns.compute(r)).collect();
                 let advantages = self.advantages.compute(&all_returns, &results);
-
                 let batch = Ppo::batch(&results, &all_returns, &advantages);
                 let lr = scheduler.step();
-                let (model, optimizer) = self.ppo.update(
-                    model.clone(),
-                    optimizer.clone(),
+
+                let t_ppo = Instant::now();
+                let (new_model, new_optimizer, losses) = self.ppo.update(
+                    model,
+                    optimizer,
                     &batch,
                     lr,
                     &self.cfg,
                     &self.device,
                 );
-                // TODO metrics updating + using to check best => Checkpoint::save(best) + patience on EMA
-                // TODO logging update + every N epochs => plot train
+                model = new_model;
+                optimizer = new_optimizer;
+                metrics.record_ppo_ms(t_ppo.elapsed().as_millis() as u64);
+                metrics.update_ppo(losses);
+
+                logger.log_epoch(epoch, &metrics, lr);
+                metrics.next_epoch();
+
+                // TODO checkpoint (best model by speedup_ema)
             }
+
+            logger.finish();
             // final cleanup + plot
             todo!()
         });
