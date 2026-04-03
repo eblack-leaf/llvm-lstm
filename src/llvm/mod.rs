@@ -1,6 +1,6 @@
 use crate::llvm::benchmark::{Baselines, Benchmark};
 use crate::llvm::ir::{Bin, Ir, Source};
-use crate::llvm::pass::{Pass, to_opt_pipeline};
+use crate::llvm::pass::{Pass, opt_pipeline};
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
@@ -53,7 +53,7 @@ impl Llvm {
     /// Used when the complete pass list is known upfront.
     #[allow(unused)]
     pub(crate) async fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
-        let pipeline = to_opt_pipeline(passes);
+        let pipeline = opt_pipeline(passes);
         let out = self.work_dir.join("optimized.ll");
         let status = tokio::process::Command::new(&self.opt)
             .arg(format!("-passes={pipeline}"))
@@ -73,9 +73,11 @@ impl Llvm {
     /// Apply a single pass to `ir`, writing the result to `out`.
     /// Called every step for incremental IR: O(T) total invocations vs O(T²)
     /// for re-applying the full prefix each step. Also makes the current IR
-    /// state available for feature extraction and delta computation.
+    /// state available for feature extraction and delta computation. 
+    // TODO why use out, when we return the IR which has the out? 
+    // TODO is deciding the out here ambiguous so we need to have where it should be saved?
     pub(crate) async fn apply_one(&self, ir: &Ir, pass: Pass, out: PathBuf) -> Result<Ir> {
-        let pipeline = to_opt_pipeline(&[pass]);
+        let pipeline = opt_pipeline(&[pass]);
         let status = tokio::process::Command::new(&self.opt)
             .arg(format!("-passes={pipeline}"))
             .arg(&ir.file)
@@ -116,6 +118,8 @@ impl Llvm {
     pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize) -> Result<Benchmark> {
         let mut total_ns: u64 = 0;
         for _ in 0..runs {
+            // TODO change from timing in rust, to reading the time from bench_timing.h put out on stdout
+            // TODO can we read stdout on tokio Command?
             let start = std::time::Instant::now();
             let status = tokio::process::Command::new(&bin.file)
                 .status()

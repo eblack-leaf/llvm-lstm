@@ -68,7 +68,7 @@ impl Pass {
     }
 }
 
-pub fn to_opt_pipeline(passes: &[Pass]) -> String {
+pub fn opt_pipeline(passes: &[Pass]) -> String {
     let transforms: Vec<&Pass> = passes.iter().filter(|p| **p != Pass::Stop).collect();
     if transforms.is_empty() {
         return String::new();
