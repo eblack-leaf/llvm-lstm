@@ -81,7 +81,7 @@ impl Trainer {
                     .expect("ir");
                 func.baselines = Some(
                     func_llvm
-                        .collect_baselines(&func.source, self.cfg.baseline_runs)
+                        .collect_baselines(&func.source, self.cfg.baseline_runs, self.cfg.baseline_iters)
                         .await
                         .expect("collect_baselines"),
                 );
@@ -92,13 +92,13 @@ impl Trainer {
             logger.finish_baseline_phase();
 
             let arch_cfg = Arch::cfg(&self.cfg);
-            let checkpoint_dir = self.cfg.work_dir.join("best");
+            let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
             let mut best_ema = f32::NEG_INFINITY;
 
             let mut model = Arch::init(arch_cfg.clone(), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
             let mut scheduler =
-                CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
+                CosineAnnealingLrSchedulerConfig::new(self.cfg.learning_rate, self.cfg.epochs)
                     .init()
                     .expect("scheduler init");
 
@@ -174,7 +174,7 @@ impl Trainer {
                                         .expect("compile");
                                     let mut bm = episode
                                         .llvm
-                                        .benchmark(&bin, episode.cfg.benchmark_runs)
+                                        .benchmark(&bin, episode.cfg.benchmark_runs, episode.cfg.benchmark_iters)
                                         .await
                                         .expect("benchmark");
                                     bm.speedup = episode.baselines.speedup_vs_o3(bm.mean_ns);

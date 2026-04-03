@@ -26,13 +26,40 @@ enum Command {
     Train {
         #[arg(long, default_value = "benchmarks")]
         directory: PathBuf,
+        #[arg(long, default_value = "work")]
+        work_dir: PathBuf,
+        #[arg(long, default_value = "checkpoints")]
+        checkpoint_dir: PathBuf,
         #[arg(long, default_value = "clang-20")]
         clang: String,
         #[arg(long, default_value = "opt-20")]
         opt: String,
+        #[arg(long, default_value = "1000")]
+        epochs: usize,
+        #[arg(long, default_value = "4")]
+        ppo_epochs: usize,
+        #[arg(long, default_value = "8")]
+        episodes: usize,
+        #[arg(long, default_value = "1")]
+        benchmark_runs: usize,
+        #[arg(long, default_value = "100")]
+        benchmark_iters: usize,
+        #[arg(long, default_value = "3")]
+        baseline_runs: usize,
+        #[arg(long, default_value = "200")]
+        baseline_iters: usize,
+        #[arg(long)]
+        per_step_benchmark: bool,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
-        // ...
+        #[arg(long, default_value = "1e-3")]
+        learning_rate: f64,
+        #[arg(long, default_value = "0.2")]
+        clip_epsilon: f32,
+        #[arg(long, default_value = "0.5")]
+        value_coef: f32,
+        #[arg(long, default_value = "0.01")]
+        entropy_coef: f32,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -52,17 +79,45 @@ fn main() {
     match args.command {
         Command::Train {
             directory,
+            work_dir,
+            checkpoint_dir,
             clang,
             opt,
+            epochs,
+            ppo_epochs,
+            episodes,
+            benchmark_runs,
+            benchmark_iters,
+            baseline_runs,
+            baseline_iters,
+            per_step_benchmark,
             max_seq_len,
+            learning_rate,
+            clip_epsilon,
+            value_coef,
+            entropy_coef,
         } => {
-            let mut cfg = Cfg::default();
-            cfg.functions = directory;
-            cfg.clang = clang;
-            cfg.opt = opt;
-            cfg.max_seq_len = max_seq_len;
-            // ...
-            let log_path = cfg.work_dir.join("train.jsonl");
+            let cfg = Cfg {
+                functions: directory,
+                clang,
+                opt,
+                epochs,
+                ppo_epochs,
+                episodes,
+                benchmark_runs,
+                benchmark_iters,
+                baseline_runs,
+                baseline_iters,
+                per_step_benchmark,
+                max_seq_len,
+                work_dir,
+                checkpoint_dir: checkpoint_dir.clone(),
+                learning_rate,
+                clip_epsilon,
+                value_coef,
+                entropy_coef,
+            };
+            let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
                 Box::new(EpisodeReturn),

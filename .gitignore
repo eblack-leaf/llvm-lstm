@@ -4,13 +4,8 @@
 .venv
 
 # Generated data and results
-data/
-eda_output/
-results/
 checkpoints/
-base-checkpoints/
-base-current-checkpoints/
-per-step-checkpoints/
+work/
 
 # Training work directory (compiled IR, binaries, cached baselines)
 work/

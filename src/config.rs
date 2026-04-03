@@ -17,7 +17,7 @@ pub(crate) type Arch = GruActor<BurnAutoDiff>;
 pub(crate) type ArchConfig = TransformerActorConfig;
 #[cfg(feature = "gru")]
 pub(crate) type ArchConfig = GruActorConfig;
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Cfg {
     pub(crate) functions: PathBuf,
     pub(crate) clang: String,
@@ -25,13 +25,19 @@ pub(crate) struct Cfg {
     pub(crate) epochs: usize,
     pub(crate) ppo_epochs: usize,
     pub(crate) episodes: usize,
+    /// How many times to invoke the benchmark binary per measurement (outer average).
     pub(crate) benchmark_runs: usize,
+    /// Iteration count passed to bench_timing.h during episode benchmarking.
+    pub(crate) benchmark_iters: usize,
     pub(crate) baseline_runs: usize,
+    /// Iteration count passed to bench_timing.h during baseline collection.
+    /// Higher than benchmark_iters — baselines are the fixed reference so accuracy matters more.
+    pub(crate) baseline_iters: usize,
     pub(crate) per_step_benchmark: bool,
     pub(crate) max_seq_len: usize,
     pub(crate) work_dir: PathBuf,
-    pub(crate) policy_lr: f64,
-    pub(crate) value_lr: f64,
+    pub(crate) checkpoint_dir: PathBuf,
+    pub(crate) learning_rate: f64,
     pub(crate) clip_epsilon: f32,
     pub(crate) value_coef: f32,
     pub(crate) entropy_coef: f32,

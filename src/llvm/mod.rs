@@ -111,25 +111,30 @@ impl Llvm {
         Ok(Bin { file: out })
     }
 
-    /// Run `bin` with `runs` internal iterations and return the trimmed-mean
-    /// nanosecond time printed to stdout by `bench_timing.h`.
-    pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize) -> Result<Benchmark> {
-        let output = tokio::process::Command::new(&bin.file)
-            .arg(runs.to_string())
-            .output()
-            .await
-            .context("failed to run benchmark binary")?;
-        if !output.status.success() {
-            bail!("benchmark binary exited with {}", output.status);
+    /// Run `bin` `runs` times, passing `iters` to the binary each invocation as
+    /// the inner iteration count for `bench_timing.h`. Returns the mean of the
+    /// per-invocation trimmed-mean nanosecond times reported to stdout.
+    pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize, iters: usize) -> Result<Benchmark> {
+        let mut total_ns: u64 = 0;
+        for _ in 0..runs {
+            let output = tokio::process::Command::new(&bin.file)
+                .arg(iters.to_string())
+                .output()
+                .await
+                .context("failed to run benchmark binary")?;
+            if !output.status.success() {
+                bail!("benchmark binary exited with {}", output.status);
+            }
+            let stdout = std::str::from_utf8(&output.stdout)
+                .context("benchmark output was not valid UTF-8")?
+                .trim();
+            let ns: u64 = stdout
+                .parse()
+                .with_context(|| format!("could not parse benchmark output as u64: {stdout:?}"))?;
+            total_ns += ns;
         }
-        let stdout = std::str::from_utf8(&output.stdout)
-            .context("benchmark output was not valid UTF-8")?
-            .trim();
-        let mean_ns: u64 = stdout
-            .parse()
-            .with_context(|| format!("could not parse benchmark output as u64: {stdout:?}"))?;
         Ok(Benchmark {
-            mean_ns,
+            mean_ns: total_ns / runs.max(1) as u64,
             speedup: 0.0,
         })
     }
@@ -137,11 +142,11 @@ impl Llvm {
     /// Collect baselines at all four standard opt levels for a single function.
     /// Run sequentially — no worker contention, no cache pollution from parallel
     /// episode collection. Called once per function before the training epoch loop.
-    pub(crate) async fn collect_baselines(&self, src: &Source, runs: usize) -> Result<Baselines> {
-        let o0 = self.baseline(src, "-O0", runs).await?;
-        let o1 = self.baseline(src, "-O1", runs).await?;
-        let o2 = self.baseline(src, "-O2", runs).await?;
-        let o3 = self.baseline(src, "-O3", runs).await?;
+    pub(crate) async fn collect_baselines(&self, src: &Source, runs: usize, iters: usize) -> Result<Baselines> {
+        let o0 = self.baseline(src, "-O0", runs, iters).await?;
+        let o1 = self.baseline(src, "-O1", runs, iters).await?;
+        let o2 = self.baseline(src, "-O2", runs, iters).await?;
+        let o3 = self.baseline(src, "-O3", runs, iters).await?;
         Ok(Baselines { o0, o1, o2, o3 })
     }
 
@@ -152,6 +157,7 @@ impl Llvm {
         src: &Source,
         opt_level: &str,
         runs: usize,
+        iters: usize,
     ) -> Result<Benchmark> {
         let bin_path = self.work_dir.join("baseline");
         let status = tokio::process::Command::new(&self.clang)
@@ -166,6 +172,6 @@ impl Llvm {
         if !status.success() {
             bail!("clang baseline exited with {status}");
         }
-        self.benchmark(&Bin { file: bin_path }, runs).await
+        self.benchmark(&Bin { file: bin_path }, runs, iters).await
     }
 }
