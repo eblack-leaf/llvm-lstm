@@ -51,6 +51,7 @@ impl Llvm {
 
     /// Apply the full pass sequence to `ir` in one opt invocation.
     /// Used when the complete pass list is known upfront.
+    #[allow(unused)]
     pub(crate) async fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
         let pipeline = to_opt_pipeline(passes);
         let out = self.work_dir.join("optimized.ll");
