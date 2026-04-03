@@ -1,3 +1,4 @@
+use crate::llvm::benchmark::Baselines;
 use crate::llvm::ir::{Ir, Source};
 use std::path::PathBuf;
 #[derive(Clone)]
@@ -17,4 +18,6 @@ pub(crate) struct Function {
     pub(crate) name: String,
     pub(crate) source: Source,
     pub(crate) ir: Ir,
+    /// None until collect_baselines has run; always Some during training.
+    pub(crate) baselines: Option<Baselines>,
 }

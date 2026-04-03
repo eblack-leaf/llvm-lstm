@@ -38,9 +38,20 @@ impl Trainer {
             advantages,
         }
     }
-    pub(crate) fn train<A: Actor + Clone + 'static + Send + AutodiffModule<BurnAutoDiff>>(self) {
+    pub(crate) fn train<A: Actor + Clone + 'static + Send + AutodiffModule<BurnAutoDiff>>(mut self) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
+            // Collect per-function baselines before any episode collection.
+            // Run sequentially so timing is not polluted by parallel worker activity.
+            for func in &mut self.functions.functions {
+                func.baselines = Some(
+                    self.llvm
+                        .collect_baselines(&func.source, self.cfg.baseline_runs)
+                        .await
+                        .expect("collect_baselines"),
+                );
+            }
+
             let model = A::init(A::cfg(&self.cfg), &self.device);
             let policy_optimizer = AdamWConfig::new().init::<BurnAutoDiff, A>();
             let value_optimizer = AdamWConfig::new().init::<BurnAutoDiff, A>();
@@ -52,13 +63,15 @@ impl Trainer {
                 let current = model.no_grads();
                 let mut workers = JoinSet::new();
                 for func in self.functions.functions.iter() {
+                    let baselines = func.baselines.as_ref().expect("baselines not collected");
                     for ep in 0..self.cfg.episodes {
                         let mut episode = Episode::new(
                             ep,
                             self.llvm
-                                .with_env(self.cfg.work_dir.join(format!("worker_{}", ep))),
+                                .with_env(self.cfg.work_dir.join(format!("worker_{ep}"))),
                             func.ir.clone(),
                             self.cfg.clone(),
+                            baselines.clone(),
                         );
                         let actor = current.clone();
                         workers.spawn(async move {
@@ -97,11 +110,13 @@ impl Trainer {
                                         .compile(&episode.current_ir)
                                         .await
                                         .expect("compile");
-                                    Some(episode
+                                    let mut bm = episode
                                         .llvm
                                         .benchmark(&bin, episode.cfg.benchmark_runs)
                                         .await
-                                        .expect("benchmark"))
+                                        .expect("benchmark");
+                                    bm.speedup = episode.baselines.speedup_vs_o3(bm.mean_ns);
+                                    Some(bm)
                                 } else {
                                     None
                                 };

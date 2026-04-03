@@ -1,4 +1,4 @@
-use crate::llvm::benchmark::Benchmark;
+use crate::llvm::benchmark::{Baselines, Benchmark};
 use crate::llvm::ir::{Bin, Ir, Source};
 use crate::llvm::pass::{Pass, to_opt_pipeline};
 use anyhow::{Context, Result, bail};
@@ -126,6 +126,17 @@ impl Llvm {
             total_ns += start.elapsed().as_nanos() as u64;
         }
         Ok(Benchmark { mean_ns: total_ns / runs as u64, speedup: 0.0 })
+    }
+
+    /// Collect baselines at all four standard opt levels for a single function.
+    /// Run sequentially — no worker contention, no cache pollution from parallel
+    /// episode collection. Called once per function before the training epoch loop.
+    pub(crate) async fn collect_baselines(&self, src: &Source, runs: usize) -> Result<Baselines> {
+        let o0 = self.baseline(src, "-O0", runs).await?;
+        let o1 = self.baseline(src, "-O1", runs).await?;
+        let o2 = self.baseline(src, "-O2", runs).await?;
+        let o3 = self.baseline(src, "-O3", runs).await?;
+        Ok(Baselines { o0, o1, o2, o3 })
     }
 
     /// Compile `src` at `opt_level` (e.g. "-O0", "-O3") and benchmark it.

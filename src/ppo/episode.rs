@@ -1,5 +1,6 @@
 use crate::config::Cfg;
 use crate::llvm::Llvm;
+use crate::llvm::benchmark::Baselines;
 use crate::llvm::ir::Ir;
 use crate::llvm::pass::Pass;
 use crate::ppo::step::Step;
@@ -18,9 +19,12 @@ pub(crate) struct Episode {
     pub(crate) log_probs: Vec<f32>,
     // V(s_t) estimate from the critic at each step; used to compute advantages
     pub(crate) values: Vec<f32>,
+    /// Per-function baseline timings; carried so the train loop can compute
+    /// speedup and so Returns implementors can compare against any opt level.
+    pub(crate) baselines: Baselines,
 }
 impl Episode {
-    pub(crate) fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg) -> Self {
+    pub(crate) fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg, baselines: Baselines) -> Self {
         let current_ir = ir.clone();
         Self {
             llvm,
@@ -31,6 +35,7 @@ impl Episode {
             actions: vec![Pass::Start],
             log_probs: vec![],
             values: vec![],
+            baselines,
         }
     }
     pub(crate) fn results(self) -> Results {
@@ -39,6 +44,7 @@ impl Episode {
             log_probs: self.log_probs,
             values: self.values,
             steps: self.steps,
+            baselines: self.baselines,
         }
     }
 }
@@ -47,11 +53,10 @@ pub(crate) struct Results {
     pub(crate) actions: Vec<Pass>,
     pub(crate) log_probs: Vec<f32>,
     pub(crate) values: Vec<f32>,
-    /// Full step record.
-    /// len == 1  → episode-level benchmark only (the trusted signal).
-    /// len == T  → per-step benchmarks; cumulative state after passes 1..=t,
-    ///             not the marginal contribution of pass t.
-    /// Step carries metadata beyond just the benchmark score — future Returns
-    /// implementors can use it for attribution (IR deltas, pass no-op flags, etc.).
+    /// Full step record. Each Step carries pass, step_idx, and an optional
+    /// benchmark (Some when per_step_benchmark or at episode end, else None).
     pub(crate) steps: Vec<Step>,
+    /// Per-function baselines; available to Returns implementors to compare
+    /// the episode reward against any standard opt level.
+    pub(crate) baselines: Baselines,
 }
