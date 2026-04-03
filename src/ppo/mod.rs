@@ -188,9 +188,9 @@ impl Ppo {
 
                 // Extract scalars before the tensors are consumed by addition.
                 // .inner() detaches from the autodiff graph — no effect on backprop.
-                sum_policy += p.clone().reshape([1]).into_scalar();
-                sum_value += v.clone().reshape([1]).into_scalar();
-                sum_entropy += e.clone().reshape([1]).into_scalar();
+                sum_policy += p.clone().into_scalar();
+                sum_value += v.clone().into_scalar();
+                sum_entropy += e.clone().into_scalar();
                 step_count += 1;
 
                 let step_loss = p + v - e;
