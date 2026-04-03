@@ -1,9 +1,9 @@
-use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
+use crate::config::{BurnAutoDiff, Cfg};
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::module::AutodiffModule;
 use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
-use burn::prelude::{Config, Module};
+use burn::prelude::{Backend, Config, Module};
 
 #[derive(Config, Debug)]
 pub(crate) struct GruActorConfig {
@@ -21,32 +21,30 @@ pub(crate) struct GruActorConfig {
 
 // Shared trunk: IR features initialise the hidden state; action sequence drives the GRU.
 // Policy and value heads are each a 2-layer MLP.
-#[derive(Module, Debug, Clone)]
-pub(crate) struct GruActor {
+#[derive(Module, Debug)]
+pub(crate) struct GruActor<B: Backend> {
     // Projects IR feature vector [batch, input_dim] → [batch, hidden_size] used as h0
-    ir_proj: Linear<BurnBackend>,
+    ir_proj: Linear<B>,
     // Embeds action indices [batch, seq] → [batch, seq, action_embed_dim]
-    action_embed: Embedding<BurnBackend>,
+    action_embed: Embedding<B>,
     // Projects embedded actions → [batch, seq, hidden_size] (GRU input_size = hidden_size)
-    action_proj: Linear<BurnBackend>,
+    action_proj: Linear<B>,
     // Single-layer unidirectional GRU
-    gru: Gru<BurnBackend>,
+    gru: Gru<B>,
     // Policy head: [batch, hidden_size] → [batch, num_actions]
-    policy_head: MlpHead,
+    policy_head: MlpHead<B>,
     // Value head: [batch, hidden_size] → [batch, 1]
-    value_head: MlpHead,
+    value_head: MlpHead<B>,
 }
 
-impl Actor for GruActor
-where
-    Self: AutodiffModule<BurnAutoDiff>,
-{
+impl<B: Backend> Actor<B> for GruActor<B> {
     type Config = GruActorConfig;
 
-    fn init(cfg: Self::Config, device: &BurnDevice) -> Self {
+    fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
             ir_proj: LinearConfig::new(cfg.input_dim, cfg.hidden_size).init(device),
-            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim).init(device),
+            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim)
+                .init(device),
             action_proj: LinearConfig::new(cfg.action_embed_dim, cfg.hidden_size).init(device),
             gru: GruConfig::new(cfg.hidden_size, cfg.hidden_size, false).init(device),
             policy_head: MlpHeadConfig::new(cfg.hidden_size, cfg.head_hidden, cfg.num_actions)
@@ -55,7 +53,7 @@ where
         }
     }
 
-    fn forward(&self, _cfg: &Cfg, input: Input) -> Output {
+    fn forward(&self, _cfg: &Cfg, input: Input<B>) -> Output<B> {
         // IR features → initial GRU hidden state [batch, hidden_size]
         let h0 = self.ir_proj.forward(input.features);
 
@@ -77,9 +75,5 @@ where
 
     fn cfg(_cfg: &Cfg) -> Self::Config {
         GruActorConfig::new()
-    }
-
-    fn no_grads(&self) -> Self {
-        <GruActor as AutodiffModule<BurnAutoDiff>>::valid(self)
     }
 }

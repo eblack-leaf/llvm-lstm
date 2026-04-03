@@ -61,6 +61,7 @@ impl Episode {
             values: self.values,
             steps: self.steps,
             baselines: self.baselines,
+            base_features: self.base_features,
         }
     }
 }
@@ -75,4 +76,7 @@ pub(crate) struct Results {
     /// Per-function baselines; available to Returns implementors to compare
     /// the episode reward against any standard opt level.
     pub(crate) baselines: Baselines,
+    /// Feature vector of the base IR; combined with Step::delta_features to
+    /// reconstruct the full 68-dim model input for each step during PPO update.
+    pub(crate) base_features: Vec<f32>,
 }

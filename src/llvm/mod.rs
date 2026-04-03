@@ -70,13 +70,12 @@ impl Llvm {
         Ok(Ir { file: out })
     }
 
-    /// Apply a single pass to `ir`, writing the result to `out`.
+    /// Apply a single pass to `ir` at the given step index.
     /// Called every step for incremental IR: O(T) total invocations vs O(T²)
     /// for re-applying the full prefix each step. Also makes the current IR
-    /// state available for feature extraction and delta computation. 
-    // TODO why use out, when we return the IR which has the out? 
-    // TODO is deciding the out here ambiguous so we need to have where it should be saved?
-    pub(crate) async fn apply_one(&self, ir: &Ir, pass: Pass, out: PathBuf) -> Result<Ir> {
+    /// state available for feature extraction and delta computation.
+    pub(crate) async fn apply_one(&self, ir: &Ir, pass: Pass, step: usize) -> Result<Ir> {
+        let out = self.work_dir.join(format!("step_{step}.ll"));
         let pipeline = opt_pipeline(&[pass]);
         let status = tokio::process::Command::new(&self.opt)
             .arg(format!("-passes={pipeline}"))
@@ -112,26 +111,25 @@ impl Llvm {
         Ok(Bin { file: out })
     }
 
-    /// Run `bin` for `runs` repetitions and return mean wall-clock time.
-    /// Speedup relative to baseline is computed by the caller once a baseline
-    /// measurement is available.
+    /// Run `bin` with `runs` internal iterations and return the trimmed-mean
+    /// nanosecond time printed to stdout by `bench_timing.h`.
     pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize) -> Result<Benchmark> {
-        let mut total_ns: u64 = 0;
-        for _ in 0..runs {
-            // TODO change from timing in rust, to reading the time from bench_timing.h put out on stdout
-            // TODO can we read stdout on tokio Command?
-            let start = std::time::Instant::now();
-            let status = tokio::process::Command::new(&bin.file)
-                .status()
-                .await
-                .context("failed to run benchmark binary")?;
-            if !status.success() {
-                bail!("benchmark binary exited with {status}");
-            }
-            total_ns += start.elapsed().as_nanos() as u64;
+        let output = tokio::process::Command::new(&bin.file)
+            .arg(runs.to_string())
+            .output()
+            .await
+            .context("failed to run benchmark binary")?;
+        if !output.status.success() {
+            bail!("benchmark binary exited with {}", output.status);
         }
+        let stdout = std::str::from_utf8(&output.stdout)
+            .context("benchmark output was not valid UTF-8")?
+            .trim();
+        let mean_ns: u64 = stdout
+            .parse()
+            .with_context(|| format!("could not parse benchmark output as u64: {stdout:?}"))?;
         Ok(Benchmark {
-            mean_ns: total_ns / runs as u64,
+            mean_ns,
             speedup: 0.0,
         })
     }

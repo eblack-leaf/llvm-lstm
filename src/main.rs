@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::config::{Arch, Cfg};
+use crate::config::{Arch, BurnAutoDiff, Cfg};
 use crate::ppo::advantages::rank::RankAdvantage;
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
@@ -69,8 +69,8 @@ fn main() {
                 Box::new(RankAdvantage::new(true)),
             );
             match arch {
-                Arch::Tfx => trainer.train::<TransformerActor>(),
-                Arch::Gru => trainer.train::<GruActor>(),
+                Arch::Tfx => trainer.train::<TransformerActor<BurnAutoDiff>>(),
+                Arch::Gru => trainer.train::<GruActor<BurnAutoDiff>>(),
             }
         }
         Command::Evaluate { model } => {

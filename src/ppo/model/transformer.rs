@@ -1,11 +1,11 @@
-use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
+use crate::config::{BurnAutoDiff, Cfg};
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::module::AutodiffModule;
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
-use burn::prelude::{Config, Int, Module};
+use burn::prelude::{Backend, Config, Int, Module};
 use burn::tensor::Tensor;
 
 #[derive(Config, Debug)]
@@ -24,13 +24,11 @@ pub(crate) struct TransformerActorConfig {
     pub(crate) d_ff: usize,
     #[config(default = 0.3)]
     pub(crate) dropout: f64,
-    /// Dimensionality of the learned action embedding.
     #[config(default = 32)]
     pub(crate) action_embed_dim: usize,
     /// Positional embedding table size — must exceed max episode length + 1.
     #[config(default = 64)]
     pub(crate) max_seq_len: usize,
-    /// Hidden dim for both MLP heads (d_model / 2 is a reasonable default).
     #[config(default = 128)]
     pub(crate) head_hidden: usize,
 }
@@ -39,30 +37,31 @@ pub(crate) struct TransformerActorConfig {
 // sequence; a transformer encoder processes the full sequence; the IR token at position 0
 // is pooled as the context for both heads.
 // Policy and value heads are each a 2-layer MLP.
-#[derive(Module, Debug, Clone)]
-pub(crate) struct TransformerActor {
+#[derive(Module, Debug)]
+pub(crate) struct TransformerActor<B: Backend> {
     // Projects IR feature vector [batch, input_dim] → [batch, d_model]
-    ir_proj: Linear<BurnBackend>,
+    ir_proj: Linear<B>,
     // Embeds action indices [batch, seq] → [batch, seq, action_embed_dim]
-    action_embed: Embedding<BurnBackend>,
+    action_embed: Embedding<B>,
     // Projects embedded actions → [batch, seq, d_model]
-    action_proj: Linear<BurnBackend>,
+    action_proj: Linear<B>,
     // Learned positional embeddings; table size = max_seq_len (covers seq_len + 1 IR token)
-    pos_embed: Embedding<BurnBackend>,
-    transformer: TransformerEncoder<BurnBackend>,
+    pos_embed: Embedding<B>,
+    transformer: TransformerEncoder<B>,
     // Policy head: [batch, d_model] → [batch, num_actions]
-    policy_head: MlpHead,
+    policy_head: MlpHead<B>,
     // Value head: [batch, d_model] → [batch, 1]
-    value_head: MlpHead,
+    value_head: MlpHead<B>,
 }
 
-impl Actor for TransformerActor {
+impl<B: Backend> Actor<B> for TransformerActor<B> {
     type Config = TransformerActorConfig;
 
-    fn init(cfg: Self::Config, device: &BurnDevice) -> Self {
+    fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
             ir_proj: LinearConfig::new(cfg.input_dim, cfg.d_model).init(device),
-            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim).init(device),
+            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim)
+                .init(device),
             action_proj: LinearConfig::new(cfg.action_embed_dim, cfg.d_model).init(device),
             pos_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
@@ -79,7 +78,7 @@ impl Actor for TransformerActor {
         }
     }
 
-    fn forward(&self, _cfg: &Cfg, input: Input) -> Output {
+    fn forward(&self, _cfg: &Cfg, input: Input<B>) -> Output<B> {
         let [_batch, seq_len] = input.actions.dims();
         let device = input.features.device();
 
@@ -94,7 +93,7 @@ impl Actor for TransformerActor {
         let x = Tensor::cat(vec![ir_tok, act], 1);
 
         // Positional encoding → [batch, seq_len+1, d_model]
-        let positions = Tensor::<BurnBackend, 1, Int>::arange(0..(seq_len + 1) as i64, &device)
+        let positions = Tensor::<B, 1, Int>::arange(0..(seq_len + 1) as i64, &device)
             .unsqueeze_dim(0); // [1, seq_len+1]
         let pos = self.pos_embed.forward(positions);
         let x = x + pos;
@@ -114,9 +113,5 @@ impl Actor for TransformerActor {
 
     fn cfg(_cfg: &Cfg) -> Self::Config {
         TransformerActorConfig::new()
-    }
-
-    fn no_grads(&self) -> Self {
-        <TransformerActor as AutodiffModule<BurnAutoDiff>>::valid(self)
     }
 }

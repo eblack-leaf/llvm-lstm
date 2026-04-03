@@ -21,6 +21,9 @@ pub(crate) struct Cfg {
     pub(crate) arch: Arch,
     pub(crate) policy_lr: f64,
     pub(crate) value_lr: f64,
+    pub(crate) clip_epsilon: f32,
+    pub(crate) value_coef: f32,
+    pub(crate) entropy_coef: f32,
 }
 #[derive(Debug, Default, Copy, Clone, ValueEnum)]
 pub(crate) enum Arch {

@@ -3,12 +3,14 @@ use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
 use crate::llvm::ir::Features;
 use crate::llvm::pass::Pass;
+use crate::ppo::Ppo;
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::returns::Returns;
 use crate::ppo::step::Step;
 use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
+use burn::lr_scheduler::LrScheduler;
 use burn::module::AutodiffModule;
 use burn::optim::{AdamW, AdamWConfig};
 use tokio::task::JoinSet;
@@ -20,6 +22,7 @@ pub(crate) struct Trainer {
     device: BurnDevice,
     returns: Box<dyn Returns>,
     advantages: Box<dyn Advantages>,
+    ppo: Ppo,
 }
 
 impl Trainer {
@@ -30,6 +33,7 @@ impl Trainer {
     ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
         let functions = Functions::new(&cfg.functions);
+        let ppo = Ppo::new(&cfg);
         Self {
             cfg,
             llvm,
@@ -37,11 +41,15 @@ impl Trainer {
             device: Default::default(),
             returns,
             advantages,
+            ppo,
         }
     }
-    pub(crate) fn train<A: Actor + Clone + 'static + Send + AutodiffModule<BurnAutoDiff>>(
-        mut self,
-    ) {
+    pub(crate) fn train<A>(mut self)
+    where
+        A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff> + Clone + Send + 'static,
+        <A as AutodiffModule<BurnAutoDiff>>::InnerModule:
+            Actor<BurnBackend> + Clone + Send + 'static,
+    {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
             // Collect per-function baselines before any episode collection.
@@ -56,13 +64,12 @@ impl Trainer {
             }
 
             let model = A::init(A::cfg(&self.cfg), &self.device);
-            let policy_optimizer = AdamWConfig::new().init::<BurnAutoDiff, A>();
-            let value_optimizer = AdamWConfig::new().init::<BurnAutoDiff, A>();
-            let policy_scheduler =
-                CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs);
-            let value_scheduler =
-                CosineAnnealingLrSchedulerConfig::new(self.cfg.value_lr, self.cfg.epochs);
-            for epoch in 0..self.cfg.epochs {
+            let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, A>();
+            let mut policy_scheduler =
+                CosineAnnealingLrSchedulerConfig::new(self.cfg.policy_lr, self.cfg.epochs)
+                    .init().expect("scheduler init");
+
+            for _epoch in 0..self.cfg.epochs {
                 let current = model.no_grads();
                 let mut workers = JoinSet::new();
                 for func in self.functions.functions.iter() {
@@ -100,11 +107,9 @@ impl Trainer {
                                 // Apply the pass incrementally. Skip Stop — it terminates
                                 // the episode without changing the IR.
                                 if action != Pass::Stop {
-                                    let out =
-                                        episode.llvm.work_dir.join(format!("step_{step_idx}.ll"));
                                     episode.current_ir = episode
                                         .llvm
-                                        .apply_one(&episode.current_ir, action, out)
+                                        .apply_one(&episode.current_ir, action, step_idx)
                                         .await
                                         .expect("apply_one");
                                 }
@@ -160,9 +165,13 @@ impl Trainer {
                 let all_returns: Vec<Vec<f32>> =
                     results.iter().map(|r| self.returns.compute(r)).collect();
                 let advantages = self.advantages.compute(&all_returns, &results);
-                // TODO PPO update
-                // metrics updating + using to check best => Checkpoint::save(best) + patience on EMA
-                // logging update + every N epochs => plot train
+
+                let batch = Ppo::batch(&results, &all_returns, &advantages);
+                let lr = policy_scheduler.step();
+                let (model, optimizer) =
+                    self.ppo.update(model, optimizer, &batch, lr, &self.cfg, &self.device);
+                // TODO metrics updating + using to check best => Checkpoint::save(best) + patience on EMA
+                // TODO logging update + every N epochs => plot train
             }
             // final cleanup + plot
             todo!()
