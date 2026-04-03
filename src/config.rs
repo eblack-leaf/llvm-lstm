@@ -18,6 +18,8 @@ pub(crate) struct Cfg {
     pub(crate) max_seq_len: usize,
     pub(crate) work_dir: PathBuf,
     pub(crate) arch: Arch,
+    pub(crate) policy_lr: f64,
+    pub(crate) value_lr: f64,
 }
 #[derive(Debug, Default, Copy, Clone, ValueEnum)]
 pub(crate) enum Arch {
