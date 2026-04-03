@@ -25,7 +25,9 @@ impl Baselines {
     /// Positive = model beat clang -O3; negative = model was worse.
     pub(crate) fn speedup_vs_o3(&self, opt_ns: u64) -> f32 {
         let base = self.o3.mean_ns as f32;
-        if base == 0.0 { return 0.0; }
+        if base == 0.0 {
+            return 0.0;
+        }
         (base - opt_ns as f32) / base
     }
 }

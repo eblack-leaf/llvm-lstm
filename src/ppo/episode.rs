@@ -27,7 +27,13 @@ pub(crate) struct Episode {
     pub(crate) base_features: Vec<f32>,
 }
 impl Episode {
-    pub(crate) async fn new(idx: usize, llvm: Llvm, ir: Ir, cfg: Cfg, baselines: Baselines) -> Self {
+    pub(crate) async fn new(
+        idx: usize,
+        llvm: Llvm,
+        ir: Ir,
+        cfg: Cfg,
+        baselines: Baselines,
+    ) -> Self {
         let content = tokio::fs::read_to_string(&ir.file)
             .await
             .expect("failed to read base IR");

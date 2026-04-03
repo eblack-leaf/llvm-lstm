@@ -46,8 +46,7 @@ where
     fn init(cfg: Self::Config, device: &BurnDevice) -> Self {
         Self {
             ir_proj: LinearConfig::new(cfg.input_dim, cfg.hidden_size).init(device),
-            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim)
-                .init(device),
+            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim).init(device),
             action_proj: LinearConfig::new(cfg.action_embed_dim, cfg.hidden_size).init(device),
             gru: GruConfig::new(cfg.hidden_size, cfg.hidden_size, false).init(device),
             policy_head: MlpHeadConfig::new(cfg.hidden_size, cfg.head_hidden, cfg.num_actions)
@@ -62,7 +61,7 @@ where
 
         // Action sequence → [batch, seq_len, hidden_size]
         let seq = self.action_embed.forward(input.actions); // [batch, seq, action_embed_dim]
-        let seq = self.action_proj.forward(seq);            // [batch, seq, hidden_size]
+        let seq = self.action_proj.forward(seq); // [batch, seq, hidden_size]
         let seq_len = seq.dims()[1];
 
         // GRU output [batch, seq_len, hidden_size]; take last step as context [batch, hidden_size]
@@ -71,7 +70,7 @@ where
 
         // 2-layer MLP heads
         let policy = self.policy_head.forward(hn.clone()).unsqueeze_dim(1); // [batch, 1, num_actions]
-        let value = self.value_head.forward(hn);                             // [batch, 1]
+        let value = self.value_head.forward(hn); // [batch, 1]
 
         Output { policy, value }
     }

@@ -39,7 +39,9 @@ impl Trainer {
             advantages,
         }
     }
-    pub(crate) fn train<A: Actor + Clone + 'static + Send + AutodiffModule<BurnAutoDiff>>(mut self) {
+    pub(crate) fn train<A: Actor + Clone + 'static + Send + AutodiffModule<BurnAutoDiff>>(
+        mut self,
+    ) {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move {
             // Collect per-function baselines before any episode collection.
@@ -73,7 +75,8 @@ impl Trainer {
                             func.ir.clone(),
                             self.cfg.clone(),
                             baselines.clone(),
-                        ).await;
+                        )
+                        .await;
                         let actor = current.clone();
                         workers.spawn(async move {
                             loop {
@@ -82,7 +85,8 @@ impl Trainer {
                                     &episode.ir,
                                     &episode.current_ir,
                                     &episode.actions,
-                                ).await;
+                                )
+                                .await;
                                 let output = actor.forward(&episode.cfg, input);
                                 let action = output.action();
                                 let log_prob = output.log_prob(action);
@@ -91,14 +95,13 @@ impl Trainer {
                                 episode.log_probs.push(log_prob);
                                 episode.values.push(value);
                                 let done = action == Pass::Stop
-                                    || episode.actions.len() + 1 > episode.cfg.max_seq_len;
+                                    || episode.actions.len() > episode.cfg.max_seq_len;
                                 let step_idx = episode.steps.len();
                                 // Apply the pass incrementally. Skip Stop — it terminates
                                 // the episode without changing the IR.
                                 if action != Pass::Stop {
-                                    let out = episode.llvm.work_dir.join(
-                                        format!("step_{step_idx}.ll")
-                                    );
+                                    let out =
+                                        episode.llvm.work_dir.join(format!("step_{step_idx}.ll"));
                                     episode.current_ir = episode
                                         .llvm
                                         .apply_one(&episode.current_ir, action, out)
@@ -109,13 +112,16 @@ impl Trainer {
                                 // Zero for Stop (IR unchanged); non-zero entries show
                                 // which IR characteristics the pass sequence has moved.
                                 let delta_features = {
-                                    let content = tokio::fs::read_to_string(&episode.current_ir.file)
-                                        .await
-                                        .expect("read current IR");
+                                    let content =
+                                        tokio::fs::read_to_string(&episode.current_ir.file)
+                                            .await
+                                            .expect("read current IR");
                                     let current = Features::from_ll_str(&content)
                                         .expect("parse current IR features")
                                         .to_vec();
-                                    episode.base_features.iter()
+                                    episode
+                                        .base_features
+                                        .iter()
                                         .zip(&current)
                                         .map(|(b, c)| c - b)
                                         .collect()
@@ -136,7 +142,12 @@ impl Trainer {
                                 } else {
                                     None
                                 };
-                                episode.steps.push(Step::new(action, step_idx, benchmark, delta_features));
+                                episode.steps.push(Step::new(
+                                    action,
+                                    step_idx,
+                                    benchmark,
+                                    delta_features,
+                                ));
                                 if done {
                                     break;
                                 }
@@ -146,10 +157,8 @@ impl Trainer {
                     }
                 }
                 let results = workers.join_all().await;
-                let all_returns: Vec<Vec<f32>> = results
-                    .iter()
-                    .map(|r| self.returns.compute(r))
-                    .collect();
+                let all_returns: Vec<Vec<f32>> =
+                    results.iter().map(|r| self.returns.compute(r)).collect();
                 let advantages = self.advantages.compute(&all_returns, &results);
                 // TODO PPO update
                 // metrics updating + using to check best => Checkpoint::save(best) + patience on EMA

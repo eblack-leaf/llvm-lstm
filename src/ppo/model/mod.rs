@@ -62,7 +62,11 @@ pub(crate) struct MlpHeadConfig {
 
 impl MlpHeadConfig {
     pub(crate) fn new(in_dim: usize, hidden_dim: usize, out_dim: usize) -> Self {
-        Self { in_dim, hidden_dim, out_dim }
+        Self {
+            in_dim,
+            hidden_dim,
+            out_dim,
+        }
     }
     pub(crate) fn init(&self, device: &BurnDevice) -> MlpHead {
         MlpHead {
@@ -89,14 +93,8 @@ impl Input {
         let tokens = Tokens::new(ir, current_ir, actions).await;
         let n_features = tokens.features.len();
         let seq_len = tokens.actions.len();
-        let features = Tensor::from_data(
-            TensorData::new(tokens.features, [1, n_features]),
-            dev,
-        );
-        let actions = Tensor::from_data(
-            TensorData::new(tokens.actions, [1, seq_len]),
-            dev,
-        );
+        let features = Tensor::from_data(TensorData::new(tokens.features, [1, n_features]), dev);
+        let actions = Tensor::from_data(TensorData::new(tokens.actions, [1, seq_len]), dev);
         Self { features, actions }
     }
 }
@@ -113,11 +111,7 @@ impl Output {
         let cumsum = probs.cumsum(0); // [num_actions]
         // Count how many cumulative probabilities are ≤ u; that index is our sample.
         let u: f32 = rand::random();
-        let idx = cumsum
-            .lower_equal_elem(u)
-            .int()
-            .sum()
-            .into_scalar() as usize;
+        let idx = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
         ACTIONS[idx.min(ACTIONS.len() - 1)]
     }
 
@@ -134,10 +128,11 @@ impl Output {
         let logits = self.policy.clone().squeeze::<1>(); // [num_actions]
         let log_probs = log_softmax(logits, 0);
         // Reverse the ACTIONS mapping to get the logit index for this pass.
-        let idx = ACTIONS.iter().position(|&p| p == action).expect("pass not in action space");
-        log_probs
-            .narrow(0, idx, 1)
-            .into_scalar()
+        let idx = ACTIONS
+            .iter()
+            .position(|&p| p == action)
+            .expect("pass not in action space");
+        log_probs.narrow(0, idx, 1).into_scalar()
     }
 }
 pub(crate) trait Actor {

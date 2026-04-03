@@ -126,7 +126,10 @@ impl Llvm {
             }
             total_ns += start.elapsed().as_nanos() as u64;
         }
-        Ok(Benchmark { mean_ns: total_ns / runs as u64, speedup: 0.0 })
+        Ok(Benchmark {
+            mean_ns: total_ns / runs as u64,
+            speedup: 0.0,
+        })
     }
 
     /// Collect baselines at all four standard opt levels for a single function.
@@ -142,7 +145,12 @@ impl Llvm {
 
     /// Compile `src` at `opt_level` (e.g. "-O0", "-O3") and benchmark it.
     /// Returns the raw timing used to compute speedup for model-optimised builds.
-    pub(crate) async fn baseline(&self, src: &Source, opt_level: &str, runs: usize) -> Result<Benchmark> {
+    pub(crate) async fn baseline(
+        &self,
+        src: &Source,
+        opt_level: &str,
+        runs: usize,
+    ) -> Result<Benchmark> {
         let bin_path = self.work_dir.join("baseline");
         let status = tokio::process::Command::new(&self.clang)
             .arg(opt_level)

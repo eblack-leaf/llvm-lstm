@@ -20,6 +20,11 @@ impl Step {
         benchmark: Option<Benchmark>,
         delta_features: Vec<f32>,
     ) -> Self {
-        Self { pass, step_idx, benchmark, delta_features }
+        Self {
+            pass,
+            step_idx,
+            benchmark,
+            delta_features,
+        }
     }
 }

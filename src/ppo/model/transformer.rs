@@ -1,7 +1,9 @@
 use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::module::AutodiffModule;
-use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Config, Int, Module};
 use burn::tensor::Tensor;
@@ -60,8 +62,7 @@ impl Actor for TransformerActor {
     fn init(cfg: Self::Config, device: &BurnDevice) -> Self {
         Self {
             ir_proj: LinearConfig::new(cfg.input_dim, cfg.d_model).init(device),
-            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim)
-                .init(device),
+            action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.action_embed_dim).init(device),
             action_proj: LinearConfig::new(cfg.action_embed_dim, cfg.d_model).init(device),
             pos_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
@@ -87,15 +88,14 @@ impl Actor for TransformerActor {
 
         // Action sequence → [batch, seq_len, d_model]
         let act = self.action_embed.forward(input.actions); // [batch, seq, action_embed_dim]
-        let act = self.action_proj.forward(act);            // [batch, seq, d_model]
+        let act = self.action_proj.forward(act); // [batch, seq, d_model]
 
         // Prepend IR token → [batch, seq_len+1, d_model]
         let x = Tensor::cat(vec![ir_tok, act], 1);
 
         // Positional encoding → [batch, seq_len+1, d_model]
-        let positions =
-            Tensor::<BurnBackend, 1, Int>::arange(0..(seq_len + 1) as i64, &device)
-                .unsqueeze_dim(0); // [1, seq_len+1]
+        let positions = Tensor::<BurnBackend, 1, Int>::arange(0..(seq_len + 1) as i64, &device)
+            .unsqueeze_dim(0); // [1, seq_len+1]
         let pos = self.pos_embed.forward(positions);
         let x = x + pos;
 
@@ -107,7 +107,7 @@ impl Actor for TransformerActor {
 
         // 2-layer MLP heads
         let policy = self.policy_head.forward(ctx.clone()).unsqueeze_dim(1); // [batch, 1, num_actions]
-        let value = self.value_head.forward(ctx);                             // [batch, 1]
+        let value = self.value_head.forward(ctx); // [batch, 1]
 
         Output { policy, value }
     }
