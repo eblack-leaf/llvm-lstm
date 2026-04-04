@@ -7,11 +7,12 @@ use crate::ppo::model::ACTIONS;
 /// At each step, all 29 ACTIONS were benchmarked from the pre-action IR state
 /// during collection. The advantage is:
 ///
-///   advantage[t] = speedup(chosen_action) - mean(speedup(all_actions))
+///   advantage[t] = (speedup(chosen_action) - mean(speedup(all_actions))) - value[t]
 ///
-/// This directly answers "was the chosen pass better than average from this
-/// state?" without requiring a value function or Markovian assumptions.
-/// The comparison is local and accurate — no credit assignment across steps.
+/// The lookahead term answers "was the chosen pass better than average from
+/// this state?" The value baseline V(s_t) is subtracted on top so the critic
+/// can learn to predict the expected lookahead signal and reduce variance over
+/// time — otherwise the critic is trained but never influences the policy gradient.
 ///
 /// Falls back to `return[t] - value[t]` for steps where lookahead data is
 /// absent (lookahead disabled, or Stop on an uncollected step).
@@ -43,7 +44,7 @@ impl Advantages for LookaheadAdvantage {
                                 .position(|&p| p == step.pass)
                                 .expect("step pass not in ACTIONS");
                             let mean = la.iter().sum::<f32>() / la.len() as f32;
-                            la[chosen_idx] - mean
+                            (la[chosen_idx] - mean) - result.values[t]
                         } else {
                             // Fallback: standard return-minus-baseline.
                             ret - result.values[t]

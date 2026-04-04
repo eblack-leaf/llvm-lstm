@@ -17,19 +17,21 @@ const TOTAL_INSTR_IDX: usize = 17;
 ///   the peak is reached prev_peak stays there, so all subsequent steps are
 ///   penalised relative to the best seen, not blanket-credited.
 ///
-///   No-op nullification: non-Stop steps with |Δinstr| < noop_threshold get 0
-///   but still advance prev_peak (the IR state they measured is real).
+///   No-op nullification: non-Stop steps with |Δinstr| < noop_threshold get
+///   -noop_penalty (a small fixed cost) to discourage wasting steps on passes
+///   that don't change the IR. Still advances prev_peak since the state is real.
 ///   Stop is exempt from no-op nullification.
 ///
 /// `norm` = max(|speedup[t]|) across all steps, keeping returns in [-1, 1].
 /// Floor of 1e-4 on norm prevents divide-by-zero on fully-flat episodes.
 pub(crate) struct BestStepReturn {
     pub(crate) noop_threshold: f32,
+    pub(crate) noop_penalty: f32,
 }
 
 impl BestStepReturn {
-    pub(crate) fn new(noop_threshold: f32) -> Self {
-        Self { noop_threshold }
+    pub(crate) fn new(noop_threshold: f32, noop_penalty: f32) -> Self {
+        Self { noop_threshold, noop_penalty }
     }
 }
 
@@ -54,7 +56,7 @@ impl Returns for BestStepReturn {
                 && step.delta_features[TOTAL_INSTR_IDX].abs() < self.noop_threshold
             {
                 prev_peak = prev_peak.max(speedups[t]);
-                return 0.0;
+                return -self.noop_penalty;
             }
 
             let ret = (speedups[t] - prev_peak) / norm;

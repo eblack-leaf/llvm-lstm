@@ -142,7 +142,7 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(BestStepReturn::new(1e-4)),
+                Box::new(BestStepReturn::new(1e-4, 0.05)),
                 Box::new(LookaheadAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
