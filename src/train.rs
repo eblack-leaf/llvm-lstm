@@ -107,7 +107,6 @@ impl Trainer {
 
             for epoch in 0..self.cfg.epochs {
                 let t_collect = Instant::now();
-
                 let current = model.valid();
                 let mut workers = JoinSet::new();
                 for func in functions.functions.iter() {
@@ -123,10 +122,11 @@ impl Trainer {
                         )
                         .await;
                         let actor = current.clone();
+                        let dev = self.device.clone();
                         workers.spawn(async move {
                             loop {
                                 let input = Input::new(
-                                    &self.device,
+                                    &dev,
                                     &episode.ir,
                                     &episode.current_ir,
                                     &episode.actions,
