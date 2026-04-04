@@ -242,8 +242,8 @@ impl Trainer {
 
                 logger.log_epoch(epoch, &metrics, lr);
 
-                if metrics.speedup_ema() > best_ema {
-                    best_ema = metrics.speedup_ema();
+                if metrics.ema() > best_ema {
+                    best_ema = metrics.ema();
                     Checkpoint::save(
                         &model,
                         &arch_cfg,
@@ -255,6 +255,7 @@ impl Trainer {
                         &checkpoint_dir,
                     )
                     .expect("checkpoint save");
+                    logger.log_best(epoch, best_ema);
                 }
 
                 metrics.next_epoch();

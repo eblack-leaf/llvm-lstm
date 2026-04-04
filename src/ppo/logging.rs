@@ -5,6 +5,7 @@ use owo_colors::OwoColorize;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LogMode {
@@ -47,6 +48,8 @@ impl Logger {
         if matches!(mode, LogMode::FileOnly) {
             epoch_bar.set_draw_target(ProgressDrawTarget::hidden());
             baseline_bar.set_draw_target(ProgressDrawTarget::hidden());
+        } else {
+            epoch_bar.enable_steady_tick(Duration::from_millis(100));
         }
 
         let file = match mode {
@@ -114,24 +117,13 @@ impl Logger {
     /// Log a colored epoch summary to stdout and/or a JSON line to file.
     pub(crate) fn log_epoch(&mut self, epoch: usize, metrics: &Metrics, lr: f64) {
         if !matches!(self.mode, LogMode::FileOnly) {
-            let speedup = metrics.speedup_ema();
-            let speedup_str = if speedup >= 0.0 {
-                format!("{:+.4}", speedup).green().to_string()
+            let ema = metrics.ema();
+            let ema_str = if ema >= 0.0 {
+                format!("{:+.4}", ema).green().to_string()
             } else {
-                format!("{:+.4}", speedup).red().to_string()
+                format!("{:+.4}", ema).red().to_string()
             };
 
-            // Policy: always show sign for easy alignment with negative values.
-            let policy_str = {
-                let v = metrics.policy_loss();
-                if v >= 0.0 {
-                    format!("{:+.4}", v).yellow().to_string()
-                } else {
-                    format!("{:+.4}", v).yellow().to_string()
-                }
-            };
-
-            // Total accumulated wall time.
             let total_s = metrics.total_elapsed_ms as f64 / 1000.0;
             let total_str = if total_s < 60.0 {
                 format!("{:.0}s", total_s)
@@ -140,10 +132,10 @@ impl Logger {
             };
 
             let line = format!(
-                "epoch {:>5}  speedup_ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}  lr={:.3e}",
+                "epoch {:>5}  ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}  lr={:.3e}",
                 epoch,
-                speedup_str,
-                policy_str,
+                ema_str,
+                format!("{:+.4}", metrics.policy_loss()).yellow(),
                 format!("{:.4}", metrics.value_loss()).yellow(),
                 format!("{:.1}%", metrics.entropy_pct()).yellow(),
                 metrics.kl_div(),
@@ -166,7 +158,7 @@ impl Logger {
                 "entropy_pct":            metrics.entropy_pct(),
                 "kl_div":                 metrics.kl_div(),
                 "explained_variance":     metrics.explained_variance(),
-                "speedup_ema":            metrics.speedup_ema(),
+                "ema":                    metrics.ema(),
                 "avg_final_speedup":      metrics.avg_final_speedup(),
                 "avg_episode_len":        metrics.avg_episode_len(),
                 "episode_collection_ms":  metrics.episode_collection_ms,
@@ -180,6 +172,17 @@ impl Logger {
         }
 
         self.epoch_bar.inc(1);
+    }
+
+    /// Print a one-line marker when a new best checkpoint is saved.
+    pub(crate) fn log_best(&self, epoch: usize, ema: f32) {
+        if !matches!(self.mode, LogMode::FileOnly) {
+            self.epoch_bar.println(
+                format!("  * epoch {} new best  ema={:+.4}", epoch, ema)
+                    .green()
+                    .to_string(),
+            );
+        }
     }
 
     pub(crate) fn finish(&mut self) {

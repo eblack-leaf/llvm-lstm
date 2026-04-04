@@ -88,6 +88,7 @@ impl Metrics {
     }
 
     pub(crate) fn update_episode(&mut self, results: &[Results]) {
+        let mut any_speedup = false;
         for r in results {
             self.episode_len_avg.push(r.steps.len() as f32);
             if let Some(speedup) = r
@@ -96,8 +97,14 @@ impl Metrics {
                 .map(|b| b.speedup)
             {
                 self.final_speedup_avg.push(speedup);
-                self.speedup_ema.update(speedup);
+                any_speedup = true;
             }
+        }
+        // Update EMA once per epoch with the epoch's mean speedup, not once per episode.
+        // Updating per-episode with alpha=0.05 and 16 episodes would give an effective
+        // per-epoch alpha of 1-(1-0.05)^16 ≈ 0.56, far more aggressive than intended.
+        if any_speedup {
+            self.speedup_ema.update(self.final_speedup_avg.mean());
         }
     }
 
@@ -152,7 +159,7 @@ impl Metrics {
     }
     pub(crate) fn kl_div(&self) -> f32 { self.kl_div_avg.mean() }
     pub(crate) fn explained_variance(&self) -> f32 { self.explained_var_avg.mean() }
-    pub(crate) fn speedup_ema(&self) -> f32 { self.speedup_ema.get() }
+    pub(crate) fn ema(&self) -> f32 { self.speedup_ema.get() }
     pub(crate) fn avg_episode_len(&self) -> f32 { self.episode_len_avg.mean() }
     pub(crate) fn avg_final_speedup(&self) -> f32 { self.final_speedup_avg.mean() }
     pub(crate) fn avg_func_ir_ms(&self) -> f32 {
