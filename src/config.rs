@@ -1,25 +1,22 @@
-use crate::ppo::model::gru::GruActorConfig;
-use crate::ppo::model::transformer::{TransformerActor, TransformerActorConfig};
-use burn::backend::ndarray::NdArrayDevice;
-use burn::backend::{Autodiff, NdArray};
+use burn::backend::{Autodiff};
 use std::path::PathBuf;
 #[cfg(not(feature = "wgpu"))]
-pub(crate) type BurnBackend = NdArray;
+pub(crate) type BurnBackend = burn::backend::NdArray;
 #[cfg(not(feature = "wgpu"))]
-pub(crate) type BurnDevice = NdArrayDevice;
+pub(crate) type BurnDevice = burn::backend::ndarray::NdArrayDevice;
 #[cfg(feature = "wgpu")]
 pub(crate) type BurnBackend = burn::backend::Wgpu;
 #[cfg(feature = "wgpu")]
 pub(crate) type BurnDevice = burn::backend::wgpu::WgpuDevice;
 pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
 #[cfg(not(feature = "gru"))]
-pub(crate) type Arch = TransformerActor<BurnAutoDiff>;
+pub(crate) type Arch = crate::ppo::model::transformer::TransformerActor<BurnAutoDiff>;
 #[cfg(feature = "gru")]
-pub(crate) type Arch = GruActor<BurnAutoDiff>;
+pub(crate) type Arch = crate::ppo::model::gru::GruActor<BurnAutoDiff>;
 #[cfg(not(feature = "gru"))]
-pub(crate) type ArchConfig = TransformerActorConfig;
+pub(crate) type ArchConfig = crate::ppo::model::transformer::TransformerActorConfig;
 #[cfg(feature = "gru")]
-pub(crate) type ArchConfig = GruActorConfig;
+pub(crate) type ArchConfig = crate::ppo::model::gru::GruActorConfig;
 #[derive(Debug, Clone)]
 pub(crate) struct Cfg {
     pub(crate) functions: PathBuf,
