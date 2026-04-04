@@ -2,20 +2,36 @@ use crate::ppo::episode::Results;
 use crate::ppo::returns::Returns;
 
 /// Credits the episode-level speedup to each step proportionally to how much
-/// it changed the IR, measured as the L1 norm of its *marginal* delta.
+/// it changed the IR, measured as the *relative* marginal delta at each step.
 ///
 /// `delta_features[t]` is cumulative: `current_IR[t] − base_IR`.
 /// Marginal at step t = `delta[t] − delta[t−1]`  (with `delta[−1] = 0`).
-/// Weight[t] = Σ|marginal[t]|
-/// Return[t] = episode_speedup × weight[t] / Σ weights
 ///
-/// Consequences:
-/// - No-ops and Stop leave the IR unchanged → marginal = 0 → return = 0.
-///   They receive neither credit for good episodes nor blame for bad ones.
-/// - Passes that structurally restructure the IR receive the bulk of credit/blame.
-/// - If nothing changed at all (degenerate episode), falls back to uniform credit
-///   so the value head still gets a learning signal.
-pub(crate) struct DeltaWeightedReturn;
+/// Each marginal dimension is divided by the corresponding base-IR value
+/// (plus ε) so that large-scale ratio features (avg_bb_size, load_store_ratio)
+/// and small log-count changes are treated on the same relative footing.
+///
+/// Two modes controlled by `penalize_growth`:
+///
+/// `false` — unsigned: weight[t] = Σ |normalised_marginal[t]|
+///   Any impactful pass gets credit/blame; direction of change is ignored.
+///
+/// `true` — signed: weight[t] = −Σ normalised_marginal[t]
+///   IR shrinkage → positive weight (credit).
+///   IR growth    → negative weight (penalty).
+///
+/// Weights are then normalised by their L1 norm so they sum to ±1.
+///
+/// If nothing changed at all, falls back to uniform credit.
+pub(crate) struct DeltaWeightedReturn {
+    pub(crate) penalize_growth: bool,
+}
+
+impl DeltaWeightedReturn {
+    pub(crate) fn new(penalize_growth: bool) -> Self {
+        Self { penalize_growth }
+    }
+}
 
 impl Returns for DeltaWeightedReturn {
     fn compute(&self, results: &Results) -> Vec<f32> {
@@ -32,26 +48,39 @@ impl Returns for DeltaWeightedReturn {
             return vec![];
         }
 
-        // Marginal IR change at each step: delta[t] − delta[t−1].
-        // For t=0 the "previous" delta is the zero vector (unoptimised base).
-        let mut weights: Vec<f32> = (0..n)
+        let base = &results.base_features;
+
+        let weights: Vec<f32> = (0..n)
             .map(|t| {
                 let curr = &results.steps[t].delta_features;
-                if t == 0 {
-                    curr.iter().map(|c| c.abs()).sum()
+                let prev: &[f32] = if t == 0 {
+                    // delta[-1] is zero, so marginal = curr itself
+                    &[]
                 } else {
-                    let prev = &results.steps[t - 1].delta_features;
-                    curr.iter().zip(prev).map(|(c, p)| (c - p).abs()).sum()
+                    &results.steps[t - 1].delta_features
+                };
+
+                // Relative marginal: (curr - prev) / (|base| + ε) per dimension.
+                let rel_sum: f32 = curr.iter().enumerate().map(|(i, &c)| {
+                    let p = if prev.is_empty() { 0.0 } else { prev[i] };
+                    let marginal = c - p;
+                    let scale = base[i].abs().max(0.1) + 1e-6;
+                    marginal / scale
+                }).sum();
+
+                if self.penalize_growth {
+                    -rel_sum  // shrinkage (rel_sum < 0) → positive weight
+                } else {
+                    rel_sum.abs()
                 }
             })
             .collect();
 
-        let total: f32 = weights.iter().sum();
-        if total < 1e-8 {
-            // Nothing changed — uniform credit so value head still trains.
+        let l1: f32 = weights.iter().map(|w| w.abs()).sum();
+        if l1 < 1e-8 {
             return vec![reward / n as f32; n];
         }
 
-        weights.iter().map(|&w| reward * w / total).collect()
+        weights.iter().map(|&w| reward * w / l1).collect()
     }
 }

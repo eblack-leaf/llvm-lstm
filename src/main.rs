@@ -126,7 +126,7 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(DeltaWeightedReturn),
+                Box::new(DeltaWeightedReturn::new(true)),
                 Box::new(RankAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
