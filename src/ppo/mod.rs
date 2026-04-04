@@ -115,7 +115,7 @@ impl Ppo {
         O: Optimizer<A, BurnAutoDiff>,
     {
         if batch.steps.is_empty() {
-            return (model, optimizer, PpoLosses { policy_loss: 0.0, value_loss: 0.0, entropy: 0.0 });
+            return (model, optimizer, PpoLosses { policy_loss: 0.0, value_loss: 0.0, entropy: 0.0, kl_div: 0.0 });
         }
 
         let n_features = batch.steps[0].features.len();
@@ -125,6 +125,7 @@ impl Ppo {
         let mut sum_policy = 0.0_f32;
         let mut sum_value = 0.0_f32;
         let mut sum_entropy = 0.0_f32;
+        let mut sum_kl = 0.0_f32;
         let mut update_count = 0usize;
 
         for ep in 0..self.ppo_epochs {
@@ -207,6 +208,12 @@ impl Ppo {
                     device,
                 );
 
+                // Approx KL: mean(old_lp − new_lp). Detached — diagnostic only.
+                let approx_kl = (old_log_probs.clone() - new_log_probs.clone())
+                    .mean()
+                    .into_scalar();
+                sum_kl += approx_kl;
+
                 // Policy loss [n]: clipped surrogate (negated, to minimise).
                 let ratio = (new_log_probs - old_log_probs).exp();
                 let a = ratio.clone() * advantages.clone();
@@ -256,6 +263,7 @@ impl Ppo {
             policy_loss: sum_policy / n,
             value_loss: sum_value / n,
             entropy: sum_entropy / n,
+            kl_div: sum_kl / n,
         };
         (model, optimizer, losses)
     }

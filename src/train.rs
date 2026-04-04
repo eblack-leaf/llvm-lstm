@@ -8,7 +8,7 @@ use crate::ppo::Ppo;
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Episode;
 use crate::ppo::logging::{LogMode, Logger};
-use crate::ppo::metrics::Metrics;
+use crate::ppo::metrics::{Metrics, explained_variance};
 use crate::ppo::model::transformer::TransformerActor;
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::returns::Returns;
@@ -200,17 +200,24 @@ impl Trainer {
                     }
                 }
                 let total_episodes = workers.len();
+                let col_bar = logger.collection_bar(total_episodes as u64);
                 let mut results = Vec::with_capacity(total_episodes);
                 while let Some(res) = workers.join_next().await {
                     results.push(res.expect("worker panicked"));
-                    logger.set_collection_progress(results.len(), total_episodes);
+                    col_bar.inc(1);
                 }
-                logger.clear_collection_progress();
+                col_bar.finish_and_clear();
                 metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
                 metrics.update_episode(&results);
 
                 let all_returns: Vec<Vec<f32>> =
                     results.iter().map(|r| self.returns.compute(r)).collect();
+
+                // Explained variance from rollout values vs computed returns (pre-update).
+                let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();
+                let ev_vals: Vec<f32> = results.iter().flat_map(|r| r.values.iter().copied()).collect();
+                metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
+
                 let advantages = self.advantages.compute(&all_returns, &results);
                 let batch = Ppo::batch(&results, &all_returns, &advantages);
                 let lr = scheduler.step();

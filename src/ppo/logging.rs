@@ -61,36 +61,54 @@ impl Logger {
             }
         };
 
-        Ok(Self {
-            mode,
-            multi,
-            epoch_bar,
-            baseline_bar: Some(baseline_bar),
-            file,
-        })
+        Ok(Self { mode, multi, epoch_bar, baseline_bar: Some(baseline_bar), file })
     }
 
-    /// Advance the baseline bar and print a per-function timing line.
     pub(crate) fn log_baseline_progress(&mut self, func_name: &str, elapsed_ms: u64) {
         if let Some(bar) = &self.baseline_bar {
             bar.set_message(func_name.to_string());
             bar.inc(1);
             if !matches!(self.mode, LogMode::FileOnly) {
-                let line = format!(
-                    "  {}  {}",
-                    func_name,
-                    format!("{}ms", elapsed_ms).cyan()
-                );
+                let line = format!("  {}  {}", func_name, format!("{}ms", elapsed_ms).cyan());
                 self.epoch_bar.println(line);
             }
         }
     }
 
-    /// Remove the baseline bar once baseline collection is done.
     pub(crate) fn finish_baseline_phase(&mut self) {
         if let Some(bar) = self.baseline_bar.take() {
             bar.finish_and_clear();
         }
+    }
+
+    /// Transient progress bar for episode collection. Caller must call `.finish_and_clear()`.
+    pub(crate) fn collection_bar(&self, total_episodes: u64) -> ProgressBar {
+        let style = ProgressStyle::with_template(
+            "  collect {bar:30.green/black} {pos}/{len} eps",
+        )
+        .unwrap()
+        .progress_chars("=>-");
+        let bar = self.multi.insert_before(&self.epoch_bar, ProgressBar::new(total_episodes));
+        bar.set_style(style);
+        if matches!(self.mode, LogMode::FileOnly) {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        bar
+    }
+
+    /// Transient progress bar for the PPO update. Caller must call `.finish_and_clear()`.
+    pub(crate) fn ppo_bar(&self, total_steps: u64) -> ProgressBar {
+        let style = ProgressStyle::with_template(
+            "  ppo    {bar:30.magenta/black} {pos}/{len}  {msg}",
+        )
+        .unwrap()
+        .progress_chars("=>-");
+        let bar = self.multi.insert_before(&self.epoch_bar, ProgressBar::new(total_steps));
+        bar.set_style(style);
+        if matches!(self.mode, LogMode::FileOnly) {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        bar
     }
 
     /// Log a colored epoch summary to stdout and/or a JSON line to file.
@@ -102,16 +120,38 @@ impl Logger {
             } else {
                 format!("{:+.4}", speedup).red().to_string()
             };
+
+            // Policy: always show sign for easy alignment with negative values.
+            let policy_str = {
+                let v = metrics.policy_loss();
+                if v >= 0.0 {
+                    format!("{:+.4}", v).yellow().to_string()
+                } else {
+                    format!("{:+.4}", v).yellow().to_string()
+                }
+            };
+
+            // Total accumulated wall time.
+            let total_s = metrics.total_elapsed_ms as f64 / 1000.0;
+            let total_str = if total_s < 60.0 {
+                format!("{:.0}s", total_s)
+            } else {
+                format!("{:.1}m", total_s / 60.0)
+            };
+
             let line = format!(
-                "epoch {:>5}  speedup_ema={}  policy={}  value={}  entropy={}  ep_len={}  collect={}  ppo={}  lr={:.3e}",
+                "epoch {:>5}  speedup_ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}  lr={:.3e}",
                 epoch,
                 speedup_str,
-                format!("{:.4}", metrics.policy_loss()).yellow(),
+                policy_str,
                 format!("{:.4}", metrics.value_loss()).yellow(),
-                format!("{:.4}", metrics.entropy()).yellow(),
+                format!("{:.1}%", metrics.entropy_pct()).yellow(),
+                metrics.kl_div(),
+                metrics.explained_variance(),
                 format!("{:.1}", metrics.avg_episode_len()).bold(),
                 format!("{}ms", metrics.episode_collection_ms).cyan(),
                 format!("{}ms", metrics.ppo_update_ms).cyan(),
+                total_str.cyan().to_string(),
                 lr,
             );
             self.epoch_bar.println(line);
@@ -123,11 +163,15 @@ impl Logger {
                 "policy_loss":            metrics.policy_loss(),
                 "value_loss":             metrics.value_loss(),
                 "entropy":                metrics.entropy(),
+                "entropy_pct":            metrics.entropy_pct(),
+                "kl_div":                 metrics.kl_div(),
+                "explained_variance":     metrics.explained_variance(),
                 "speedup_ema":            metrics.speedup_ema(),
                 "avg_final_speedup":      metrics.avg_final_speedup(),
                 "avg_episode_len":        metrics.avg_episode_len(),
                 "episode_collection_ms":  metrics.episode_collection_ms,
                 "ppo_update_ms":          metrics.ppo_update_ms,
+                "total_elapsed_ms":       metrics.total_elapsed_ms,
                 "avg_func_ir_ms":         metrics.avg_func_ir_ms(),
                 "lr":                     lr,
             });
@@ -138,37 +182,6 @@ impl Logger {
         self.epoch_bar.inc(1);
     }
 
-    /// Create a transient progress bar for the PPO update inner loop.
-    /// Caller should call `.finish_and_clear()` on the returned bar when done.
-    pub(crate) fn ppo_bar(&self, total_ppo_epochs: u64) -> ProgressBar {
-        let style = ProgressStyle::with_template(
-            "  ppo    {bar:30.magenta/black} {pos}/{len} epochs  loss={msg}",
-        )
-        .unwrap()
-        .progress_chars("=>-");
-        let bar = self.multi.insert_before(&self.epoch_bar, ProgressBar::new(total_ppo_epochs));
-        bar.set_style(style);
-        if matches!(self.mode, LogMode::FileOnly) {
-            bar.set_draw_target(ProgressDrawTarget::hidden());
-        }
-        bar
-    }
-
-    /// Update the epoch bar message with episode collection progress.
-    pub(crate) fn set_collection_progress(&self, done: usize, total: usize) {
-        if !matches!(self.mode, LogMode::FileOnly) {
-            self.epoch_bar.set_message(format!("collecting {done}/{total}"));
-        }
-    }
-
-    /// Clear the collection progress message once all episodes are in.
-    pub(crate) fn clear_collection_progress(&self) {
-        if !matches!(self.mode, LogMode::FileOnly) {
-            self.epoch_bar.set_message("");
-        }
-    }
-
-    /// Finish all progress bars and flush the log file.
     pub(crate) fn finish(&mut self) {
         self.epoch_bar.finish_with_message("done");
         if let Some(f) = &mut self.file {
