@@ -44,7 +44,8 @@ impl Advantages for LookaheadAdvantage {
                                 .position(|&p| p == step.pass)
                                 .expect("step pass not in ACTIONS");
                             let mean = la.iter().sum::<f32>() / la.len() as f32;
-                            (la[chosen_idx] - mean) - result.values[t]
+                            let norm = la.iter().map(|&v| (v - mean).abs()).fold(0.0f32, f32::max).max(1e-4);
+                            (la[chosen_idx] - mean) / norm - result.values[t]
                         } else {
                             // Fallback: standard return-minus-baseline.
                             ret - result.values[t]
