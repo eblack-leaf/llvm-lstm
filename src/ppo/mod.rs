@@ -245,7 +245,7 @@ impl Ppo {
                     self.ppo_epochs,
                     chunk_idx + 1,
                     num_chunks,
-                    p_mean + v_mean - e_mean,
+                    p_mean + v_mean - e_mean * self.entropy_coef,
                 ));
                 ppo_bar.inc(1);
             }
