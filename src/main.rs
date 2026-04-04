@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::advantages::gae::GaeAdvantage;
+use crate::ppo::advantages::lookahead::LookaheadAdvantage;
 use crate::ppo::returns::best_step::BestStepReturn;
 
 mod config;
@@ -55,6 +56,12 @@ enum Command {
         baseline_iters: usize,
         #[arg(long)]
         per_step_benchmark: bool,
+        #[arg(long)]
+        lookahead_benchmark: bool,
+        #[arg(long, default_value = "1")]
+        lookahead_runs: usize,
+        #[arg(long, default_value = "50")]
+        lookahead_iters: usize,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
         #[arg(long, default_value = "3e-4")]
@@ -98,6 +105,9 @@ fn main() {
             baseline_runs,
             baseline_iters,
             per_step_benchmark,
+            lookahead_benchmark,
+            lookahead_runs,
+            lookahead_iters,
             max_seq_len,
             learning_rate,
             clip_epsilon,
@@ -117,6 +127,9 @@ fn main() {
                 baseline_runs,
                 baseline_iters,
                 per_step_benchmark,
+                lookahead_benchmark,
+                lookahead_runs,
+                lookahead_iters,
                 max_seq_len,
                 work_dir,
                 checkpoint_dir: checkpoint_dir.clone(),
@@ -130,7 +143,7 @@ fn main() {
             let trainer = Trainer::new(
                 cfg,
                 Box::new(BestStepReturn::new(1e-4)),
-                Box::new(GaeAdvantage::new(0.99, 0.97, true)),
+                Box::new(LookaheadAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
             );

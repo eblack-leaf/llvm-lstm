@@ -10,7 +10,7 @@ use crate::ppo::episode::Episode;
 use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::metrics::{Metrics, explained_variance};
 use crate::ppo::model::transformer::TransformerActor;
-use crate::ppo::model::{Actor, Input};
+use crate::ppo::model::{Actor, Input, ACTIONS};
 use crate::ppo::returns::Returns;
 use crate::ppo::step::Step;
 use burn::lr_scheduler::LrScheduler;
@@ -144,6 +144,48 @@ impl Trainer {
                                 let done = action == Pass::Stop
                                     || episode.actions.len() > episode.cfg.max_seq_len;
                                 let step_idx = episode.steps.len();
+
+                                // Lookahead: bench all 29 ACTIONS from the pre-action IR.
+                                // Happens before apply_one so the IR state is unmodified.
+                                let lookahead: Option<Box<[f32; 29]>> = if episode.cfg.lookahead_benchmark {
+                                    let pre_ir = episode.current_ir.clone();
+                                    let llvm = episode.llvm.clone();
+                                    let baselines = episode.baselines.clone();
+                                    let runs = episode.cfg.lookahead_runs;
+                                    let iters = episode.cfg.lookahead_iters;
+                                    let mut speedups = Box::new([0.0f32; 29]);
+                                    let mut tasks = JoinSet::new();
+                                    for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
+                                        let llvm = llvm.clone();
+                                        let pre_ir = pre_ir.clone();
+                                        let baselines = baselines.clone();
+                                        tasks.spawn(async move {
+                                            let ir = if pass == Pass::Stop {
+                                                pre_ir
+                                            } else {
+                                                llvm.apply_one_lookahead(&pre_ir, pass, step_idx, pass_idx)
+                                                    .await
+                                                    .expect("apply_one_lookahead")
+                                            };
+                                            let bin = llvm.compile_lookahead(&ir, step_idx, pass_idx)
+                                                .await
+                                                .expect("compile_lookahead");
+                                            let mut bm = llvm.benchmark(&bin, runs, iters)
+                                                .await
+                                                .expect("lookahead benchmark");
+                                            bm.speedup = baselines.speedup_vs_o3(bm.mean_ns);
+                                            (pass_idx, bm.speedup)
+                                        });
+                                    }
+                                    while let Some(res) = tasks.join_next().await {
+                                        let (idx, speedup) = res.expect("lookahead task panicked");
+                                        speedups[idx] = speedup;
+                                    }
+                                    Some(speedups)
+                                } else {
+                                    None
+                                };
+
                                 // Apply the pass incrementally. Skip Stop — it terminates
                                 // the episode without changing the IR.
                                 if action != Pass::Stop {
@@ -192,6 +234,7 @@ impl Trainer {
                                     step_idx,
                                     benchmark,
                                     delta_features,
+                                    lookahead,
                                 ));
                                 if done {
                                     break;

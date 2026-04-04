@@ -34,6 +34,13 @@ pub(crate) struct Cfg {
     /// Higher than benchmark_iters — baselines are the fixed reference so accuracy matters more.
     pub(crate) baseline_iters: usize,
     pub(crate) per_step_benchmark: bool,
+    /// If true, benchmark all 29 candidate passes from the pre-action IR state at
+    /// every step. Produces accurate per-step advantages at ~29x bench cost per step.
+    pub(crate) lookahead_benchmark: bool,
+    /// Outer runs and inner iterations for each lookahead candidate bench.
+    /// Fewer than benchmark_runs/benchmark_iters is fine — rank signal only needed.
+    pub(crate) lookahead_runs: usize,
+    pub(crate) lookahead_iters: usize,
     pub(crate) max_seq_len: usize,
     pub(crate) work_dir: PathBuf,
     pub(crate) checkpoint_dir: PathBuf,

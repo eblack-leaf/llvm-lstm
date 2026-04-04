@@ -92,6 +92,45 @@ impl Llvm {
         Ok(Ir { file: out })
     }
 
+    /// Apply a single pass for lookahead purposes. Writes to a temp file named
+    /// `lookahead_{step}_{pass_idx}.ll` so it doesn't collide with episode step files.
+    pub(crate) async fn apply_one_lookahead(&self, ir: &Ir, pass: Pass, step: usize, pass_idx: usize) -> Result<Ir> {
+        let out = self.work_dir.join(format!("lookahead_{step}_{pass_idx}.ll"));
+        let pipeline = opt_pipeline(&[pass]);
+        let status = tokio::process::Command::new(&self.opt)
+            .arg(format!("-passes={pipeline}"))
+            .arg(&ir.file)
+            .arg("-S")
+            .arg("-o")
+            .arg(&out)
+            .status()
+            .await
+            .context("failed to run opt (apply_one_lookahead)")?;
+        if !status.success() {
+            bail!("opt exited with {status}");
+        }
+        Ok(Ir { file: out })
+    }
+
+    /// Compile a lookahead IR to a binary. Output named `lookahead_{step}_{pass_idx}_bin`
+    /// to avoid colliding with the episode's compiled binary.
+    pub(crate) async fn compile_lookahead(&self, ir: &Ir, step: usize, pass_idx: usize) -> Result<Bin> {
+        let out = self.work_dir.join(format!("lookahead_{step}_{pass_idx}_bin"));
+        let status = tokio::process::Command::new(&self.clang)
+            .args(["-O3", "-Xclang", "-disable-llvm-passes"])
+            .arg(&ir.file)
+            .arg("-o")
+            .arg(&out)
+            .arg("-lm")
+            .status()
+            .await
+            .context("failed to run clang (compile_lookahead)")?;
+        if !status.success() {
+            bail!("clang exited with {status}");
+        }
+        Ok(Bin { file: out })
+    }
+
     /// Compile an IR file to a native binary, bypassing clang's own optimisations
     /// so the benchmark reflects only the passes the model applied.
     pub(crate) async fn compile(&self, ir: &Ir) -> Result<Bin> {

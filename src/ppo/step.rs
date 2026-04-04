@@ -12,6 +12,10 @@ pub(crate) struct Step {
     /// Encodes what the sequence of passes has accomplished so far — useful for
     /// attribution methods that want to correlate IR changes with episode reward.
     pub(crate) delta_features: Vec<f32>,
+    /// One-step lookahead speedups for all 29 ACTIONS tried from the IR state
+    /// *before* this step's pass was applied. Indexed in ACTIONS order.
+    /// Some only when cfg.lookahead_benchmark is enabled.
+    pub(crate) lookahead: Option<Box<[f32; 29]>>,
 }
 impl Step {
     pub(crate) fn new(
@@ -19,12 +23,14 @@ impl Step {
         step_idx: usize,
         benchmark: Option<Benchmark>,
         delta_features: Vec<f32>,
+        lookahead: Option<Box<[f32; 29]>>,
     ) -> Self {
         Self {
             pass,
             step_idx,
             benchmark,
             delta_features,
+            lookahead,
         }
     }
 }
