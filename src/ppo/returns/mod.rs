@@ -1,3 +1,4 @@
+pub(crate) mod delta_weighted;
 pub(crate) mod episode_return;
 
 use crate::ppo::episode::Results;

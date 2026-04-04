@@ -7,6 +7,7 @@ use crate::ppo::checkpoint::Checkpoint;
 use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::model::gru::GruActor;
 use crate::ppo::model::transformer::TransformerActor;
+use crate::ppo::returns::delta_weighted::DeltaWeightedReturn;
 use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
@@ -125,7 +126,7 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(EpisodeReturn),
+                Box::new(DeltaWeightedReturn),
                 Box::new(RankAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
