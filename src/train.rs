@@ -164,38 +164,25 @@ impl Trainer {
                                     // Hash once — shared key prefix for all 29 passes.
                                     let content = tokio::fs::read(&pre_ir.file).await.expect("read IR for hash");
                                     let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-                                    let mut tasks = JoinSet::new();
-                                    let mut step_hits: u64 = 0;
-                                    let mut step_misses: u64 = 0;
+                                    // Sequential — episode workers are already parallel across
+                                    // all functions/episodes; spawning 29 more tasks each would
+                                    // exhaust file descriptors.
                                     for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
                                         let key = (ir_hash, pass_idx as u8);
                                         if let Some(cached) = cache.get(&key) {
                                             speedups[pass_idx] = *cached;
-                                            step_hits += 1;
+                                            episode.lookahead_hits += 1;
                                             continue;
                                         }
-                                        step_misses += 1;
-                                        let llvm = llvm.clone();
-                                        let pre_ir = pre_ir.clone();
-                                        let baselines = baselines.clone();
-                                        let cache = cache.clone();
-                                        tasks.spawn(async move {
-                                            let speedup = llvm
-                                                .bench_lookahead_cached(
-                                                    &pre_ir, pass, pass_idx, step_idx,
-                                                    &baselines, runs, iters, &cache,
-                                                )
-                                                .await
-                                                .expect("bench_lookahead_cached");
-                                            (pass_idx, speedup)
-                                        });
+                                        episode.lookahead_misses += 1;
+                                        speedups[pass_idx] = llvm
+                                            .bench_lookahead_cached(
+                                                &pre_ir, pass, pass_idx, step_idx,
+                                                &baselines, runs, iters, &cache,
+                                            )
+                                            .await
+                                            .expect("bench_lookahead_cached");
                                     }
-                                    while let Some(res) = tasks.join_next().await {
-                                        let (idx, speedup) = res.expect("lookahead task panicked");
-                                        speedups[idx] = speedup;
-                                    }
-                                    episode.lookahead_hits += step_hits;
-                                    episode.lookahead_misses += step_misses;
                                     Some(speedups)
                                 } else {
                                     None

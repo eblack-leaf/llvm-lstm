@@ -130,7 +130,7 @@ impl Logger {
                 format!("{:+.4}", ema).red().to_string()
             };
 
-            let total_s = metrics.total_elapsed_ms as f64 / 1000.0;
+            let total_s = (metrics.total_elapsed_ms + metrics.episode_collection_ms + metrics.ppo_update_ms) as f64 / 1000.0;
             let total_str = if total_s < 60.0 {
                 format!("{:.0}s", total_s)
             } else {
