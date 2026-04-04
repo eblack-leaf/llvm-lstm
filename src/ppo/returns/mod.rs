@@ -1,6 +1,7 @@
 pub(crate) mod best_step;
 pub(crate) mod delta_weighted;
 pub(crate) mod episode_return;
+pub(crate) mod lookahead;
 
 use crate::ppo::episode::Results;
 
