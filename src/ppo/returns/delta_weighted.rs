@@ -1,27 +1,33 @@
+use crate::llvm::pass::Pass;
 use crate::ppo::episode::Results;
 use crate::ppo::returns::Returns;
 
 /// Credits the episode-level speedup to each step by how much that step
 /// changed the IR, measured as the magnitude of the relative marginal delta.
 ///
-/// `delta_features[t]` is cumulative: `current_IR[t] − base_IR`.
-/// Marginal at step t = `delta[t] − delta[t−1]`  (delta[−1] = 0).
-/// Each dimension is normalised by `|base| + ε` so count features
-/// and ratio features are on the same scale.
-///
 /// weight[t] = Σ |normalised_marginal[t]|   (always ≥ 0)
 ///
-/// The most impactful step gets return = episode_speedup.
-/// Other steps get a proportional fraction.  No-op steps get 0.
-/// If nothing changed at all, every step gets episode_speedup (uniform fallback).
+/// The most impactful step gets return = sign(adjusted_speedup).
+/// Other steps get a proportional fraction.  No-op steps (including Stop) get 0.
 ///
-/// The sign of the return comes entirely from the episode outcome —
-/// bad episode → all returns ≤ 0, good episode → all returns ≥ 0.
-pub(crate) struct DeltaWeightedReturn;
+/// `length_coef` adds a length penalty to the speedup before taking the sign:
+///   adjusted = speedup − length_coef × (ep_len / max_seq_len)
+/// A barely-positive episode that ran too long gets its sign flipped to negative,
+/// incentivising early stopping without overwhelming the speedup signal.
+///
+/// `noop_penalty` gives a fixed negative return to any non-Stop step that produced
+/// no measurable IR change (weight ≈ 0).  Stop is exempt — its length benefit comes
+/// from the length penalty above.  This distinguishes "did nothing useful" from
+/// "intentionally ended the episode".
+pub(crate) struct DeltaWeightedReturn {
+    pub(crate) length_coef: f32,
+    pub(crate) max_seq_len: usize,
+    pub(crate) noop_penalty: f32,
+}
 
 impl DeltaWeightedReturn {
-    pub(crate) fn new() -> Self {
-        Self
+    pub(crate) fn new(length_coef: f32, max_seq_len: usize, noop_penalty: f32) -> Self {
+        Self { length_coef, max_seq_len, noop_penalty }
     }
 }
 
@@ -40,13 +46,15 @@ impl Returns for DeltaWeightedReturn {
             return vec![];
         }
 
+        let adjusted = reward - self.length_coef * (n as f32 / self.max_seq_len as f32);
+
         let base = &results.base_features;
 
         let weights: Vec<f32> = (0..n)
             .map(|t| {
                 let curr = &results.steps[t].delta_features;
                 let prev: &[f32] = if t == 0 { &[] } else { &results.steps[t - 1].delta_features };
-                results.steps[t].delta_features.iter().enumerate().map(|(i, &c)| {
+                curr.iter().enumerate().map(|(i, &c)| {
                     let p = if prev.is_empty() { 0.0 } else { prev[i] };
                     let marginal = c - p;
                     let scale = base[i].abs().max(0.1) + 1e-6;
@@ -57,13 +65,16 @@ impl Returns for DeltaWeightedReturn {
 
         let max_w = weights.iter().cloned().fold(0.0f32, f32::max);
         if max_w < 1e-8 {
-            return vec![reward.signum(); n];
+            return vec![adjusted.signum(); n];
         }
 
-        // Normalise to [-1, 1]: most impactful step gets sign(speedup), others
-        // proportionally less, no-ops get 0.  V learns a fraction in [-1, 1]
-        // regardless of speedup magnitude, so value loss is always O(1).
-        let sign = reward.signum();
-        weights.iter().map(|&w| sign * w / max_w).collect()
+        let sign = adjusted.signum();
+        weights.iter().enumerate().map(|(t, &w)| {
+            if w < 1e-8 && results.steps[t].pass != Pass::Stop {
+                -self.noop_penalty
+            } else {
+                sign * w / max_w
+            }
+        }).collect()
     }
 }
