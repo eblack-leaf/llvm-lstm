@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![allow(unused)]
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use burn::module::AutodiffModule;
@@ -38,7 +39,7 @@ enum Command {
         epochs: usize,
         #[arg(long, default_value = "4")]
         ppo_epochs: usize,
-        #[arg(long, default_value = "8")]
+        #[arg(long, default_value = "16")]
         episodes: usize,
         #[arg(long, default_value = "1")]
         benchmark_runs: usize,

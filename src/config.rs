@@ -3,16 +3,19 @@ use crate::ppo::model::transformer::{TransformerActor, TransformerActorConfig};
 use burn::backend::ndarray::NdArrayDevice;
 use burn::backend::{Autodiff, NdArray};
 use std::path::PathBuf;
-
+#[cfg(not(feature = "wgpu"))]
 pub(crate) type BurnBackend = NdArray;
+#[cfg(not(feature = "wgpu"))]
 pub(crate) type BurnDevice = NdArrayDevice;
+#[cfg(feature = "wgpu")]
+pub(crate) type BurnBackend = burn::backend::Wgpu;
+#[cfg(feature = "wgpu")]
+pub(crate) type BurnDevice = burn::backend::wgpu::WgpuDevice;
 pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
-
 #[cfg(not(feature = "gru"))]
 pub(crate) type Arch = TransformerActor<BurnAutoDiff>;
 #[cfg(feature = "gru")]
 pub(crate) type Arch = GruActor<BurnAutoDiff>;
-
 #[cfg(not(feature = "gru"))]
 pub(crate) type ArchConfig = TransformerActorConfig;
 #[cfg(feature = "gru")]
