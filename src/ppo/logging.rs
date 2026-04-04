@@ -137,8 +137,12 @@ impl Logger {
                 format!("{:.1}m", total_s / 60.0)
             };
 
+            let cache_str = metrics.lookahead_cache_hit_pct()
+                .map(|p| format!("  cache={:.1}%", p))
+                .unwrap_or_default();
+
             let line = format!(
-                "epoch {:>5}  speedup={}  ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}",
+                "epoch {:>5}  speedup={}  ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}{}",
                 epoch,
                 speedup_str,
                 ema_str,
@@ -151,6 +155,7 @@ impl Logger {
                 format!("{}ms", metrics.episode_collection_ms).cyan(),
                 format!("{}ms", metrics.ppo_update_ms).cyan(),
                 total_str.cyan().to_string(),
+                cache_str,
             );
             self.epoch_bar.println(line);
 
@@ -186,6 +191,7 @@ impl Logger {
                 "avg_func_ir_ms":         metrics.avg_func_ir_ms(),
                 "lr":                     lr,
                 "func_speedups":          metrics.func_speedups(),
+                "lookahead_cache_hit_pct": metrics.lookahead_cache_hit_pct(),
             });
             if let Some(ra) = &metrics.ret_adv {
                 record["ret_mean"]  = serde_json::json!(ra.ret_mean);

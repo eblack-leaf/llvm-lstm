@@ -2,7 +2,14 @@ use crate::llvm::benchmark::{Baselines, Benchmark};
 use crate::llvm::ir::{Bin, Ir, Source};
 use crate::llvm::pass::{Pass, opt_pipeline};
 use anyhow::{Context, Result, bail};
+use dashmap::DashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Shared cache mapping (blake3 hash of IR content, pass index) to speedup.
+/// Keyed on content hash so episodes that reach the same IR state via different
+/// paths still get cache hits. Pass index is the position in ACTIONS.
+pub(crate) type LookaheadCache = Arc<DashMap<([u8; 32], u8), f32>>;
 
 pub(crate) mod benchmark;
 pub(crate) mod functions;
@@ -110,6 +117,41 @@ impl Llvm {
             bail!("opt exited with {status}");
         }
         Ok(Ir { file: out })
+    }
+
+    /// Bench a lookahead candidate, returning a cached speedup if the same
+    /// (IR content, pass_idx) has been seen before this epoch.
+    /// On a miss: applies the pass, compiles, benches, stores in cache, returns speedup.
+    pub(crate) async fn bench_lookahead_cached(
+        &self,
+        ir: &Ir,
+        pass: Pass,
+        pass_idx: usize,
+        step: usize,
+        baselines: &Baselines,
+        runs: usize,
+        iters: usize,
+        cache: &LookaheadCache,
+    ) -> Result<f32> {
+        // Hash the IR content — same content == same state regardless of path.
+        let content = tokio::fs::read(&ir.file).await.context("read IR for hash")?;
+        let hash: [u8; 32] = *blake3::hash(&content).as_bytes();
+        let key = (hash, pass_idx as u8);
+
+        if let Some(cached) = cache.get(&key) {
+            return Ok(*cached);
+        }
+
+        let out_ir = if pass == Pass::Stop {
+            ir.clone()
+        } else {
+            self.apply_one_lookahead(ir, pass, step, pass_idx).await?
+        };
+        let bin = self.compile_lookahead(&out_ir, step, pass_idx).await?;
+        let mut bm = self.benchmark(&bin, runs, iters).await?;
+        bm.speedup = baselines.speedup_vs_o3(bm.mean_ns);
+        cache.insert(key, bm.speedup);
+        Ok(bm.speedup)
     }
 
     /// Compile a lookahead IR to a binary. Output named `lookahead_{step}_{pass_idx}_bin`

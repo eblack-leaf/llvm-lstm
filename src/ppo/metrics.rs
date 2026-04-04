@@ -74,6 +74,10 @@ pub(crate) struct Metrics {
     // Return/advantage distribution snapshot for the most recent epoch.
     pub(crate) ret_adv: Option<RetAdvStats>,
 
+    // Per-epoch lookahead cache stats (reset in next_epoch)
+    lookahead_hits: u64,
+    lookahead_misses: u64,
+
     // Per-epoch timing (ms), reset in next_epoch
     pub(crate) per_func_ir_ms_total: u64,
     pub(crate) per_func_ir_ms_count: u32,
@@ -98,6 +102,8 @@ impl Metrics {
             final_speedup_avg: RunningAvg::new(),
             func_speedup_avgs: HashMap::new(),
             ret_adv:           None,
+            lookahead_hits: 0,
+            lookahead_misses: 0,
             per_func_ir_ms_total: 0,
             per_func_ir_ms_count: 0,
             episode_collection_ms: 0,
@@ -203,6 +209,8 @@ impl Metrics {
         self.final_speedup_avg.reset();
         self.func_speedup_avgs.clear();
         self.ret_adv = None;
+        self.lookahead_hits = 0;
+        self.lookahead_misses = 0;
         self.episode_collection_ms = 0;
         self.ppo_update_ms = 0;
     }
@@ -217,6 +225,15 @@ impl Metrics {
     }
     pub(crate) fn kl_div(&self) -> f32 { self.kl_div_avg.mean() }
     pub(crate) fn explained_variance(&self) -> f32 { self.explained_var_avg.mean() }
+    pub(crate) fn record_lookahead_cache(&mut self, hits: u64, misses: u64) {
+        self.lookahead_hits += hits;
+        self.lookahead_misses += misses;
+    }
+    /// Cache hit rate as a percentage, or None if no lookahead was done this epoch.
+    pub(crate) fn lookahead_cache_hit_pct(&self) -> Option<f32> {
+        let total = self.lookahead_hits + self.lookahead_misses;
+        if total == 0 { None } else { Some(self.lookahead_hits as f32 / total as f32 * 100.0) }
+    }
     pub(crate) fn ema(&self) -> f32 { self.speedup_ema.get() }
     pub(crate) fn avg_episode_len(&self) -> f32 { self.episode_len_avg.mean() }
     pub(crate) fn avg_final_speedup(&self) -> f32 { self.final_speedup_avg.mean() }

@@ -1,6 +1,9 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
-use crate::llvm::Llvm;
+use crate::llvm::{Llvm, LookaheadCache};
+use blake3;
+use dashmap::DashMap;
+use std::sync::Arc;
 use crate::llvm::functions::Functions;
 use crate::llvm::ir::Features;
 use crate::llvm::pass::Pass;
@@ -97,6 +100,9 @@ impl Trainer {
             let arch_cfg = Arch::cfg(&self.cfg);
             let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
             let mut best_mean = f32::NEG_INFINITY;
+            // Persists across epochs — (ir_content_hash, pass_idx) → speedup is fully
+            // deterministic, policy changes only affect which IR states get explored.
+            let lookahead_cache: LookaheadCache = Arc::new(DashMap::new());
 
             let mut model = Arch::init(arch_cfg.clone(), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
@@ -124,6 +130,7 @@ impl Trainer {
                         .await;
                         let actor = current.clone();
                         let dev = self.device.clone();
+                        let cache = lookahead_cache.clone();
                         workers.spawn(async move {
                             let mut prev_features: Vec<f32> = episode.base_features.clone();
                             loop {
@@ -154,33 +161,41 @@ impl Trainer {
                                     let runs = episode.cfg.lookahead_runs;
                                     let iters = episode.cfg.lookahead_iters;
                                     let mut speedups = Box::new([0.0f32; 29]);
+                                    // Hash once — shared key prefix for all 29 passes.
+                                    let content = tokio::fs::read(&pre_ir.file).await.expect("read IR for hash");
+                                    let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
                                     let mut tasks = JoinSet::new();
+                                    let mut step_hits: u64 = 0;
+                                    let mut step_misses: u64 = 0;
                                     for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
+                                        let key = (ir_hash, pass_idx as u8);
+                                        if let Some(cached) = cache.get(&key) {
+                                            speedups[pass_idx] = *cached;
+                                            step_hits += 1;
+                                            continue;
+                                        }
+                                        step_misses += 1;
                                         let llvm = llvm.clone();
                                         let pre_ir = pre_ir.clone();
                                         let baselines = baselines.clone();
+                                        let cache = cache.clone();
                                         tasks.spawn(async move {
-                                            let ir = if pass == Pass::Stop {
-                                                pre_ir
-                                            } else {
-                                                llvm.apply_one_lookahead(&pre_ir, pass, step_idx, pass_idx)
-                                                    .await
-                                                    .expect("apply_one_lookahead")
-                                            };
-                                            let bin = llvm.compile_lookahead(&ir, step_idx, pass_idx)
+                                            let speedup = llvm
+                                                .bench_lookahead_cached(
+                                                    &pre_ir, pass, pass_idx, step_idx,
+                                                    &baselines, runs, iters, &cache,
+                                                )
                                                 .await
-                                                .expect("compile_lookahead");
-                                            let mut bm = llvm.benchmark(&bin, runs, iters)
-                                                .await
-                                                .expect("lookahead benchmark");
-                                            bm.speedup = baselines.speedup_vs_o3(bm.mean_ns);
-                                            (pass_idx, bm.speedup)
+                                                .expect("bench_lookahead_cached");
+                                            (pass_idx, speedup)
                                         });
                                     }
                                     while let Some(res) = tasks.join_next().await {
                                         let (idx, speedup) = res.expect("lookahead task panicked");
                                         speedups[idx] = speedup;
                                     }
+                                    episode.lookahead_hits += step_hits;
+                                    episode.lookahead_misses += step_misses;
                                     Some(speedups)
                                 } else {
                                     None
@@ -253,6 +268,9 @@ impl Trainer {
                 }
                 col_bar.finish_and_clear();
                 metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
+                let (total_hits, total_misses) = results.iter()
+                    .fold((0u64, 0u64), |(h, m), r| (h + r.lookahead_hits, m + r.lookahead_misses));
+                metrics.record_lookahead_cache(total_hits, total_misses);
                 metrics.update_episode(&results);
 
                 let all_returns: Vec<Vec<f32>> =

@@ -26,6 +26,8 @@ pub(crate) struct Episode {
     /// Feature vector of the base IR, parsed once at construction.
     /// Subtracted from the current IR features each step to form delta_features on Step.
     pub(crate) base_features: Vec<f32>,
+    pub(crate) lookahead_hits: u64,
+    pub(crate) lookahead_misses: u64,
 }
 impl Episode {
     pub(crate) async fn new(
@@ -58,11 +60,15 @@ impl Episode {
             values: vec![],
             baselines,
             base_features,
+            lookahead_hits: 0,
+            lookahead_misses: 0,
         }
     }
     pub(crate) fn results(self) -> Results {
         Results {
             func_name: self.func_name,
+            lookahead_hits: self.lookahead_hits,
+            lookahead_misses: self.lookahead_misses,
             actions: self.actions,
             log_probs: self.log_probs,
             values: self.values,
@@ -75,6 +81,8 @@ impl Episode {
 
 pub(crate) struct Results {
     pub(crate) func_name: String,
+    pub(crate) lookahead_hits: u64,
+    pub(crate) lookahead_misses: u64,
     pub(crate) actions: Vec<Pass>,
     pub(crate) log_probs: Vec<f32>,
     pub(crate) values: Vec<f32>,
