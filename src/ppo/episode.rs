@@ -7,6 +7,7 @@ use crate::ppo::step::Step;
 
 pub(crate) struct Episode {
     pub(crate) llvm: Llvm,
+    pub(crate) func_name: String,
     /// Base (unoptimised) IR — constant for the episode lifetime.
     pub(crate) ir: Ir,
     /// Current IR state, updated by apply_one after every step.
@@ -30,6 +31,7 @@ impl Episode {
     pub(crate) async fn new(
         idx: usize,
         llvm: Llvm,
+        func_name: String,
         ir: Ir,
         cfg: Cfg,
         baselines: Baselines,
@@ -46,6 +48,7 @@ impl Episode {
         let current_ir = ir.clone();
         Self {
             llvm,
+            func_name,
             current_ir,
             ir,
             cfg,
@@ -59,6 +62,7 @@ impl Episode {
     }
     pub(crate) fn results(self) -> Results {
         Results {
+            func_name: self.func_name,
             actions: self.actions,
             log_probs: self.log_probs,
             values: self.values,
@@ -70,6 +74,7 @@ impl Episode {
 }
 
 pub(crate) struct Results {
+    pub(crate) func_name: String,
     pub(crate) actions: Vec<Pass>,
     pub(crate) log_probs: Vec<f32>,
     pub(crate) values: Vec<f32>,

@@ -9,15 +9,17 @@ const TOTAL_INSTR_IDX: usize = 17;
 /// Requires `--per-step-benchmark`.
 ///
 /// Strategy:
-///   1. Find `best_idx` — the step with the highest speedup.
-///   2. Steps at or before `best_idx`: return = speedup[t] / norm
-///      (credit proportional to how good each step was on the path to the peak)
-///   3. Steps after `best_idx`: return = (speedup[t] - best_speedup) / norm
-///      (penalty proportional to how far the episode regressed from the peak)
-///   4. No-op nullification: non-Stop steps with |Δinstr| < noop_threshold get 0 —
-///      changes are not attributed to passes that left the IR untouched.
-///   5. Stop is exempt from no-op nullification: it represents a deliberate choice
-///      to terminate and receives the natural return for its position.
+///   For each step t, return = (speedup[t] - prev_peak) / norm, where
+///   prev_peak is the running maximum speedup achieved before step t.
+///   - Improvement over prev peak → positive return (reward for the gain)
+///   - Regression below prev peak → negative return (penalty for the drop)
+///   The running peak naturally handles both pre- and post-peak steps: once
+///   the peak is reached prev_peak stays there, so all subsequent steps are
+///   penalised relative to the best seen, not blanket-credited.
+///
+///   No-op nullification: non-Stop steps with |Δinstr| < noop_threshold get 0
+///   but still advance prev_peak (the IR state they measured is real).
+///   Stop is exempt from no-op nullification.
 ///
 /// `norm` = max(|speedup[t]|) across all steps, keeping returns in [-1, 1].
 /// Floor of 1e-4 on norm prevents divide-by-zero on fully-flat episodes.
@@ -42,29 +44,22 @@ impl Returns for BestStepReturn {
             .map(|s| s.benchmark.as_ref().map(|b| b.speedup).unwrap_or(0.0))
             .collect();
 
-        let best_idx = speedups
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let best_speedup = speedups[best_idx];
-
         let norm = speedups.iter().map(|s| s.abs()).fold(0.0f32, f32::max).max(1e-4);
 
+        let mut prev_peak = 0.0f32;
         results.steps.iter().enumerate().map(|(t, step)| {
-            // No-op nullification: non-Stop passes that changed nothing get 0.
+            // No-op nullification: non-Stop passes that changed nothing get 0,
+            // but still advance prev_peak since the IR state is real.
             if step.pass != Pass::Stop
                 && step.delta_features[TOTAL_INSTR_IDX].abs() < self.noop_threshold
             {
+                prev_peak = prev_peak.max(speedups[t]);
                 return 0.0;
             }
 
-            if t <= best_idx {
-                speedups[t] / norm
-            } else {
-                (speedups[t] - best_speedup) / norm
-            }
+            let ret = (speedups[t] - prev_peak) / norm;
+            prev_peak = prev_peak.max(speedups[t]);
+            ret
         }).collect()
     }
 }

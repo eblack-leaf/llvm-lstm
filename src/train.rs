@@ -116,6 +116,7 @@ impl Trainer {
                             ep,
                             self.llvm
                                 .with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name))),
+                            func.name.clone(),
                             func.ir.clone(),
                             self.cfg.clone(),
                             baselines.clone(),

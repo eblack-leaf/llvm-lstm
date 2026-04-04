@@ -185,6 +185,7 @@ impl Logger {
                 "total_elapsed_ms":       metrics.total_elapsed_ms,
                 "avg_func_ir_ms":         metrics.avg_func_ir_ms(),
                 "lr":                     lr,
+                "func_speedups":          metrics.func_speedups(),
             });
             if let Some(ra) = &metrics.ret_adv {
                 record["ret_mean"]  = serde_json::json!(ra.ret_mean);

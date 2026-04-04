@@ -1,4 +1,5 @@
 use crate::ppo::episode::Results;
+use std::collections::HashMap;
 use crate::ppo::model::ACTIONS;
 
 /// Scalar losses averaged over all ppo_epochs × mini-batches for one outer epoch.
@@ -67,6 +68,8 @@ pub(crate) struct Metrics {
     // Per-epoch episode stats (reset in next_epoch)
     episode_len_avg:   RunningAvg,
     final_speedup_avg: RunningAvg,
+    // Per-function speedup averages for the current epoch (reset in next_epoch)
+    func_speedup_avgs: HashMap<String, RunningAvg>,
 
     // Return/advantage distribution snapshot for the most recent epoch.
     pub(crate) ret_adv: Option<RetAdvStats>,
@@ -93,6 +96,7 @@ impl Metrics {
             speedup_ema:       Ema::new(ema_alpha),
             episode_len_avg:   RunningAvg::new(),
             final_speedup_avg: RunningAvg::new(),
+            func_speedup_avgs: HashMap::new(),
             ret_adv:           None,
             per_func_ir_ms_total: 0,
             per_func_ir_ms_count: 0,
@@ -112,6 +116,10 @@ impl Metrics {
                 .map(|b| b.speedup)
             {
                 self.final_speedup_avg.push(speedup);
+                self.func_speedup_avgs
+                    .entry(r.func_name.clone())
+                    .or_insert_with(RunningAvg::new)
+                    .push(speedup);
                 any_speedup = true;
             }
         }
@@ -193,6 +201,7 @@ impl Metrics {
         self.explained_var_avg.reset();
         self.episode_len_avg.reset();
         self.final_speedup_avg.reset();
+        self.func_speedup_avgs.clear();
         self.ret_adv = None;
         self.episode_collection_ms = 0;
         self.ppo_update_ms = 0;
@@ -211,6 +220,9 @@ impl Metrics {
     pub(crate) fn ema(&self) -> f32 { self.speedup_ema.get() }
     pub(crate) fn avg_episode_len(&self) -> f32 { self.episode_len_avg.mean() }
     pub(crate) fn avg_final_speedup(&self) -> f32 { self.final_speedup_avg.mean() }
+    pub(crate) fn func_speedups(&self) -> HashMap<String, f32> {
+        self.func_speedup_avgs.iter().map(|(k, v)| (k.clone(), v.mean())).collect()
+    }
     pub(crate) fn avg_func_ir_ms(&self) -> f32 {
         if self.per_func_ir_ms_count == 0 { 0.0 }
         else { self.per_func_ir_ms_total as f32 / self.per_func_ir_ms_count as f32 }
