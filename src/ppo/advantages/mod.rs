@@ -1,4 +1,5 @@
 pub(crate) mod baseline;
+pub(crate) mod gae;
 pub(crate) mod rank;
 
 use crate::ppo::episode::Results;

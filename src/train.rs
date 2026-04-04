@@ -124,6 +124,7 @@ impl Trainer {
                         let actor = current.clone();
                         let dev = self.device.clone();
                         workers.spawn(async move {
+                            let mut prev_features: Vec<f32> = episode.base_features.clone();
                             loop {
                                 let input = Input::new(
                                     &dev,
@@ -151,9 +152,8 @@ impl Trainer {
                                         .await
                                         .expect("apply_one");
                                 }
-                                // Compute delta_features from the current IR state.
-                                // Zero for Stop (IR unchanged); non-zero entries show
-                                // which IR characteristics the pass sequence has moved.
+                                // Compute per-step marginal delta: features[t] - features[t-1].
+                                // Zero for Stop (IR unchanged).
                                 let delta_features = {
                                     let content =
                                         tokio::fs::read_to_string(&episode.current_ir.file)
@@ -162,12 +162,13 @@ impl Trainer {
                                     let current = Features::from_ll_str(&content)
                                         .expect("parse current IR features")
                                         .to_vec();
-                                    episode
-                                        .base_features
+                                    let delta: Vec<f32> = prev_features
                                         .iter()
                                         .zip(&current)
-                                        .map(|(b, c)| c - b)
-                                        .collect()
+                                        .map(|(p, c)| c - p)
+                                        .collect();
+                                    prev_features = current;
+                                    delta
                                 };
                                 let benchmark = if done || self.cfg.per_step_benchmark {
                                     let bin = episode

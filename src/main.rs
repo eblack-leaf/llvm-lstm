@@ -13,6 +13,8 @@ use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use crate::ppo::advantages::baseline::BaselineAdvantage;
+use crate::ppo::advantages::gae::GaeAdvantage;
+use crate::ppo::returns::best_step::BestStepReturn;
 
 mod config;
 mod llvm;
@@ -127,8 +129,8 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(DeltaWeightedReturn::new(0.000025, max_seq_len, 0.0002)),
-                Box::new(BaselineAdvantage::new(true)),
+                Box::new(BestStepReturn::new(1e-4)),
+                Box::new(GaeAdvantage::new(0.99, 0.97, true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
             );
