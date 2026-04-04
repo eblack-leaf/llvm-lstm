@@ -12,7 +12,7 @@ use std::path::Path;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CheckpointMeta {
     pub(crate) epoch: usize,
-    pub(crate) speedup_ema: f32,
+    pub(crate) speedup_mean: f32,
     /// cfg.max_seq_len at training time — the episode rollout length limit.
     pub(crate) max_seq_len: usize,
 }
@@ -25,7 +25,7 @@ impl Checkpoint {
     /// Files written:
     ///   `model.mpk`        — NamedMpk weights (full precision)
     ///   `arch_config.json` — arch hypers needed to re-init the model
-    ///   `meta.json`        — epoch, speedup_ema, max_seq_len
+    ///   `meta.json`        — epoch, speedup_mean, max_seq_len
     pub(crate) fn save(
         model: &Arch,
         arch_cfg: &ArchConfig,

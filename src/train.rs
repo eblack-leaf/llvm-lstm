@@ -96,7 +96,7 @@ impl Trainer {
 
             let arch_cfg = Arch::cfg(&self.cfg);
             let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
-            let mut best_ema = f32::NEG_INFINITY;
+            let mut best_mean = f32::NEG_INFINITY;
 
             let mut model = Arch::init(arch_cfg.clone(), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
@@ -244,20 +244,21 @@ impl Trainer {
 
                 logger.log_epoch(epoch, &metrics, lr);
 
-                if metrics.ema() > best_ema {
-                    best_ema = metrics.ema();
+                let epoch_mean = metrics.avg_final_speedup();
+                if epoch_mean > best_mean {
+                    best_mean = epoch_mean;
                     Checkpoint::save(
                         &model,
                         &arch_cfg,
                         CheckpointMeta {
                             epoch,
-                            speedup_ema: best_ema,
+                            speedup_mean: best_mean,
                             max_seq_len: self.cfg.max_seq_len,
                         },
                         &checkpoint_dir,
                     )
                     .expect("checkpoint save");
-                    logger.log_best(epoch, best_ema);
+                    logger.log_best(epoch, best_mean);
                 }
 
                 metrics.next_epoch();

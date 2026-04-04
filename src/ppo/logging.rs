@@ -117,6 +117,12 @@ impl Logger {
     /// Log a colored epoch summary to stdout and/or a JSON line to file.
     pub(crate) fn log_epoch(&mut self, epoch: usize, metrics: &Metrics, lr: f64) {
         if !matches!(self.mode, LogMode::FileOnly) {
+            let speedup = metrics.avg_final_speedup();
+            let speedup_str = if speedup >= 0.0 {
+                format!("{:+.4}", speedup).green().to_string()
+            } else {
+                format!("{:+.4}", speedup).red().to_string()
+            };
             let ema = metrics.ema();
             let ema_str = if ema >= 0.0 {
                 format!("{:+.4}", ema).green().to_string()
@@ -132,8 +138,9 @@ impl Logger {
             };
 
             let line = format!(
-                "epoch {:>5}  ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}  lr={:.3e}",
+                "epoch {:>5}  speedup={}  ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}",
                 epoch,
+                speedup_str,
                 ema_str,
                 format!("{:+.4}", metrics.policy_loss()).yellow(),
                 format!("{:.4}", metrics.value_loss()).yellow(),
@@ -144,7 +151,6 @@ impl Logger {
                 format!("{}ms", metrics.episode_collection_ms).cyan(),
                 format!("{}ms", metrics.ppo_update_ms).cyan(),
                 total_str.cyan().to_string(),
-                lr,
             );
             self.epoch_bar.println(line);
 
@@ -196,10 +202,10 @@ impl Logger {
     }
 
     /// Print a one-line marker when a new best checkpoint is saved.
-    pub(crate) fn log_best(&self, epoch: usize, ema: f32) {
+    pub(crate) fn log_best(&self, epoch: usize, mean: f32) {
         if !matches!(self.mode, LogMode::FileOnly) {
             self.epoch_bar.println(
-                format!("  * epoch {} new best  ema={:+.4}", epoch, ema)
+                format!("  * epoch {} new best  speedup={:+.4}", epoch, mean)
                     .green()
                     .to_string(),
             );
