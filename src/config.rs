@@ -41,4 +41,5 @@ pub(crate) struct Cfg {
     pub(crate) clip_epsilon: f32,
     pub(crate) value_coef: f32,
     pub(crate) entropy_coef: f32,
+    pub(crate) mini_batch_size: usize,
 }

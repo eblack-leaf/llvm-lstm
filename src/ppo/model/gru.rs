@@ -1,5 +1,6 @@
 use crate::config::{BurnAutoDiff, Cfg};
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
+use burn::Tensor;
 use burn::module::AutodiffModule;
 use burn::nn::gru::{Gru, GruConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
@@ -59,11 +60,28 @@ impl<B: Backend> Actor<B> for GruActor<B> {
         // Action sequence → [batch, seq_len, hidden_size]
         let seq = self.action_embed.forward(input.actions); // [batch, seq, action_embed_dim]
         let seq = self.action_proj.forward(seq); // [batch, seq, hidden_size]
-        let seq_len = seq.dims()[1];
+        let max_seq = seq.dims()[1];
 
-        // GRU output [batch, seq_len, hidden_size]; take last step as context [batch, hidden_size]
+        // GRU output [batch, max_seq, hidden_size]; take last valid step per item.
         let out = self.gru.forward(seq, Some(h0));
-        let hn = out.narrow(1, seq_len - 1, 1).flatten::<2>(1, 2);
+        let hn = match input.action_lens {
+            None => {
+                // Inference: single unpadded sequence — last position is the final step.
+                out.narrow(1, max_seq - 1, 1).flatten::<2>(1, 2)
+            }
+            Some(lens) => {
+                // Training batch: sequences are padded to max_seq. Each item may have a
+                // different actual length; gather the hidden state at its last real step.
+                let states: Vec<Tensor<B, 2>> = lens
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &l)| {
+                        out.clone().narrow(0, i, 1).narrow(1, l - 1, 1).flatten::<2>(1, 2)
+                    })
+                    .collect();
+                Tensor::cat(states, 0)
+            }
+        };
 
         // 2-layer MLP heads
         let policy = self.policy_head.forward(hn.clone()).unsqueeze_dim(1); // [batch, 1, num_actions]

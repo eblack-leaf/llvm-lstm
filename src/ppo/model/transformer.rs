@@ -5,7 +5,7 @@ use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
-use burn::prelude::{Backend, Config, Int, Module};
+use burn::prelude::{Backend, Bool, Config, Int, Module};
 use burn::tensor::Tensor;
 
 #[derive(Config, Debug)]
@@ -98,7 +98,12 @@ impl<B: Backend> Actor<B> for TransformerActor<B> {
         let x = x + pos;
 
         // Transformer encoder → [batch, seq_len+1, d_model]
-        let out = self.transformer.forward(TransformerEncoderInput::new(x));
+        let enc_input = TransformerEncoderInput::new(x);
+        let enc_input = match input.mask_pad {
+            Some(mask) => enc_input.mask_pad(mask),
+            None => enc_input,
+        };
+        let out = self.transformer.forward(enc_input);
 
         // Pool the IR token (position 0) as the shared context [batch, d_model]
         let ctx = out.narrow(1, 0, 1).flatten::<2>(1, 2);

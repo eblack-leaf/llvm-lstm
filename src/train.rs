@@ -216,7 +216,8 @@ impl Trainer {
                 let lr = scheduler.step();
 
                 let t_ppo = Instant::now();
-                let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * batch.steps.len() as u64);
+                let num_chunks = batch.steps.len().div_ceil(self.cfg.mini_batch_size);
+                let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
                 let (new_model, new_optimizer, losses) = self.ppo.update(
                     model,
                     optimizer,

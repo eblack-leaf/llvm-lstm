@@ -8,7 +8,7 @@ use crate::ppo::tokens::Tokens;
 use burn::Tensor;
 use burn::module::AutodiffModule;
 use burn::nn::{Linear, LinearConfig};
-use burn::prelude::{Backend, Int, Module};
+use burn::prelude::{Backend, Bool, Int, Module};
 use burn::tensor::TensorData;
 use burn::tensor::activation::{log_softmax, relu, softmax};
 
@@ -83,6 +83,14 @@ impl<B: Backend> MlpHead<B> {
 pub(crate) struct Input<B: Backend> {
     pub(crate) features: Tensor<B, 2>,
     pub(crate) actions: Tensor<B, 2, Int>,
+    /// Padding mask [batch, seq_len+1] — True where the position is padding (action tokens
+    /// beyond the actual sequence length). Position 0 (IR token) is always False.
+    /// None during inference (single step, no padding needed).
+    pub(crate) mask_pad: Option<Tensor<B, 2, Bool>>,
+    /// Actual action-sequence length for each batch item, needed by GRU to gather the
+    /// correct last hidden state when sequences have been padded to a common length.
+    /// None during inference.
+    pub(crate) action_lens: Option<Vec<usize>>,
 }
 
 impl Input<BurnBackend> {
@@ -92,7 +100,7 @@ impl Input<BurnBackend> {
         let seq_len = tokens.actions.len();
         let features = Tensor::from_data(TensorData::new(tokens.features, [1, n_features]), dev);
         let actions = Tensor::from_data(TensorData::new(tokens.actions, [1, seq_len]), dev);
-        Self { features, actions }
+        Self { features, actions, mask_pad: None, action_lens: None }
     }
 }
 

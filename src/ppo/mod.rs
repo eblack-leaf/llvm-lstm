@@ -5,7 +5,7 @@ use crate::ppo::model::{ACTIONS, Actor, Input};
 use indicatif::ProgressBar;
 use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
-use burn::prelude::Int;
+use burn::prelude::{Bool, Int};
 use burn::tensor::activation::log_softmax;
 use burn::tensor::{Tensor, TensorData};
 
@@ -43,6 +43,7 @@ pub(crate) struct Ppo {
     value_coef: f32,
     entropy_coef: f32,
     ppo_epochs: usize,
+    mini_batch_size: usize,
 }
 
 impl Ppo {
@@ -52,6 +53,7 @@ impl Ppo {
             value_coef: cfg.value_coef,
             entropy_coef: cfg.entropy_coef,
             ppo_epochs: cfg.ppo_epochs,
+            mini_batch_size: cfg.mini_batch_size,
         }
     }
 
@@ -94,42 +96,9 @@ impl Ppo {
         Batch { steps }
     }
 
-    /// Clipped surrogate policy loss for a single step (scalar tensor).
-    /// Returns a positive value to minimise (negated PPO objective).
-    fn policy_loss(
-        &self,
-        new_log_prob: Tensor<BurnAutoDiff, 1>,
-        old_log_prob: Tensor<BurnAutoDiff, 1>,
-        advantage: Tensor<BurnAutoDiff, 1>,
-    ) -> Tensor<BurnAutoDiff, 1> {
-        let ratio = (new_log_prob - old_log_prob).exp();
-        let a = ratio.clone() * advantage.clone();
-        let b = ratio.clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantage;
-        // -min(a, b) via the identity min(a,b) = (a+b-|a-b|)/2
-        let diff = (a.clone() - b.clone()).abs();
-        -((a + b - diff) / 2.0)
-    }
-
-    /// MSE value loss for a single step (scalar tensor).
-    fn value_loss(
-        &self,
-        pred: Tensor<BurnAutoDiff, 1>,
-        target: Tensor<BurnAutoDiff, 1>,
-    ) -> Tensor<BurnAutoDiff, 1> {
-        let d = pred - target;
-        d.clone() * d
-    }
-
-    /// Entropy of the policy distribution (scalar tensor, positive = more entropy).
-    fn entropy_loss(&self, logits: Tensor<BurnAutoDiff, 1>) -> Tensor<BurnAutoDiff, 1> {
-        let log_p = log_softmax(logits.clone(), 0);
-        let p = log_p.clone().exp();
-        -(p * log_p).sum()
-    }
-
     /// Run `ppo_epochs` gradient steps over the batch.
-    /// Each epoch iterates all steps sequentially, accumulates the combined loss,
-    /// then does a single backward + optimizer step.
+    /// Each epoch shuffles steps into mini-batches of `mini_batch_size`. Each mini-batch is a
+    /// single padded forward pass; progress ticks once per mini-batch so the bar stays live.
     /// Returns the updated model, optimizer, and average losses across all ppo_epochs.
     pub(crate) fn update<A, O>(
         &self,
@@ -145,84 +114,144 @@ impl Ppo {
         A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff>,
         O: Optimizer<A, BurnAutoDiff>,
     {
+        if batch.steps.is_empty() {
+            return (model, optimizer, PpoLosses { policy_loss: 0.0, value_loss: 0.0, entropy: 0.0 });
+        }
+
+        let n_features = batch.steps[0].features.len();
+        let num_steps = batch.steps.len();
+        let num_chunks = num_steps.div_ceil(self.mini_batch_size);
+
         let mut sum_policy = 0.0_f32;
         let mut sum_value = 0.0_f32;
         let mut sum_entropy = 0.0_f32;
-        let mut step_count = 0usize;
+        let mut update_count = 0usize;
 
         for ep in 0..self.ppo_epochs {
-            let mut total: Option<Tensor<BurnAutoDiff, 1>> = None;
-            let mut epoch_loss_sum = 0.0f32;
-            let mut epoch_steps = 0usize;
+            for (chunk_idx, chunk) in batch.steps.chunks(self.mini_batch_size).enumerate() {
+                let n = chunk.len();
+                let max_seq = chunk.iter().map(|s| s.action_seq.len()).max().unwrap_or(1);
 
-            for step in &batch.steps {
-                let n = step.features.len();
-                let s = step.action_seq.len();
+                // Features [n, n_features]
+                let features_data: Vec<f32> = chunk.iter()
+                    .flat_map(|s| s.features.iter().copied())
+                    .collect();
+
+                // Padded action sequences [n, max_seq] and mask [n, max_seq+1]
+                let mut actions_data: Vec<i64> = Vec::with_capacity(n * max_seq);
+                let mut mask_data: Vec<i64> = Vec::with_capacity(n * (max_seq + 1));
+                let mut action_lens: Vec<usize> = Vec::with_capacity(n);
+                for step in chunk {
+                    let sl = step.action_seq.len();
+                    action_lens.push(sl);
+                    actions_data.extend(step.action_seq.iter().copied());
+                    for _ in sl..max_seq { actions_data.push(0); }
+                    mask_data.push(0i64); // IR token: always real
+                    for _ in 0..sl { mask_data.push(0i64); }
+                    for _ in sl..max_seq { mask_data.push(1i64); }
+                }
+
                 let features = Tensor::<BurnAutoDiff, 2>::from_data(
-                    TensorData::new(step.features.clone(), [1, n]),
+                    TensorData::new(features_data, [n, n_features]),
                     device,
                 );
                 let actions = Tensor::<BurnAutoDiff, 2, Int>::from_data(
-                    TensorData::new(step.action_seq.clone(), [1, s]),
+                    TensorData::new(actions_data, [n, max_seq]),
                     device,
                 );
-                let output = model.forward(cfg, Input { features, actions });
+                let mask_pad: Tensor<BurnAutoDiff, 2, Bool> =
+                    Tensor::<BurnAutoDiff, 2, Int>::from_data(
+                        TensorData::new(mask_data, [n, max_seq + 1]),
+                        device,
+                    )
+                    .equal_elem(1i64);
 
-                // [num_actions] logits; slice the taken action's log-prob
-                let logits = output.policy.flatten::<1>(0, 2);
-                let new_lp = log_softmax(logits.clone(), 0).narrow(0, step.taken_action_idx, 1);
+                let input = Input {
+                    features,
+                    actions,
+                    mask_pad: Some(mask_pad),
+                    action_lens: Some(action_lens),
+                };
+                let output = model.forward(cfg, input);
+
+                // policy: [n, 1, num_actions] → [n, num_actions]
+                let logits = output.policy.flatten::<2>(0, 1);
+                // value: [n, 1] → [n]
                 let pred_v = output.value.flatten::<1>(0, 1);
 
-                let old_lp = Tensor::<BurnAutoDiff, 1>::from_data(
-                    TensorData::new(vec![step.old_log_prob], [1]),
+                // Per-step log-prob of the taken action.
+                let log_probs_all = log_softmax(logits.clone(), 1); // [n, num_actions]
+                let taken_idx_data: Vec<i64> = chunk.iter()
+                    .map(|s| s.taken_action_idx as i64)
+                    .collect();
+                let taken_idx = Tensor::<BurnAutoDiff, 2, Int>::from_data(
+                    TensorData::new(taken_idx_data, [n, 1]),
                     device,
                 );
-                let adv = Tensor::<BurnAutoDiff, 1>::from_data(
-                    TensorData::new(vec![step.advantage], [1]),
+                let new_log_probs = log_probs_all.gather(1, taken_idx).flatten::<1>(0, 1); // [n]
+
+                let adv_data: Vec<f32> = chunk.iter().map(|s| s.advantage).collect();
+                let old_lp_data: Vec<f32> = chunk.iter().map(|s| s.old_log_prob).collect();
+                let ret_data: Vec<f32> = chunk.iter().map(|s| s.ret).collect();
+
+                let advantages = Tensor::<BurnAutoDiff, 1>::from_data(
+                    TensorData::new(adv_data, [n]),
                     device,
                 );
-                let ret = Tensor::<BurnAutoDiff, 1>::from_data(
-                    TensorData::new(vec![step.ret], [1]),
+                let old_log_probs = Tensor::<BurnAutoDiff, 1>::from_data(
+                    TensorData::new(old_lp_data, [n]),
+                    device,
+                );
+                let targets = Tensor::<BurnAutoDiff, 1>::from_data(
+                    TensorData::new(ret_data, [n]),
                     device,
                 );
 
-                let p = self.policy_loss(new_lp, old_lp, adv);
-                let v = self.value_loss(pred_v, ret) * self.value_coef;
-                let e = self.entropy_loss(logits) * self.entropy_coef;
+                // Policy loss [n]: clipped surrogate (negated, to minimise).
+                let ratio = (new_log_probs - old_log_probs).exp();
+                let a = ratio.clone() * advantages.clone();
+                let b = ratio.clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages;
+                let diff = (a.clone() - b.clone()).abs();
+                let policy_loss = -((a + b - diff) / 2.0); // [n]
 
-                let p_val = p.clone().into_scalar();
-                let v_val = v.clone().into_scalar();
-                let e_val = e.clone().into_scalar();
-                sum_policy += p_val;
-                sum_value += v_val;
-                sum_entropy += e_val;
-                epoch_loss_sum += p_val + v_val - e_val;
-                step_count += 1;
-                epoch_steps += 1;
+                // Value loss [n]: MSE.
+                let d = pred_v - targets;
+                let value_loss = d.clone() * d; // [n]
 
-                let step_loss = p + v - e;
-                total = Some(match total.take() {
-                    None => step_loss,
-                    Some(acc) => acc + step_loss,
-                });
+                // Entropy [n]: H(π) = -Σ p log p, summed over action dim.
+                let log_p = log_softmax(logits, 1);
+                let p = log_p.clone().exp();
+                let entropy = -(p * log_p).sum_dim(1).flatten::<1>(0, 1); // [n]
+
+                // Extract scalars before backward.
+                let p_mean = policy_loss.clone().mean().into_scalar();
+                let v_mean = (value_loss.clone() * self.value_coef).mean().into_scalar();
+                let e_mean = entropy.clone().mean().into_scalar();
+                sum_policy += p_mean;
+                sum_value += v_mean;
+                sum_entropy += e_mean;
+                update_count += 1;
+
+                let total = (policy_loss + value_loss * self.value_coef
+                    - entropy * self.entropy_coef)
+                    .mean();
+                let grads = total.backward();
+                let grads = GradientsParams::from_grads(grads, &model);
+                model = optimizer.step(lr, model, grads);
 
                 ppo_bar.set_message(format!(
-                    "epoch {}/{} loss={:.4}",
+                    "ep {}/{} mb {}/{} loss={:.4}",
                     ep + 1,
                     self.ppo_epochs,
-                    epoch_loss_sum / epoch_steps as f32,
+                    chunk_idx + 1,
+                    num_chunks,
+                    p_mean + v_mean - e_mean,
                 ));
                 ppo_bar.inc(1);
             }
-
-            if let Some(loss) = total {
-                let grads = (loss / batch.steps.len() as f32).backward();
-                let grads = GradientsParams::from_grads(grads, &model);
-                model = optimizer.step(lr, model, grads);
-            }
         }
 
-        let n = step_count.max(1) as f32;
+        let n = update_count.max(1) as f32;
         let losses = PpoLosses {
             policy_loss: sum_policy / n,
             value_loss: sum_value / n,

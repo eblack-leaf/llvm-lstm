@@ -60,6 +60,8 @@ enum Command {
         value_coef: f32,
         #[arg(long, default_value = "0.01")]
         entropy_coef: f32,
+        #[arg(long, default_value = "64")]
+        mini_batch_size: usize,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -96,6 +98,7 @@ fn main() {
             clip_epsilon,
             value_coef,
             entropy_coef,
+            mini_batch_size,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -116,6 +119,7 @@ fn main() {
                 clip_epsilon,
                 value_coef,
                 entropy_coef,
+                mini_batch_size,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
