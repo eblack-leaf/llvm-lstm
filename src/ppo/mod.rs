@@ -212,7 +212,6 @@ impl Ppo {
                 let approx_kl = (old_log_probs.clone() - new_log_probs.clone())
                     .mean()
                     .into_scalar();
-                sum_kl += approx_kl;
 
                 // Policy loss [n]: clipped surrogate (negated, to minimise).
                 let ratio = (new_log_probs - old_log_probs).exp();
@@ -230,14 +229,17 @@ impl Ppo {
                 let p = log_p.clone().exp();
                 let entropy = -(p * log_p).sum_dim(1).flatten::<1>(0, 1); // [n]
 
-                // Extract scalars before backward.
+                // Extract scalars before backward — weighted by chunk size so the
+                // tail chunk (which may be smaller than mini_batch_size) doesn't
+                // count the same as a full chunk in the per-epoch averages.
                 let p_mean = policy_loss.clone().mean().into_scalar();
                 let v_mean = (value_loss.clone() * self.value_coef).mean().into_scalar();
                 let e_mean = entropy.clone().mean().into_scalar();
-                sum_policy += p_mean;
-                sum_value += v_mean;
-                sum_entropy += e_mean;
-                update_count += 1;
+                sum_policy += p_mean * n as f32;
+                sum_value += v_mean * n as f32;
+                sum_entropy += e_mean * n as f32;
+                sum_kl += approx_kl * n as f32;
+                update_count += n;
 
                 let total = (policy_loss + value_loss * self.value_coef
                     - entropy * self.entropy_coef)
