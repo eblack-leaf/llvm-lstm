@@ -147,10 +147,23 @@ impl Logger {
                 lr,
             );
             self.epoch_bar.println(line);
+
+            if let Some(ra) = &metrics.ret_adv {
+                let line2 = format!(
+                    "         ret  mean={:+.3}  std={:.3}  [{:+.3}, {:+.3}]  noop={:.0}%  adv_std={:.3}",
+                    ra.ret_mean,
+                    ra.ret_std,
+                    ra.ret_min,
+                    ra.ret_max,
+                    ra.noop_frac * 100.0,
+                    ra.adv_std,
+                );
+                self.epoch_bar.println(line2);
+            }
         }
 
         if let Some(f) = &mut self.file {
-            let record = serde_json::json!({
+            let mut record = serde_json::json!({
                 "epoch":                  epoch,
                 "policy_loss":            metrics.policy_loss(),
                 "value_loss":             metrics.value_loss(),
@@ -167,6 +180,14 @@ impl Logger {
                 "avg_func_ir_ms":         metrics.avg_func_ir_ms(),
                 "lr":                     lr,
             });
+            if let Some(ra) = &metrics.ret_adv {
+                record["ret_mean"]  = serde_json::json!(ra.ret_mean);
+                record["ret_std"]   = serde_json::json!(ra.ret_std);
+                record["ret_min"]   = serde_json::json!(ra.ret_min);
+                record["ret_max"]   = serde_json::json!(ra.ret_max);
+                record["noop_frac"] = serde_json::json!(ra.noop_frac);
+                record["adv_std"]   = serde_json::json!(ra.adv_std);
+            }
             let _ = writeln!(f, "{}", record);
             let _ = f.flush();
         }

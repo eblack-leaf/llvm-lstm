@@ -38,6 +38,17 @@ impl Ema {
     fn get(&self) -> f32 { self.value }
 }
 
+/// Snapshot of return/advantage distribution for one epoch.
+pub(crate) struct RetAdvStats {
+    pub(crate) ret_mean:   f32,
+    pub(crate) ret_std:    f32,
+    pub(crate) ret_min:    f32,
+    pub(crate) ret_max:    f32,
+    /// Fraction of steps whose |return| < 0.01 — effectively no attribution.
+    pub(crate) noop_frac:  f32,
+    pub(crate) adv_std:    f32,
+}
+
 pub(crate) struct Metrics {
     pub(crate) epoch: usize,
 
@@ -56,6 +67,9 @@ pub(crate) struct Metrics {
     // Per-epoch episode stats (reset in next_epoch)
     episode_len_avg:   RunningAvg,
     final_speedup_avg: RunningAvg,
+
+    // Return/advantage distribution snapshot for the most recent epoch.
+    pub(crate) ret_adv: Option<RetAdvStats>,
 
     // Per-epoch timing (ms), reset in next_epoch
     pub(crate) per_func_ir_ms_total: u64,
@@ -79,6 +93,7 @@ impl Metrics {
             speedup_ema:       Ema::new(ema_alpha),
             episode_len_avg:   RunningAvg::new(),
             final_speedup_avg: RunningAvg::new(),
+            ret_adv:           None,
             per_func_ir_ms_total: 0,
             per_func_ir_ms_count: 0,
             episode_collection_ms: 0,
@@ -113,6 +128,39 @@ impl Metrics {
         self.explained_var_avg.push(ev);
     }
 
+    /// Snapshot the return and advantage distributions for this epoch.
+    /// Call after computing returns/advantages, before the PPO update.
+    pub(crate) fn update_returns_advs(
+        &mut self,
+        returns: &[Vec<f32>],
+        advantages: &[Vec<f32>],
+    ) {
+        let rets: Vec<f32> = returns.iter().flatten().copied().collect();
+        let advs: Vec<f32> = advantages.iter().flatten().copied().collect();
+        if rets.is_empty() {
+            return;
+        }
+
+        let n = rets.len() as f32;
+        let ret_mean = rets.iter().sum::<f32>() / n;
+        let ret_var = rets.iter().map(|r| (r - ret_mean).powi(2)).sum::<f32>() / n;
+        let ret_std = ret_var.sqrt();
+        let ret_min = rets.iter().cloned().fold(f32::INFINITY, f32::min);
+        let ret_max = rets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let noop_frac = rets.iter().filter(|r| r.abs() < 0.01).count() as f32 / n;
+
+        let adv_std = if advs.is_empty() {
+            0.0
+        } else {
+            let m = advs.len() as f32;
+            let mean = advs.iter().sum::<f32>() / m;
+            let var = advs.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / m;
+            var.sqrt()
+        };
+
+        self.ret_adv = Some(RetAdvStats { ret_mean, ret_std, ret_min, ret_max, noop_frac, adv_std });
+    }
+
     pub(crate) fn update_ppo(&mut self, losses: PpoLosses) {
         self.policy_loss_avg.push(losses.policy_loss);
         self.value_loss_avg.push(losses.value_loss);
@@ -145,6 +193,7 @@ impl Metrics {
         self.explained_var_avg.reset();
         self.episode_len_avg.reset();
         self.final_speedup_avg.reset();
+        self.ret_adv = None;
         self.episode_collection_ms = 0;
         self.ppo_update_ms = 0;
     }

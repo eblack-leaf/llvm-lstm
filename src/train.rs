@@ -219,6 +219,7 @@ impl Trainer {
                 metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
 
                 let advantages = self.advantages.compute(&all_returns, &results);
+                metrics.update_returns_advs(&all_returns, &advantages);
                 let batch = Ppo::batch(&results, &all_returns, &advantages);
                 let lr = scheduler.step();
 

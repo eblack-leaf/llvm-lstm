@@ -44,9 +44,13 @@ impl Advantages for BaselineAdvantage {
                 let var =
                     flat.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / flat.len() as f32;
                 let std = var.sqrt().max(1e-8);
+                // Scale only — do not subtract mean. This stabilises gradient magnitude
+                // while preserving absolute sign: a step with return=0 (Stop, no-ops)
+                // keeps its positive advantage relative to negative-return steps.
+                // Full whitening would center everything to zero and destroy that signal.
                 for ep in &mut all_advantages {
                     for a in ep.iter_mut() {
-                        *a = (*a - mean) / std;
+                        *a /= std;
                     }
                 }
             }

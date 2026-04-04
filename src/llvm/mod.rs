@@ -36,7 +36,7 @@ impl Llvm {
     pub(crate) async fn ir(&self, src: &Source) -> Result<Ir> {
         let out = self.work_dir.join("base.ll");
         let status = tokio::process::Command::new(&self.clang)
-            .args(["-O0", "-Xclang", "-disable-llvm-optzns", "-emit-llvm", "-S"])
+            .args(["-O3", "-Xclang", "-disable-llvm-optzns", "-emit-llvm", "-S"])
             .arg(&src.file)
             .arg("-o")
             .arg(&out)

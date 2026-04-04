@@ -12,6 +12,7 @@ use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use crate::ppo::advantages::baseline::BaselineAdvantage;
 
 mod config;
 mod llvm;
@@ -126,8 +127,8 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(DeltaWeightedReturn::new(true)),
-                Box::new(RankAdvantage::new(true)),
+                Box::new(DeltaWeightedReturn::new()),
+                Box::new(BaselineAdvantage::new(false)),
                 LogMode::FileAndStdout,
                 Some(log_path),
             );

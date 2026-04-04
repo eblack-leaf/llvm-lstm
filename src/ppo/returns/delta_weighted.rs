@@ -1,35 +1,27 @@
 use crate::ppo::episode::Results;
 use crate::ppo::returns::Returns;
 
-/// Credits the episode-level speedup to each step proportionally to how much
-/// it changed the IR, measured as the *relative* marginal delta at each step.
+/// Credits the episode-level speedup to each step by how much that step
+/// changed the IR, measured as the magnitude of the relative marginal delta.
 ///
 /// `delta_features[t]` is cumulative: `current_IR[t] − base_IR`.
-/// Marginal at step t = `delta[t] − delta[t−1]`  (with `delta[−1] = 0`).
+/// Marginal at step t = `delta[t] − delta[t−1]`  (delta[−1] = 0).
+/// Each dimension is normalised by `|base| + ε` so count features
+/// and ratio features are on the same scale.
 ///
-/// Each marginal dimension is divided by the corresponding base-IR value
-/// (plus ε) so that large-scale ratio features (avg_bb_size, load_store_ratio)
-/// and small log-count changes are treated on the same relative footing.
+/// weight[t] = Σ |normalised_marginal[t]|   (always ≥ 0)
 ///
-/// Two modes controlled by `penalize_growth`:
+/// The most impactful step gets return = episode_speedup.
+/// Other steps get a proportional fraction.  No-op steps get 0.
+/// If nothing changed at all, every step gets episode_speedup (uniform fallback).
 ///
-/// `false` — unsigned: weight[t] = Σ |normalised_marginal[t]|
-///   Any impactful pass gets credit/blame; direction of change is ignored.
-///
-/// `true` — signed: weight[t] = −Σ normalised_marginal[t]
-///   IR shrinkage → positive weight (credit).
-///   IR growth    → negative weight (penalty).
-///
-/// Weights are then normalised by their L1 norm so they sum to ±1.
-///
-/// If nothing changed at all, falls back to uniform credit.
-pub(crate) struct DeltaWeightedReturn {
-    pub(crate) penalize_growth: bool,
-}
+/// The sign of the return comes entirely from the episode outcome —
+/// bad episode → all returns ≤ 0, good episode → all returns ≥ 0.
+pub(crate) struct DeltaWeightedReturn;
 
 impl DeltaWeightedReturn {
-    pub(crate) fn new(penalize_growth: bool) -> Self {
-        Self { penalize_growth }
+    pub(crate) fn new() -> Self {
+        Self
     }
 }
 
@@ -53,34 +45,25 @@ impl Returns for DeltaWeightedReturn {
         let weights: Vec<f32> = (0..n)
             .map(|t| {
                 let curr = &results.steps[t].delta_features;
-                let prev: &[f32] = if t == 0 {
-                    // delta[-1] is zero, so marginal = curr itself
-                    &[]
-                } else {
-                    &results.steps[t - 1].delta_features
-                };
-
-                // Relative marginal: (curr - prev) / (|base| + ε) per dimension.
-                let rel_sum: f32 = curr.iter().enumerate().map(|(i, &c)| {
+                let prev: &[f32] = if t == 0 { &[] } else { &results.steps[t - 1].delta_features };
+                results.steps[t].delta_features.iter().enumerate().map(|(i, &c)| {
                     let p = if prev.is_empty() { 0.0 } else { prev[i] };
                     let marginal = c - p;
                     let scale = base[i].abs().max(0.1) + 1e-6;
-                    marginal / scale
-                }).sum();
-
-                if self.penalize_growth {
-                    -rel_sum  // shrinkage (rel_sum < 0) → positive weight
-                } else {
-                    rel_sum.abs()
-                }
+                    (marginal / scale).abs()
+                }).sum::<f32>()
             })
             .collect();
 
-        let l1: f32 = weights.iter().map(|w| w.abs()).sum();
-        if l1 < 1e-8 {
-            return vec![reward / n as f32; n];
+        let max_w = weights.iter().cloned().fold(0.0f32, f32::max);
+        if max_w < 1e-8 {
+            return vec![reward.signum(); n];
         }
 
-        weights.iter().map(|&w| reward * w / l1).collect()
+        // Normalise to [-1, 1]: most impactful step gets sign(speedup), others
+        // proportionally less, no-ops get 0.  V learns a fraction in [-1, 1]
+        // regardless of speedup magnitude, so value loss is always O(1).
+        let sign = reward.signum();
+        weights.iter().map(|&w| sign * w / max_w).collect()
     }
 }
