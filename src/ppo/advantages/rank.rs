@@ -58,12 +58,9 @@ impl Advantages for RankAdvantage {
             }
         };
 
-        // Per-step advantage: per-step return minus value estimate at that step.
-        // V(s_t) is trained to predict the same per-step returns (from DeltaWeightedReturn),
-        // so it is a valid variance-reducing baseline here.
-        // The episode rank score is applied as a multiplicative rescaling after subtracting
-        // the baseline — this keeps the ordinal episode ordering signal while grounding
-        // advantages in the per-step attribution from the return function.
+        // Per-step advantage: episode rank score minus value estimate at that step.
+        // results[i].values gives V(s_t); the rank score replaces the raw return so that
+        // episode ordering, not speedup magnitude, drives the gradient.
         let mut all_advantages: Vec<Vec<f32>> = returns
             .iter()
             .enumerate()
@@ -72,7 +69,7 @@ impl Advantages for RankAdvantage {
                 ep_returns
                     .iter()
                     .zip(&results[ep_idx].values)
-                    .map(|(r, v)| score * (r - v))
+                    .map(|(_, v)| score - v)
                     .collect()
             })
             .collect();
