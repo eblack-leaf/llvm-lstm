@@ -37,7 +37,7 @@ enum Command {
         clang: String,
         #[arg(long, default_value = "opt-20")]
         opt: String,
-        #[arg(long, default_value = "1000")]
+        #[arg(long, default_value = "100")]
         epochs: usize,
         #[arg(long, default_value = "4")]
         ppo_epochs: usize,
@@ -55,13 +55,13 @@ enum Command {
         per_step_benchmark: bool,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
-        #[arg(long, default_value = "1e-3")]
+        #[arg(long, default_value = "3e-4")]
         learning_rate: f64,
-        #[arg(long, default_value = "0.2")]
+        #[arg(long, default_value = "0.1")]
         clip_epsilon: f32,
         #[arg(long, default_value = "0.5")]
         value_coef: f32,
-        #[arg(long, default_value = "0.01")]
+        #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
         #[arg(long, default_value = "64")]
         mini_batch_size: usize,
@@ -127,7 +127,7 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(DeltaWeightedReturn::new(0.05, max_seq_len, 0.1)),
+                Box::new(DeltaWeightedReturn::new(0.0025, max_seq_len, 0.002)),
                 Box::new(BaselineAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
