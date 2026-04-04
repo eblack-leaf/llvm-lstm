@@ -127,7 +127,7 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(DeltaWeightedReturn::new(0.0025, max_seq_len, 0.002)),
+                Box::new(DeltaWeightedReturn::new(0.000025, max_seq_len, 0.0002)),
                 Box::new(BaselineAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
