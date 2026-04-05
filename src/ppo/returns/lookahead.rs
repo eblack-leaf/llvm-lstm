@@ -31,13 +31,14 @@ impl LookaheadCumulativeReturn {
 impl Returns for LookaheadCumulativeReturn {
     fn compute_batch(&self, results: &[Results]) -> Vec<Vec<f32>> {
         let mut all_returns: Vec<Vec<f32>> = results.iter().map(|r| self.compute(r)).collect();
-        let batch_max = all_returns.iter().flatten()
-            .map(|r| r.abs())
-            .fold(0.0f32, f32::max)
-            .max(1e-4);
+        let flat: Vec<f32> = all_returns.iter().flatten().copied().collect();
+        let n = flat.len() as f32;
+        let mean = flat.iter().sum::<f32>() / n;
+        let var = flat.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / n;
+        let batch_std = var.sqrt().max(1e-4);
         for ep in &mut all_returns {
             for r in ep.iter_mut() {
-                *r /= batch_max;
+                *r /= batch_std;
             }
         }
         all_returns
