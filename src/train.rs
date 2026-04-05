@@ -278,6 +278,7 @@ impl Trainer {
             metrics.update_episode(&results);
 
             let all_returns: Vec<Vec<f32>> = self.returns.compute_batch(&results);
+            metrics.store_stats = self.returns.store_stats();
 
             // Explained variance from rollout values vs computed returns (pre-update).
             let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();

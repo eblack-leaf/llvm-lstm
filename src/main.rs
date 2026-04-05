@@ -186,7 +186,7 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(LookaheadCumulativeReturn::new(0.99)),
+                Box::new(EpisodicPatternReturn::new(300, 0.2)),
                 Box::new(BaselineAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),

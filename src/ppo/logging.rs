@@ -129,7 +129,6 @@ impl Logger {
             } else {
                 format!("{:+.4}", ema).red().to_string()
             };
-
             let total_s = (metrics.total_elapsed_ms + metrics.episode_collection_ms + metrics.ppo_update_ms) as f64 / 1000.0;
             let total_str = if total_s < 60.0 {
                 format!("{:.0}s", total_s)
@@ -137,39 +136,54 @@ impl Logger {
                 format!("{:.1}m", total_s / 60.0)
             };
 
+            // Line 1: performance + timing
             let cache_str = metrics.lookahead_cache_hit_pct()
                 .map(|p| format!("  cache={:.1}%", p))
                 .unwrap_or_default();
-
-            let line = format!(
-                "epoch {:>5}  speedup={}  ema={}  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}  ep_len={}  collect={}  ppo={}  total={}{}",
+            self.epoch_bar.println(format!(
+                "epoch {:>5}  speedup={}  ema={}  ep_len={}  collect={}  ppo={}  total={}{}",
                 epoch,
                 speedup_str,
                 ema_str,
-                format!("{:+.4}", metrics.policy_loss()).yellow(),
-                format!("{:.4}", metrics.value_loss()).yellow(),
-                format!("{:.1}%", metrics.entropy_pct()).yellow(),
-                metrics.kl_div(),
-                metrics.explained_variance(),
                 format!("{:.1}", metrics.avg_episode_len()).bold(),
                 format!("{}ms", metrics.episode_collection_ms).cyan(),
                 format!("{}ms", metrics.ppo_update_ms).cyan(),
                 total_str.cyan().to_string(),
                 cache_str,
-            );
-            self.epoch_bar.println(line);
+            ));
 
+            // Line 2: training losses
+            self.epoch_bar.println(format!(
+                "         losses  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}",
+                format!("{:+.4}", metrics.policy_loss()).yellow(),
+                format!("{:.4}",  metrics.value_loss()).yellow(),
+                format!("{:.1}%", metrics.entropy_pct()).yellow(),
+                metrics.kl_div(),
+                metrics.explained_variance(),
+            ));
+
+            // Line 3 (if ret stats)
             if let Some(ra) = &metrics.ret_adv {
-                let line2 = format!(
-                    "         ret  mean={:+.3}  std={:.3}  [{:+.3}, {:+.3}]  noop={:.0}%  adv_std={:.3}",
-                    ra.ret_mean,
-                    ra.ret_std,
-                    ra.ret_min,
-                    ra.ret_max,
-                    ra.noop_frac * 100.0,
-                    ra.adv_std,
-                );
-                self.epoch_bar.println(line2);
+                self.epoch_bar.println(format!(
+                    "         ret    mean={:+.3}  std={:.3}  [{:+.3}, {:+.3}]  noop={:.0}%  adv_std={:.3}",
+                    ra.ret_mean, ra.ret_std, ra.ret_min, ra.ret_max,
+                    ra.noop_frac * 100.0, ra.adv_std,
+                ));
+            }
+
+            // Line 4 (if store stats)
+            if let Some(ss) = &metrics.store_stats {
+                let func_parts: Vec<String> = ss.per_func.iter().map(|f| {
+                    format!(
+                        "{}[n={} best={:+.3} spread={:.3} div={:.0}%]",
+                        f.func_name, f.entries, f.best, f.spread, f.diversity * 100.0,
+                    )
+                }).collect();
+                self.epoch_bar.println(format!(
+                    "         store  total={}  {}",
+                    ss.total_entries,
+                    func_parts.join("  "),
+                ));
             }
         }
 
@@ -200,6 +214,20 @@ impl Logger {
                 record["ret_max"]   = serde_json::json!(ra.ret_max);
                 record["noop_frac"] = serde_json::json!(ra.noop_frac);
                 record["adv_std"]   = serde_json::json!(ra.adv_std);
+            }
+            if let Some(ss) = &metrics.store_stats {
+                let per_func: serde_json::Value = ss.per_func.iter().map(|f| {
+                    serde_json::json!({
+                        "func":      f.func_name,
+                        "entries":   f.entries,
+                        "best":      f.best,
+                        "worst":     f.worst,
+                        "spread":    f.spread,
+                        "diversity": f.diversity,
+                    })
+                }).collect::<Vec<_>>().into();
+                record["store_total"]   = serde_json::json!(ss.total_entries);
+                record["store_per_func"] = per_func;
             }
             let _ = writeln!(f, "{}", record);
             let _ = f.flush();

@@ -1,7 +1,7 @@
 use crate::llvm::pass::Pass;
 use crate::ppo::episode::Results;
-use crate::ppo::returns::Returns;
-use std::collections::HashMap;
+use crate::ppo::returns::{FuncStoreStats, Returns, StoreStats};
+use std::collections::{HashMap, HashSet};
 
 /// Per-step return based on ordered pass co-occurrence patterns in top-K episodes.
 ///
@@ -24,21 +24,25 @@ use std::collections::HashMap;
 /// score, step C earns the (A→C) and (B→C) pair scores. Each step gets credit
 /// as it completes an ordered pair with any prior pass in the current episode.
 ///
+/// Per-step return = pattern_score * terminal_scale. No backward accumulation —
+/// pattern score is already a local credit signal; discounting would spread
+/// future rewards into earlier steps including no-ops.
 /// No-op: delta_features == 0 → reward 0.0 exactly, no hashing needed.
 /// Cold start: empty store → uniform 1.0 so terminal scaling still provides signal.
 pub(crate) struct EpisodicPatternReturn {
-    pub(crate) gamma: f32,
     /// How many top episodes to retain per function.
     pub(crate) top_k: usize,
-    /// Episodes more than this below the best are evicted as outliers.
+    /// Fraction of the store's speedup range to retain.
+    /// 0.2 = keep only the top 20% of the range: cutoff = best - 0.2 * (best - worst).
+    /// Keeps the store tight relative to its own distribution, not an absolute gap.
     pub(crate) prune_threshold: f32,
     /// func_name → [(speedup, pass_sequence)], sorted descending, capped at top_k.
     store: HashMap<String, Vec<(f32, Vec<Pass>)>>,
 }
 
 impl EpisodicPatternReturn {
-    pub(crate) fn new(gamma: f32, top_k: usize, prune_threshold: f32) -> Self {
-        Self { gamma, top_k, prune_threshold, store: HashMap::new() }
+    pub(crate) fn new(top_k: usize, prune_threshold: f32) -> Self {
+        Self { top_k, prune_threshold, store: HashMap::new() }
     }
 
     fn update_store(&mut self, results: &[Results]) {
@@ -51,10 +55,16 @@ impl EpisodicPatternReturn {
             entry.push((bm.speedup, seq));
             entry.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             entry.truncate(self.top_k);
-            // Evict entries more than prune_threshold below the best.
-            // Keeps the store tight — outlier bad episodes don't dilute pattern signal.
-            if let Some(&(best, _)) = entry.first() {
-                entry.retain(|(sp, _)| best - sp <= self.prune_threshold);
+            // Prune entries outside the top prune_threshold fraction of the range.
+            // cutoff = best - prune_threshold * (best - worst)
+            // Relative to the store's own spread — stays tight whether episodes are
+            // all negative early on or all positive later.
+            if entry.len() >= 2 {
+                let best  = entry[0].0;
+                let worst = entry[entry.len() - 1].0;
+                let range = (best - worst).max(1e-6);
+                let cutoff = best - self.prune_threshold * range;
+                entry.retain(|(sp, _)| *sp >= cutoff);
             }
         }
     }
@@ -114,6 +124,28 @@ fn contains_ordered_pair(seq: &[Pass], first: Pass, second: Pass) -> bool {
     false
 }
 
+/// Mean pairwise Jaccard distance across all pairs of pass-set sequences in the store.
+/// Jaccard similarity(A,B) = |A∩B| / |A∪B|. Distance = 1 - similarity.
+/// Returns 0.0 when there are fewer than 2 entries (can't measure diversity).
+fn store_diversity(episodes: &[(f32, Vec<Pass>)]) -> f32 {
+    if episodes.len() < 2 { return 0.0; }
+    let sets: Vec<HashSet<Pass>> = episodes.iter()
+        .map(|(_, seq)| seq.iter().copied().collect())
+        .collect();
+    let mut total = 0.0f32;
+    let mut pairs = 0u32;
+    for i in 0..sets.len() {
+        for j in i + 1..sets.len() {
+            let inter = sets[i].intersection(&sets[j]).count() as f32;
+            let union = sets[i].union(&sets[j]).count() as f32;
+            let sim = if union == 0.0 { 1.0 } else { inter / union };
+            total += 1.0 - sim;
+            pairs += 1;
+        }
+    }
+    total / pairs as f32
+}
+
 impl Returns for EpisodicPatternReturn {
     fn compute(&self, results: &Results) -> Vec<f32> {
         let n = results.log_probs.len();
@@ -132,15 +164,10 @@ impl Returns for EpisodicPatternReturn {
             self.pattern_score(&results.func_name, &results.actions, t)
         }).collect();
 
-        for r in &mut rewards { *r *= scale; }
-
-        let mut returns = vec![0.0f32; n];
-        let mut running = 0.0f32;
-        for t in (0..n).rev() {
-            running = rewards[t] + self.gamma * running;
-            returns[t] = running;
-        }
-        returns
+        // Per-step return = pattern_score * terminal_scale. No backward accumulation —
+        // pattern score is already a local credit signal; discounting would spread
+        // future rewards into earlier steps including no-ops.
+        rewards.iter().map(|&r| r * scale).collect()
     }
 
     fn compute_batch(&mut self, results: &[Results]) -> Vec<Vec<f32>> {
@@ -162,5 +189,25 @@ impl Returns for EpisodicPatternReturn {
             }
         }
         all_returns
+    }
+
+    fn store_stats(&self) -> Option<StoreStats> {
+        if self.store.is_empty() { return None; }
+        let mut per_func: Vec<FuncStoreStats> = self.store.iter().map(|(func, episodes)| {
+            let entries = episodes.len();
+            let best  = episodes.first().map(|(s, _)| *s).unwrap_or(0.0);
+            let worst = episodes.last().map(|(s, _)| *s).unwrap_or(0.0);
+            FuncStoreStats {
+                func_name: func.clone(),
+                entries,
+                best,
+                worst,
+                spread:    best - worst,
+                diversity: store_diversity(episodes),
+            }
+        }).collect();
+        per_func.sort_by(|a, b| a.func_name.cmp(&b.func_name));
+        let total_entries = per_func.iter().map(|f| f.entries).sum();
+        Some(StoreStats { total_entries, per_func })
     }
 }

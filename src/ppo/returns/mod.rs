@@ -6,6 +6,24 @@ pub(crate) mod lookahead;
 
 use crate::ppo::episode::Results;
 
+/// Per-function snapshot of the survivorship store for logging.
+pub(crate) struct FuncStoreStats {
+    pub(crate) func_name:  String,
+    pub(crate) entries:    usize,
+    pub(crate) best:       f32,
+    /// Worst speedup still kept after pruning.
+    pub(crate) worst:      f32,
+    /// best - worst within the store.
+    pub(crate) spread:     f32,
+    /// Mean pairwise Jaccard distance between stored pass-sets (0=identical, 1=fully diverse).
+    pub(crate) diversity:  f32,
+}
+
+pub(crate) struct StoreStats {
+    pub(crate) total_entries: usize,
+    pub(crate) per_func:      Vec<FuncStoreStats>,
+}
+
 /// Produces a per-step return for each action taken in an episode.
 /// The return is what gets compared against V(s_t) to form the advantage.
 ///
@@ -23,4 +41,8 @@ pub(crate) trait Returns {
     fn compute_batch(&mut self, results: &[Results]) -> Vec<Vec<f32>> {
         results.iter().map(|r| self.compute(r)).collect()
     }
+
+    /// Snapshot of the survivorship store for logging. Returns None for
+    /// implementors that don't maintain a store (e.g. LookaheadCumulativeReturn).
+    fn store_stats(&self) -> Option<StoreStats> { None }
 }

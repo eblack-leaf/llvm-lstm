@@ -1,4 +1,5 @@
 use crate::ppo::episode::Results;
+use crate::ppo::returns::StoreStats;
 use std::collections::HashMap;
 use crate::ppo::model::ACTIONS;
 
@@ -78,6 +79,9 @@ pub(crate) struct Metrics {
     lookahead_hits: u64,
     lookahead_misses: u64,
 
+    // Survivorship store snapshot — Some when using EpisodicPatternReturn (reset each epoch)
+    pub(crate) store_stats: Option<StoreStats>,
+
     // Per-epoch timing (ms), reset in next_epoch
     pub(crate) per_func_ir_ms_total: u64,
     pub(crate) per_func_ir_ms_count: u32,
@@ -102,6 +106,7 @@ impl Metrics {
             final_speedup_avg: RunningAvg::new(),
             func_speedup_avgs: HashMap::new(),
             ret_adv:           None,
+            store_stats:       None,
             lookahead_hits: 0,
             lookahead_misses: 0,
             per_func_ir_ms_total: 0,
@@ -209,6 +214,7 @@ impl Metrics {
         self.final_speedup_avg.reset();
         self.func_speedup_avgs.clear();
         self.ret_adv = None;
+        self.store_stats = None;
         self.lookahead_hits = 0;
         self.lookahead_misses = 0;
         self.episode_collection_ms = 0;
