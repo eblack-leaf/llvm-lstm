@@ -11,8 +11,35 @@ use std::sync::Arc;
 /// collide — speedup is relative to each function's own -O3 baseline.
 pub(crate) type LookaheadCache = Arc<DashMap<(String, [u8; 32], u8), f32>>;
 
+/// Persist the cache to disk. Entries are bincode-serialised as a flat vec.
+pub(crate) async fn save_lookahead_cache(cache: &LookaheadCache, path: &std::path::Path) -> Result<()> {
+    let entries: Vec<((String, [u8; 32], u8), f32)> =
+        cache.iter().map(|e| (e.key().clone(), *e.value())).collect();
+    let bytes = bincode::serialize(&entries).context("serialize lookahead cache")?;
+    tokio::fs::write(path, bytes).await.context("write lookahead cache")?;
+    Ok(())
+}
+
+/// Load a previously saved cache from disk. Returns an empty cache if the file
+/// does not exist, so callers can unconditionally call this on startup.
+pub(crate) async fn load_lookahead_cache(path: &std::path::Path) -> Result<LookaheadCache> {
+    let cache = Arc::new(DashMap::new());
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let entries: Vec<((String, [u8; 32], u8), f32)> =
+                bincode::deserialize(&bytes).context("deserialize lookahead cache")?;
+            for (key, value) in entries {
+                cache.insert(key, value);
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("read lookahead cache"),
+    }
+    Ok(cache)
+}
+
 /// Index of Pass::Stop in ppo::model::ACTIONS. Must stay in sync with that array.
-const STOP_PASS_IDX: u8 = 28;
+pub(crate) const STOP_PASS_IDX: u8 = 28;
 
 pub(crate) mod benchmark;
 pub(crate) mod functions;

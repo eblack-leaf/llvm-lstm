@@ -1,6 +1,6 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
-use crate::llvm::{Llvm, LookaheadCache};
+use crate::llvm::{Llvm, LookaheadCache, load_lookahead_cache, save_lookahead_cache};
 use blake3;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -100,9 +100,14 @@ impl Trainer {
             let arch_cfg = Arch::cfg(&self.cfg);
             let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
             let mut best_mean = f32::NEG_INFINITY;
-            // Persists across epochs — (ir_content_hash, pass_idx) → speedup is fully
-            // deterministic, policy changes only affect which IR states get explored.
-            let lookahead_cache: LookaheadCache = Arc::new(DashMap::new());
+            // Persists across epochs — (func, ir_hash, pass_idx) → speedup is fully
+            // deterministic. Optionally loaded from / saved to disk so restarts on
+            // the same machine skip already-benchmarked states.
+            let lookahead_cache: LookaheadCache = if let Some(ref p) = self.cfg.lookahead_cache_file {
+                load_lookahead_cache(p).await.expect("load lookahead cache")
+            } else {
+                Arc::new(DashMap::new())
+            };
 
             let mut model = Arch::init(arch_cfg.clone(), &self.device);
             let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
@@ -215,13 +220,16 @@ impl Trainer {
                                         .expect("apply_one");
                                 }
                                 // Compute per-step marginal delta: features[t] - features[t-1].
-                                // Zero for Stop (IR unchanged).
-                                let delta_features = {
+                                // Zero for Stop (IR unchanged). Also capture the post-action
+                                // IR hash for the benchmark cache check below.
+                                let (delta_features, post_ir_hash) = {
                                     let content =
-                                        tokio::fs::read_to_string(&episode.current_ir.file)
+                                        tokio::fs::read(&episode.current_ir.file)
                                             .await
                                             .expect("read current IR");
-                                    let current = Features::from_ll_str(&content)
+                                    let post_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
+                                    let content_str = String::from_utf8_lossy(&content);
+                                    let current = Features::from_ll_str(&content_str)
                                         .expect("parse current IR features")
                                         .to_vec();
                                     let delta: Vec<f32> = prev_features
@@ -230,21 +238,30 @@ impl Trainer {
                                         .map(|(p, c)| c - p)
                                         .collect();
                                     prev_features = current;
-                                    delta
+                                    (delta, post_hash)
                                 };
                                 let benchmark = if done || self.cfg.per_step_benchmark {
-                                    let bin = episode
-                                        .llvm
-                                        .compile(&episode.current_ir)
-                                        .await
-                                        .expect("compile");
-                                    let mut bm = episode
-                                        .llvm
-                                        .benchmark(&bin, episode.cfg.benchmark_runs, episode.cfg.benchmark_iters)
-                                        .await
-                                        .expect("benchmark");
-                                    bm.speedup = episode.baselines.speedup_vs_o3(bm.mean_ns);
-                                    Some(bm)
+                                    // Check if we already have this IR's benchmark in the
+                                    // lookahead cache — Stop entry gives bench(current_ir).
+                                    let cache_key = (episode.func_name.clone(), post_ir_hash, crate::llvm::STOP_PASS_IDX);
+                                    if let Some(&cached_speedup) = cache.get(&cache_key).as_deref() {
+                                        episode.lookahead_hits += 1;
+                                        Some(crate::llvm::benchmark::Benchmark { mean_ns: 0, speedup: cached_speedup })
+                                    } else {
+                                        let bin = episode
+                                            .llvm
+                                            .compile(&episode.current_ir)
+                                            .await
+                                            .expect("compile");
+                                        let mut bm = episode
+                                            .llvm
+                                            .benchmark(&bin, episode.cfg.benchmark_runs, episode.cfg.benchmark_iters)
+                                            .await
+                                            .expect("benchmark");
+                                        bm.speedup = episode.baselines.speedup_vs_o3(bm.mean_ns);
+                                        cache.insert(cache_key, bm.speedup);
+                                        Some(bm)
+                                    }
                                 } else {
                                     None
                                 };
@@ -326,6 +343,10 @@ impl Trainer {
                     )
                     .expect("checkpoint save");
                     logger.log_best(epoch, best_mean);
+                }
+
+                if let Some(ref p) = self.cfg.lookahead_cache_file {
+                    save_lookahead_cache(&lookahead_cache, p).await.expect("save lookahead cache");
                 }
 
                 metrics.next_epoch();
