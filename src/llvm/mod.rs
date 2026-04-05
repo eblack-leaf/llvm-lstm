@@ -6,10 +6,13 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Shared cache mapping (blake3 hash of IR content, pass index) to speedup.
-/// Keyed on content hash so episodes that reach the same IR state via different
-/// paths still get cache hits. Pass index is the position in ACTIONS.
-pub(crate) type LookaheadCache = Arc<DashMap<([u8; 32], u8), f32>>;
+/// Shared cache mapping (func_name, blake3 hash of IR content, pass index) to speedup.
+/// Function name scopes entries so identical IR from different functions doesn't
+/// collide — speedup is relative to each function's own -O3 baseline.
+pub(crate) type LookaheadCache = Arc<DashMap<(String, [u8; 32], u8), f32>>;
+
+/// Index of Pass::Stop in ppo::model::ACTIONS. Must stay in sync with that array.
+const STOP_PASS_IDX: u8 = 28;
 
 pub(crate) mod benchmark;
 pub(crate) mod functions;
@@ -122,24 +125,31 @@ impl Llvm {
     /// Bench a lookahead candidate, returning a cached speedup if the same
     /// (IR content, pass_idx) has been seen before this epoch.
     /// On a miss: applies the pass, compiles, benches, stores in cache, returns speedup.
+    /// Returns `(speedup, noop_hit)`. `noop_hit` is true when the pass was
+    /// detected as a no-op (output IR unchanged) and resolved from Stop's cached
+    /// speedup without running a benchmark — caller should count this as a hit.
+    /// Returns `(speedup, noop_hit)`. `noop_hit` is true when the pass was
+    /// detected as a no-op (output IR unchanged) and resolved from Stop's cached
+    /// speedup without running a benchmark — caller should count this as a hit.
     pub(crate) async fn bench_lookahead_cached(
         &self,
         ir: &Ir,
         pass: Pass,
         pass_idx: usize,
         step: usize,
+        func_name: &str,
         baselines: &Baselines,
         runs: usize,
         iters: usize,
         cache: &LookaheadCache,
-    ) -> Result<f32> {
+    ) -> Result<(f32, bool)> {
         // Hash the IR content — same content == same state regardless of path.
         let content = tokio::fs::read(&ir.file).await.context("read IR for hash")?;
         let hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-        let key = (hash, pass_idx as u8);
+        let key = (func_name.to_string(), hash, pass_idx as u8);
 
         if let Some(cached) = cache.get(&key) {
-            return Ok(*cached);
+            return Ok((*cached, false));
         }
 
         let out_ir = if pass == Pass::Stop {
@@ -147,11 +157,29 @@ impl Llvm {
         } else {
             self.apply_one_lookahead(ir, pass, step, pass_idx).await?
         };
+
+        // No-op detection: if the pass didn't change the IR, its speedup equals
+        // Stop's — benchmarking the same IR twice is wasteful. Use Stop's cached
+        // result if available; otherwise fall through to compile+bench which will
+        // give the correct (identical) result and warm the Stop cache entry.
+        if pass != Pass::Stop {
+            let out_content = tokio::fs::read(&out_ir.file).await.context("read lookahead output for no-op check")?;
+            let out_hash: [u8; 32] = *blake3::hash(&out_content).as_bytes();
+            if out_hash == hash {
+                let stop_key = (func_name.to_string(), hash, STOP_PASS_IDX);
+                if let Some(&stop_speedup) = cache.get(&stop_key).as_deref() {
+                    cache.insert(key, stop_speedup);
+                    return Ok((stop_speedup, true));
+                }
+                // Stop not cached yet — fall through; result will equal Stop's when done.
+            }
+        }
+
         let bin = self.compile_lookahead(&out_ir, step, pass_idx).await?;
         let mut bm = self.benchmark(&bin, runs, iters).await?;
         bm.speedup = baselines.speedup_vs_o3(bm.mean_ns);
         cache.insert(key, bm.speedup);
-        Ok(bm.speedup)
+        Ok((bm.speedup, false))
     }
 
     /// Compile a lookahead IR to a binary. Output named `lookahead_{step}_{pass_idx}_bin`

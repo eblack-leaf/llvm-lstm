@@ -133,6 +133,9 @@ impl Trainer {
                         let cache = lookahead_cache.clone();
                         workers.spawn(async move {
                             let mut prev_features: Vec<f32> = episode.base_features.clone();
+                            // Step-level no-op cache: if the chosen pass didn't change the IR,
+                            // the next step's lookahead is identical — reuse instead of re-running.
+                            let mut prev_lookahead: Option<([u8; 32], Box<[f32; 29]>)> = None;
                             loop {
                                 let input = Input::new(
                                     &dev,
@@ -160,29 +163,43 @@ impl Trainer {
                                     let baselines = episode.baselines.clone();
                                     let runs = episode.cfg.lookahead_runs;
                                     let iters = episode.cfg.lookahead_iters;
-                                    let mut speedups = Box::new([0.0f32; 29]);
                                     // Hash once — shared key prefix for all 29 passes.
                                     let content = tokio::fs::read(&pre_ir.file).await.expect("read IR for hash");
                                     let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-                                    // Sequential — episode workers are already parallel across
-                                    // all functions/episodes; spawning 29 more tasks each would
-                                    // exhaust file descriptors.
-                                    for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
-                                        let key = (ir_hash, pass_idx as u8);
-                                        if let Some(cached) = cache.get(&key) {
-                                            speedups[pass_idx] = *cached;
-                                            episode.lookahead_hits += 1;
-                                            continue;
+                                    let speedups = if matches!(prev_lookahead, Some((h, _)) if h == ir_hash) {
+                                        // Same IR as last step (chosen pass was a no-op) — reuse.
+                                        let (_, ref sp) = *prev_lookahead.as_ref().unwrap();
+                                        episode.lookahead_hits += 29;
+                                        sp.clone()
+                                    } else {
+                                        // Sequential — episode workers are already parallel across
+                                        // all functions/episodes; spawning 29 more tasks each would
+                                        // exhaust file descriptors.
+                                        let mut speedups = Box::new([0.0f32; 29]);
+                                        for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
+                                            let key = (episode.func_name.clone(), ir_hash, pass_idx as u8);
+                                            if let Some(cached) = cache.get(&key) {
+                                                speedups[pass_idx] = *cached;
+                                                episode.lookahead_hits += 1;
+                                                continue;
+                                            }
+                                            let (speedup, noop_hit) = llvm
+                                                .bench_lookahead_cached(
+                                                    &pre_ir, pass, pass_idx, step_idx,
+                                                    &episode.func_name, &baselines, runs, iters, &cache,
+                                                )
+                                                .await
+                                                .expect("bench_lookahead_cached");
+                                            if noop_hit {
+                                                episode.lookahead_hits += 1;
+                                            } else {
+                                                episode.lookahead_misses += 1;
+                                            }
+                                            speedups[pass_idx] = speedup;
                                         }
-                                        episode.lookahead_misses += 1;
-                                        speedups[pass_idx] = llvm
-                                            .bench_lookahead_cached(
-                                                &pre_ir, pass, pass_idx, step_idx,
-                                                &baselines, runs, iters, &cache,
-                                            )
-                                            .await
-                                            .expect("bench_lookahead_cached");
-                                    }
+                                        speedups
+                                    };
+                                    prev_lookahead = Some((ir_hash, speedups.clone()));
                                     Some(speedups)
                                 } else {
                                     None
