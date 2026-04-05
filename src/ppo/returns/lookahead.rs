@@ -49,7 +49,7 @@ impl Returns for LookaheadCumulativeReturn {
         if n == 0 { return vec![]; }
 
         // Per-step reward: mean-centred, rescaled to [-1, +1].
-        let rewards: Vec<f32> = results.steps.iter().map(|step| {
+        let mut rewards: Vec<f32> = results.steps.iter().map(|step| {
             let Some(la) = &step.lookahead else { return 0.0 };
             let chosen_idx = ACTIONS
                 .iter()
@@ -59,6 +59,14 @@ impl Returns for LookaheadCumulativeReturn {
             let norm = la.iter().map(|v| (v - mean).abs()).fold(0.0f32, f32::max).max(1e-4);
             (la[chosen_idx] - mean) / norm
         }).collect();
+
+        // Terminal outcome bonus: add the actual episode speedup to the last step.
+        // Discounting then propagates it back as γ^(T-t) * speedup — good episodes
+        // lift all steps proportionally, bad episodes signal back through the trajectory
+        // even when local choices were optimal. Anchors the return scale to real outcomes.
+        if let Some(bm) = results.steps.last().and_then(|s| s.benchmark.as_ref()) {
+            rewards[n - 1] += bm.speedup;
+        }
 
         // Discounted cumulative return, computed backwards.
         // No per-episode normalisation — caller normalises across the full batch
