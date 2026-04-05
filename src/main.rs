@@ -16,7 +16,7 @@ use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::advantages::gae::GaeAdvantage;
 use crate::ppo::advantages::lookahead::LookaheadAdvantage;
 use crate::ppo::returns::best_step::BestStepReturn;
-use crate::ppo::returns::lookahead::LookaheadReturn;
+use crate::ppo::returns::lookahead::LookaheadCumulativeReturn;
 
 mod config;
 mod llvm;
@@ -143,8 +143,8 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(LookaheadReturn),
-                Box::new(LookaheadAdvantage::new(true)),
+                Box::new(LookaheadCumulativeReturn::new(0.99)),
+                Box::new(BaselineAdvantage::new(true)),
                 LogMode::FileAndStdout,
                 Some(log_path),
             );

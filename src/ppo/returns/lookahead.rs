@@ -2,33 +2,58 @@ use crate::ppo::episode::Results;
 use crate::ppo::model::ACTIONS;
 use crate::ppo::returns::Returns;
 
-/// Per-step return derived from exhaustive one-step lookahead benchmarks.
+/// Cumulative discounted lookahead return.
 ///
-/// return[t] = (speedup(chosen_action) - mean(speedup(all_actions))) / norm
+/// At each step t, the per-step reward is:
+///   r_t = la[chosen_t] / max(|la_t[i]|)   — normalised to [-1, 1]
 ///
-/// norm = max(|la[i] - mean(la)|) across all 29 candidates, keeping the
-/// return in [-1, 1]. Floor of 1e-4 prevents divide-by-zero on flat episodes
-/// where all passes produce identical speedup.
+/// The return is the discounted sum from t to episode end:
+///   R_t = r_t + γ·r_{t+1} + γ²·r_{t+2} + ...
 ///
-/// Provides the value training target that matches what LookaheadAdvantage
-/// subtracts V(s) from — so the critic learns to predict the expected
-/// per-step lookahead quality from a given IR state rather than a
-/// path-dependent trajectory return it can't properly baseline against.
+/// Episode returns are then normalised by max(|R_t|) across the episode
+/// to keep them in [-1, 1] regardless of episode length or γ.
+///
+/// V(s_t) trains on R_t — a non-zero-centred, state-dependent, multi-step
+/// target that captures the cumulative quality of the IR state from this
+/// point forwards. Use with BaselineAdvantage: A_t = R_t - V(s_t).
 ///
 /// Returns 0.0 for steps without lookahead data (lookahead disabled).
-pub(crate) struct LookaheadReturn;
+pub(crate) struct LookaheadCumulativeReturn {
+    pub(crate) gamma: f32,
+}
 
-impl Returns for LookaheadReturn {
+impl LookaheadCumulativeReturn {
+    pub(crate) fn new(gamma: f32) -> Self {
+        Self { gamma }
+    }
+}
+
+impl Returns for LookaheadCumulativeReturn {
     fn compute(&self, results: &Results) -> Vec<f32> {
-        results.steps.iter().map(|step| {
+        let n = results.log_probs.len();
+        if n == 0 { return vec![]; }
+
+        // Per-step reward: chosen pass speedup normalised by spread of la.
+        let rewards: Vec<f32> = results.steps.iter().map(|step| {
             let Some(la) = &step.lookahead else { return 0.0 };
             let chosen_idx = ACTIONS
                 .iter()
                 .position(|&p| p == step.pass)
                 .expect("step pass not in ACTIONS");
-            let mean = la.iter().sum::<f32>() / la.len() as f32;
-            let norm = la.iter().map(|&v| (v - mean).abs()).fold(0.0f32, f32::max).max(1e-4);
-            (la[chosen_idx] - mean) / norm
-        }).collect()
+            let norm = la.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-4);
+            la[chosen_idx] / norm
+        }).collect();
+
+        // Discounted cumulative return, computed backwards.
+        let mut returns = vec![0.0f32; n];
+        let mut running = 0.0f32;
+        for t in (0..n).rev() {
+            running = rewards[t] + self.gamma * running;
+            returns[t] = running;
+        }
+
+        // Normalise episode returns to [-1, 1].
+        let norm = returns.iter().map(|r| r.abs()).fold(0.0f32, f32::max).max(1e-4);
+        returns.iter().map(|r| r / norm).collect()
     }
 }
