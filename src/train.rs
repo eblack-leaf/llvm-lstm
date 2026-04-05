@@ -248,7 +248,7 @@ impl Trainer {
                                 .llvm
                                 .benchmark(&bin, episode.cfg.benchmark_runs, episode.cfg.benchmark_iters)
                                 .expect("benchmark");
-                            bm.speedup = episode.baselines.speedup_vs_o3(bm.mean_ns);
+                            bm.speedup = episode.baselines.speedup_vs_o3_parallel(bm.mean_ns);
                             cache.insert(cache_key, bm.speedup);
                             Some(bm)
                         }

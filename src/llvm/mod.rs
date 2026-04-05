@@ -197,7 +197,7 @@ impl Llvm {
 
         let bin = self.compile_lookahead(&out_ir, step, pass_idx)?;
         let mut bm = self.benchmark(&bin, runs, iters)?;
-        bm.speedup = baselines.speedup_vs_o3(bm.mean_ns);
+        bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
         cache.insert(key, bm.speedup);
         Ok((bm.speedup, false))
     }

@@ -60,12 +60,15 @@ impl Returns for LookaheadCumulativeReturn {
             (la[chosen_idx] - mean) / norm
         }).collect();
 
-        // Terminal outcome bonus: add the actual episode speedup to the last step.
-        // Discounting then propagates it back as γ^(T-t) * speedup — good episodes
-        // lift all steps proportionally, bad episodes signal back through the trajectory
-        // even when local choices were optimal. Anchors the return scale to real outcomes.
+        // Scale all per-step rewards by the terminal outcome.
+        // f(speedup) = 1 + speedup maps [-1, +1] → [0, 2].
+        // Clamped to 0.1 so bad trajectories still get a weak signal rather than zeroing out.
+        // Keeps V's target the same shape (pure lookahead relative signal) while encoding
+        // episode quality in the magnitude — bad trajectories produce smaller returns,
+        // good ones produce larger, without mixing two structurally different signals.
         if let Some(bm) = results.steps.last().and_then(|s| s.benchmark.as_ref()) {
-            rewards[n - 1] += bm.speedup;
+            let scale = (1.0 + bm.speedup).max(0.1);
+            for r in &mut rewards { *r *= scale; }
         }
 
         // Discounted cumulative return, computed backwards.
