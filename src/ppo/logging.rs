@@ -136,54 +136,78 @@ impl Logger {
                 format!("{:.1}m", total_s / 60.0)
             };
 
-            // Line 1: performance + timing
+            // Grayscale helpers — varied per line so rows are visually distinct.
+            macro_rules! g1 { ($s:expr) => { $s.truecolor(210, 210, 210).to_string() } }  // bright
+            macro_rules! g2 { ($s:expr) => { $s.truecolor(160, 160, 160).to_string() } }  // mid
+            macro_rules! g3 { ($s:expr) => { $s.truecolor(115, 115, 115).to_string() } }  // dim
+            macro_rules! g4 { ($s:expr) => { $s.truecolor( 85,  85,  85).to_string() } }  // dark
+
+            // Line 1: performance + timing — bright gray labels
             let cache_str = metrics.lookahead_cache_hit_pct()
-                .map(|p| format!("  cache={:.1}%", p))
+                .map(|p| format!("  {}={}", g1!("cache"), format!("{:.1}%", p).cyan()))
                 .unwrap_or_default();
             self.epoch_bar.println(format!(
-                "epoch {:>5}  speedup={}  ema={}  ep_len={}  collect={}  ppo={}  total={}{}",
-                epoch,
-                speedup_str,
-                ema_str,
-                format!("{:.1}", metrics.avg_episode_len()).bold(),
-                format!("{}ms", metrics.episode_collection_ms).cyan(),
-                format!("{}ms", metrics.ppo_update_ms).cyan(),
-                total_str.cyan().to_string(),
-                cache_str,
-            ));
+                "{} {:>5}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
+                g1!("epoch"), epoch,
+                g1!("speedup="), speedup_str,
+                g1!("ema="), ema_str,
+                g1!("ep_len="), format!("{:.1}", metrics.avg_episode_len()).bold(),
+                g1!("collect="), format!("{}ms", metrics.episode_collection_ms).cyan(),
+                g1!("ppo="), format!("{}ms", metrics.ppo_update_ms).cyan(),
+                g1!("total="), total_str.cyan().to_string(),
+            ) + &cache_str);
 
-            // Line 2: training losses
+            // Line 2: training losses — mid gray labels
             self.epoch_bar.println(format!(
-                "         losses  policy={}  value={}  entropy={}  kl={:.4}  ev={:+.3}",
-                format!("{:+.4}", metrics.policy_loss()).yellow(),
-                format!("{:.4}",  metrics.value_loss()).yellow(),
-                format!("{:.1}%", metrics.entropy_pct()).yellow(),
-                metrics.kl_div(),
-                metrics.explained_variance(),
+                "         {}  {}{}  {}{}  {}{}  {}{}  {}{}",
+                g2!("losses"),
+                g2!("policy="), format!("{:+.4}", metrics.policy_loss()).yellow(),
+                g2!("value="),  format!("{:.4}",  metrics.value_loss()).yellow(),
+                g2!("entropy="),format!("{:.1}%", metrics.entropy_pct()).yellow(),
+                g2!("kl="),     format!("{:.4}",  metrics.kl_div()).truecolor(200, 160, 80).to_string(),
+                g2!("ev="),     format!("{:+.3}", metrics.explained_variance()).truecolor(200, 160, 80).to_string(),
             ));
 
-            // Line 3 (if ret stats)
+            // Line 3: return distribution — dim gray labels
             if let Some(ra) = &metrics.ret_adv {
                 self.epoch_bar.println(format!(
-                    "         ret    mean={:+.3}  std={:.3}  [{:+.3}, {:+.3}]  noop={:.0}%  adv_std={:.3}",
-                    ra.ret_mean, ra.ret_std, ra.ret_min, ra.ret_max,
-                    ra.noop_frac * 100.0, ra.adv_std,
+                    "         {}  {}{}  {}{}  {}[{}, {}]  {}{}  {}{}",
+                    g3!("ret"),
+                    g3!("mean="),    format!("{:+.3}", ra.ret_mean).cyan(),
+                    g3!("std="),     format!("{:.3}",  ra.ret_std).cyan(),
+                    g3!("range="),   format!("{:+.3}", ra.ret_min).cyan(),
+                                     format!("{:+.3}", ra.ret_max).cyan(),
+                    g3!("noop="),    format!("{:.0}%", ra.noop_frac * 100.0).cyan(),
+                    g3!("adv_std="), format!("{:.3}",  ra.adv_std).cyan(),
                 ));
             }
 
-            // Line 4 (if store stats)
+            // Lines 4+: one line per func, alternating dark/dim gray labels
             if let Some(ss) = &metrics.store_stats {
-                let func_parts: Vec<String> = ss.per_func.iter().map(|f| {
-                    format!(
-                        "{}[n={} best={:+.3} spread={:.3} div={:.0}%]",
-                        f.func_name, f.entries, f.best, f.spread, f.diversity * 100.0,
-                    )
-                }).collect();
                 self.epoch_bar.println(format!(
-                    "         store  total={}  {}",
-                    ss.total_entries,
-                    func_parts.join("  "),
+                    "         {}  {}",
+                    g3!("store"),
+                    format!("{}", ss.total_entries).truecolor(180, 180, 180).to_string(),
                 ));
+                for (i, f) in ss.per_func.iter().enumerate() {
+                    let lbl = |s: &str| -> String {
+                        if i % 2 == 0 { s.truecolor(100, 100, 100).to_string() }
+                        else           { s.truecolor( 70,  70,  70).to_string() }
+                    };
+                    let best_str = if f.best >= 0.0 {
+                        format!("{:+.3}", f.best).green().to_string()
+                    } else {
+                        format!("{:+.3}", f.best).red().to_string()
+                    };
+                    self.epoch_bar.println(format!(
+                        "           {}  {}{}  {}{}  {}{}  {}{}",
+                        f.func_name.truecolor(200, 200, 200).to_string(),
+                        lbl("n="),       format!("{}", f.entries).bold(),
+                        lbl(" best="),   best_str,
+                        lbl(" spread="), format!("{:.3}", f.spread).cyan(),
+                        lbl(" div="),    format!("{:.0}%", f.diversity * 100.0).yellow(),
+                    ));
+                }
             }
         }
 
