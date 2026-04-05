@@ -1,6 +1,6 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
-use crate::llvm::{Llvm, LookaheadCache, load_lookahead_cache, save_lookahead_cache};
+use crate::llvm::{Llvm, BenchCache, load_cache, save_cache};
 use blake3;
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -94,10 +94,10 @@ impl Trainer {
         // Persists across epochs — (func, ir_hash, pass_idx) → speedup is fully
         // deterministic. Optionally loaded from / saved to disk so restarts on
         // the same machine skip already-benchmarked states.
-        let lookahead_cache: LookaheadCache = if let Some(ref p) = self.cfg.lookahead_cache_file {
-            load_lookahead_cache(p).expect("load lookahead cache")
+        let bench_cache: BenchCache = if let Some(ref p) = self.cfg.cache_file {
+            load_cache(p).expect("load bench cache")
         } else {
-            Arc::new(DashMap::new())
+            Arc::new(DashMap::new()) as BenchCache
         };
 
         let mut model = Arch::init(arch_cfg.clone(), &self.device);
@@ -136,7 +136,7 @@ impl Trainer {
                     baselines.clone(),
                 );
                 let dev = self.device.clone();
-                let cache = lookahead_cache.clone();
+                let cache = bench_cache.clone();
 
                 let mut prev_features: Vec<f32> = episode.base_features.clone();
                 // Step-level no-op cache: if the chosen pass didn't change the IR,
@@ -184,11 +184,11 @@ impl Trainer {
                                     continue;
                                 }
                                 let (speedup, noop_hit) = episode.llvm
-                                    .bench_lookahead_cached(
+                                    .bench_pass_cached(
                                         &pre_ir, pass, pass_idx, step_idx,
                                         &episode.func_name, &baselines, runs, iters, &cache,
                                     )
-                                    .expect("bench_lookahead_cached");
+                                    .expect("bench_pass_cached");
                                 if noop_hit {
                                     episode.lookahead_hits += 1;
                                 } else {
@@ -237,9 +237,10 @@ impl Trainer {
                         // lookahead cache — Stop entry gives bench(current_ir).
                         let cache_key = (episode.func_name.clone(), post_ir_hash, crate::llvm::STOP_PASS_IDX);
                         if let Some(&cached_speedup) = cache.get(&cache_key).as_deref() {
-                            episode.lookahead_hits += 1;
+                            episode.bench_cache_hits += 1;
                             Some(crate::llvm::benchmark::Benchmark { mean_ns: 0, speedup: cached_speedup })
                         } else {
+                            episode.bench_cache_misses += 1;
                             let bin = episode
                                 .llvm
                                 .compile(&episode.current_ir)
@@ -274,7 +275,10 @@ impl Trainer {
             metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
             let (total_hits, total_misses) = results.iter()
                 .fold((0u64, 0u64), |(h, m), r| (h + r.lookahead_hits, m + r.lookahead_misses));
-            metrics.record_lookahead_cache(total_hits, total_misses);
+            metrics.record_la_cache(total_hits, total_misses);
+            let (bench_hits, bench_misses) = results.iter()
+                .fold((0u64, 0u64), |(h, m), r| (h + r.bench_cache_hits, m + r.bench_cache_misses));
+            metrics.record_bench_cache(bench_hits, bench_misses);
             metrics.update_episode(&results);
 
             let all_returns: Vec<Vec<f32>> = self.returns.compute_batch(&results);
@@ -286,7 +290,7 @@ impl Trainer {
             metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
 
             let advantages = self.advantages.compute(&all_returns, &results);
-            metrics.update_returns_advs(&all_returns, &advantages);
+            metrics.update_returns_advs(&all_returns, &advantages, self.returns.pre_norm_ret_std());
             let batch = Ppo::batch(&results, &all_returns);
             let lr = scheduler.step();
 
@@ -328,8 +332,8 @@ impl Trainer {
                 logger.log_best(epoch, best_mean);
             }
 
-            if let Some(ref p) = self.cfg.lookahead_cache_file {
-                save_lookahead_cache(&lookahead_cache, p).expect("save lookahead cache");
+            if let Some(ref p) = self.cfg.cache_file {
+                save_cache(&bench_cache, p).expect("save bench cache");
             }
 
             metrics.next_epoch();

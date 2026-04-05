@@ -9,31 +9,31 @@ use std::sync::Arc;
 /// Shared cache mapping (func_name, blake3 hash of IR content, pass index) to speedup.
 /// Function name scopes entries so identical IR from different functions doesn't
 /// collide — speedup is relative to each function's own -O3 baseline.
-pub(crate) type LookaheadCache = Arc<DashMap<(String, [u8; 32], u8), f32>>;
+pub(crate) type BenchCache = Arc<DashMap<(String, [u8; 32], u8), f32>>;
 
 /// Persist the cache to disk. Entries are bincode-serialised as a flat vec.
-pub(crate) fn save_lookahead_cache(cache: &LookaheadCache, path: &std::path::Path) -> Result<()> {
+pub(crate) fn save_cache(cache: &BenchCache, path: &std::path::Path) -> Result<()> {
     let entries: Vec<((String, [u8; 32], u8), f32)> =
         cache.iter().map(|e| (e.key().clone(), *e.value())).collect();
-    let bytes = bincode::serialize(&entries).context("serialize lookahead cache")?;
-    std::fs::write(path, bytes).context("write lookahead cache")?;
+    let bytes = bincode::serialize(&entries).context("serialize bench cache")?;
+    std::fs::write(path, bytes).context("write bench cache")?;
     Ok(())
 }
 
 /// Load a previously saved cache from disk. Returns an empty cache if the file
 /// does not exist, so callers can unconditionally call this on startup.
-pub(crate) fn load_lookahead_cache(path: &std::path::Path) -> Result<LookaheadCache> {
+pub(crate) fn load_cache(path: &std::path::Path) -> Result<BenchCache> {
     let cache = Arc::new(DashMap::new());
     match std::fs::read(path) {
         Ok(bytes) => {
             let entries: Vec<((String, [u8; 32], u8), f32)> =
-                bincode::deserialize(&bytes).context("deserialize lookahead cache")?;
+                bincode::deserialize(&bytes).context("deserialize bench cache")?;
             for (key, value) in entries {
                 cache.insert(key, value);
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).context("read lookahead cache"),
+        Err(e) => return Err(e).context("read bench cache"),
     }
     Ok(cache)
 }
@@ -151,7 +151,7 @@ impl Llvm {
     /// Returns `(speedup, noop_hit)`. `noop_hit` is true when the pass was
     /// detected as a no-op (output IR unchanged) and resolved from Stop's cached
     /// speedup without running a benchmark — caller should count this as a hit.
-    pub(crate) fn bench_lookahead_cached(
+    pub(crate) fn bench_pass_cached(
         &self,
         ir: &Ir,
         pass: Pass,
@@ -161,7 +161,7 @@ impl Llvm {
         baselines: &Baselines,
         runs: usize,
         iters: usize,
-        cache: &LookaheadCache,
+        cache: &BenchCache,
     ) -> Result<(f32, bool)> {
         // Hash the IR content — same content == same state regardless of path.
         let content = std::fs::read(&ir.file).context("read IR for hash")?;

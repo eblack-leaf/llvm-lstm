@@ -28,6 +28,8 @@ pub(crate) struct Episode {
     pub(crate) base_features: Vec<f32>,
     pub(crate) lookahead_hits: u64,
     pub(crate) lookahead_misses: u64,
+    pub(crate) bench_cache_hits: u64,
+    pub(crate) bench_cache_misses: u64,
 }
 impl Episode {
     pub(crate) fn new(
@@ -58,6 +60,8 @@ impl Episode {
             base_features,
             lookahead_hits: 0,
             lookahead_misses: 0,
+            bench_cache_hits: 0,
+            bench_cache_misses: 0,
         }
     }
     pub(crate) fn results(self) -> Results {
@@ -65,6 +69,8 @@ impl Episode {
             func_name: self.func_name,
             lookahead_hits: self.lookahead_hits,
             lookahead_misses: self.lookahead_misses,
+            bench_cache_hits: self.bench_cache_hits,
+            bench_cache_misses: self.bench_cache_misses,
             actions: self.actions,
             log_probs: self.log_probs,
             values: self.values,
@@ -79,6 +85,8 @@ pub(crate) struct Results {
     pub(crate) func_name: String,
     pub(crate) lookahead_hits: u64,
     pub(crate) lookahead_misses: u64,
+    pub(crate) bench_cache_hits: u64,
+    pub(crate) bench_cache_misses: u64,
     pub(crate) actions: Vec<Pass>,
     pub(crate) log_probs: Vec<f32>,
     pub(crate) values: Vec<f32>,

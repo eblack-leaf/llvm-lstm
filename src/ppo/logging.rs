@@ -143,8 +143,11 @@ impl Logger {
             macro_rules! g4 { ($s:expr) => { $s.truecolor( 85,  85,  85).to_string() } }  // dark
 
             // Line 1: performance + timing — bright gray labels
-            let cache_str = metrics.lookahead_cache_hit_pct()
-                .map(|p| format!("  {}={}", g1!("cache"), format!("{:.1}%", p).cyan()))
+            let cache_str = metrics.la_cache_hit_pct()
+                .map(|p| format!("  {}={}", g1!("la_cache"), format!("{:.1}%", p).cyan()))
+                .unwrap_or_default();
+            let bench_cache_str = metrics.bench_cache_hit_pct()
+                .map(|p| format!("  {}={}", g1!("bench_cache"), format!("{:.1}%", p).cyan()))
                 .unwrap_or_default();
             self.epoch_bar.println(format!(
                 "{} {:>5}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
@@ -155,7 +158,7 @@ impl Logger {
                 g1!("collect="), format!("{}ms", metrics.episode_collection_ms).cyan(),
                 g1!("ppo="), format!("{}ms", metrics.ppo_update_ms).cyan(),
                 g1!("total="), total_str.cyan().to_string(),
-            ) + &cache_str);
+            ) + &cache_str + &bench_cache_str);
 
             // Line 2: training losses — mid gray labels
             self.epoch_bar.println(format!(
@@ -170,16 +173,18 @@ impl Logger {
 
             // Line 3: return distribution — dim gray labels
             if let Some(ra) = &metrics.ret_adv {
+                let raw_std_str = ra.raw_ret_std
+                    .map(|s| format!("  {}{}",  g3!("raw_std="), format!("{:.3}", s).cyan()))
+                    .unwrap_or_default();
                 self.epoch_bar.println(format!(
-                    "         {}  {}{}  {}{}  {}[{}, {}]  {}{}  {}{}",
+                    "         {}  {}{}  {}[{}, {}]  {}{}  {}{}",
                     g3!("ret"),
                     g3!("mean="),    format!("{:+.3}", ra.ret_mean).cyan(),
-                    g3!("std="),     format!("{:.3}",  ra.ret_std).cyan(),
                     g3!("range="),   format!("{:+.3}", ra.ret_min).cyan(),
                                      format!("{:+.3}", ra.ret_max).cyan(),
                     g3!("noop="),    format!("{:.0}%", ra.noop_frac * 100.0).cyan(),
                     g3!("adv_std="), format!("{:.3}",  ra.adv_std).cyan(),
-                ));
+                ).to_string() + &raw_std_str);
             }
 
             // Lines 4+: one line per func, alternating dark/dim gray labels
@@ -229,11 +234,12 @@ impl Logger {
                 "avg_func_ir_ms":         metrics.avg_func_ir_ms(),
                 "lr":                     lr,
                 "func_speedups":          metrics.func_speedups(),
-                "lookahead_cache_hit_pct": metrics.lookahead_cache_hit_pct(),
+                "la_cache_hit_pct": metrics.la_cache_hit_pct(),
+                "bench_cache_hit_pct":    metrics.bench_cache_hit_pct(),
             });
             if let Some(ra) = &metrics.ret_adv {
-                record["ret_mean"]  = serde_json::json!(ra.ret_mean);
-                record["ret_std"]   = serde_json::json!(ra.ret_std);
+                record["ret_mean"]    = serde_json::json!(ra.ret_mean);
+                record["raw_ret_std"] = serde_json::json!(ra.raw_ret_std);
                 record["ret_min"]   = serde_json::json!(ra.ret_min);
                 record["ret_max"]   = serde_json::json!(ra.ret_max);
                 record["noop_frac"] = serde_json::json!(ra.noop_frac);

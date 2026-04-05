@@ -49,8 +49,8 @@ pub(crate) struct Cfg {
     pub(crate) value_coef: f32,
     pub(crate) entropy_coef: f32,
     pub(crate) mini_batch_size: usize,
-    /// Path to load/save the lookahead cache across runs. If None the cache is
-    /// memory-only and resets on restart. Pass a different path (or omit) to
-    /// start fresh on a new machine.
-    pub(crate) lookahead_cache_file: Option<PathBuf>,
+    /// Path to load/save the benchmark cache across runs. Stores episode-end and
+    /// lookahead benchmark results keyed by (func, ir_hash, pass_idx). If None
+    /// the cache is memory-only and resets on restart.
+    pub(crate) cache_file: Option<PathBuf>,
 }

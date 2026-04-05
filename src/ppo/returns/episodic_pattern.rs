@@ -32,17 +32,17 @@ use std::collections::{HashMap, HashSet};
 pub(crate) struct EpisodicPatternReturn {
     /// How many top episodes to retain per function.
     pub(crate) top_k: usize,
-    /// Fraction of the store's speedup range to retain.
-    /// 0.2 = keep only the top 20% of the range: cutoff = best - 0.2 * (best - worst).
-    /// Keeps the store tight relative to its own distribution, not an absolute gap.
+    /// Keep entries within prune_threshold * best below the best (only when best > 0).
     pub(crate) prune_threshold: f32,
     /// func_name → [(speedup, pass_sequence)], sorted descending, capped at top_k.
     store: HashMap<String, Vec<(f32, Vec<Pass>)>>,
+    /// Pre-normalisation return std from the most recent compute_batch call.
+    last_raw_std: f32,
 }
 
 impl EpisodicPatternReturn {
     pub(crate) fn new(top_k: usize, prune_threshold: f32) -> Self {
-        Self { top_k, prune_threshold, store: HashMap::new() }
+        Self { top_k, prune_threshold, store: HashMap::new(), last_raw_std: 0.0 }
     }
 
     fn update_store(&mut self, results: &[Results]) {
@@ -55,16 +55,15 @@ impl EpisodicPatternReturn {
             entry.push((bm.speedup, seq));
             entry.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             entry.truncate(self.top_k);
-            // Prune entries outside the top prune_threshold fraction of the range.
-            // cutoff = best - prune_threshold * (best - worst)
-            // Relative to the store's own spread — stays tight whether episodes are
-            // all negative early on or all positive later.
+            // Only prune once there is a positive best — before that, keep all entries
+            // so the store fills freely without pushing the policy toward negative sequences.
+            // cutoff = best - prune_threshold * best: keep within 20% below the best.
             if entry.len() >= 2 {
-                let best  = entry[0].0;
-                let worst = entry[entry.len() - 1].0;
-                let range = (best - worst).max(1e-6);
-                let cutoff = best - self.prune_threshold * range;
-                entry.retain(|(sp, _)| *sp >= cutoff);
+                let best = entry[0].0;
+                if best > 0.0 {
+                    let cutoff = best - self.prune_threshold * best;
+                    entry.retain(|(sp, _)| *sp >= cutoff);
+                }
             }
         }
     }
@@ -177,18 +176,23 @@ impl Returns for EpisodicPatternReturn {
 
         let mut all_returns: Vec<Vec<f32>> = results.iter().map(|r| self.compute(r)).collect();
 
-        // Batch std normalisation.
+        // Batch std normalisation — capture pre-norm std for logging before dividing.
         let flat: Vec<f32> = all_returns.iter().flatten().copied().collect();
         let n = flat.len() as f32;
         if n > 0.0 {
             let mean = flat.iter().sum::<f32>() / n;
             let var = flat.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / n;
             let std = var.sqrt().max(1e-4);
+            self.last_raw_std = std;
             for ep in &mut all_returns {
                 for r in ep.iter_mut() { *r /= std; }
             }
         }
         all_returns
+    }
+
+    fn pre_norm_ret_std(&self) -> Option<f32> {
+        if self.last_raw_std == 0.0 { None } else { Some(self.last_raw_std) }
     }
 
     fn store_stats(&self) -> Option<StoreStats> {

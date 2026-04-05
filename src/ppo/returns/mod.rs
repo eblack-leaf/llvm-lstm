@@ -45,4 +45,8 @@ pub(crate) trait Returns {
     /// Snapshot of the survivorship store for logging. Returns None for
     /// implementors that don't maintain a store (e.g. LookaheadCumulativeReturn).
     fn store_stats(&self) -> Option<StoreStats> { None }
+
+    /// Pre-normalisation return std from the most recent compute_batch call.
+    /// None for implementors that don't normalise internally.
+    fn pre_norm_ret_std(&self) -> Option<f32> { None }
 }

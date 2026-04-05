@@ -76,10 +76,10 @@ enum Command {
         entropy_coef: f32,
         #[arg(long, default_value = "64")]
         mini_batch_size: usize,
-        /// Optional path to persist the lookahead cache across runs.
-        /// Omit or point to a different path to start fresh (e.g. new machine).
+        /// Optional path to persist the benchmark cache across runs (episode-end
+        /// and lookahead results). Omit to start fresh each run.
         #[arg(long)]
-        lookahead_cache_file: Option<PathBuf>,
+        cache_file: Option<PathBuf>,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -156,7 +156,7 @@ fn main() {
             value_coef,
             entropy_coef,
             mini_batch_size,
-            lookahead_cache_file,
+            cache_file,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -181,7 +181,7 @@ fn main() {
                 value_coef,
                 entropy_coef,
                 mini_batch_size,
-                lookahead_cache_file,
+                cache_file,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
