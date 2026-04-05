@@ -3595,9 +3595,9 @@ dependencies = [
  "indicatif",
  "owo-colors",
  "rand 0.10.0",
+ "rayon",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -5683,7 +5683,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

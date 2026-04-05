@@ -12,19 +12,19 @@ use std::sync::Arc;
 pub(crate) type LookaheadCache = Arc<DashMap<(String, [u8; 32], u8), f32>>;
 
 /// Persist the cache to disk. Entries are bincode-serialised as a flat vec.
-pub(crate) async fn save_lookahead_cache(cache: &LookaheadCache, path: &std::path::Path) -> Result<()> {
+pub(crate) fn save_lookahead_cache(cache: &LookaheadCache, path: &std::path::Path) -> Result<()> {
     let entries: Vec<((String, [u8; 32], u8), f32)> =
         cache.iter().map(|e| (e.key().clone(), *e.value())).collect();
     let bytes = bincode::serialize(&entries).context("serialize lookahead cache")?;
-    tokio::fs::write(path, bytes).await.context("write lookahead cache")?;
+    std::fs::write(path, bytes).context("write lookahead cache")?;
     Ok(())
 }
 
 /// Load a previously saved cache from disk. Returns an empty cache if the file
 /// does not exist, so callers can unconditionally call this on startup.
-pub(crate) async fn load_lookahead_cache(path: &std::path::Path) -> Result<LookaheadCache> {
+pub(crate) fn load_lookahead_cache(path: &std::path::Path) -> Result<LookaheadCache> {
     let cache = Arc::new(DashMap::new());
-    match tokio::fs::read(path).await {
+    match std::fs::read(path) {
         Ok(bytes) => {
             let entries: Vec<((String, [u8; 32], u8), f32)> =
                 bincode::deserialize(&bytes).context("deserialize lookahead cache")?;
@@ -70,15 +70,14 @@ impl Llvm {
     }
 
     /// Emit unoptimised LLVM IR from a C source file.
-    pub(crate) async fn ir(&self, src: &Source) -> Result<Ir> {
+    pub(crate) fn ir(&self, src: &Source) -> Result<Ir> {
         let out = self.work_dir.join("base.ll");
-        let status = tokio::process::Command::new(&self.clang)
+        let status = std::process::Command::new(&self.clang)
             .args(["-O3", "-Xclang", "-disable-llvm-optzns", "-emit-llvm", "-S"])
             .arg(&src.file)
             .arg("-o")
             .arg(&out)
             .status()
-            .await
             .context("failed to run clang (ir)")?;
         if !status.success() {
             bail!("clang exited with {status}");
@@ -89,17 +88,16 @@ impl Llvm {
     /// Apply the full pass sequence to `ir` in one opt invocation.
     /// Used when the complete pass list is known upfront.
     #[allow(unused)]
-    pub(crate) async fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
+    pub(crate) fn apply(&self, ir: &Ir, passes: &[Pass]) -> Result<Ir> {
         let pipeline = opt_pipeline(passes);
         let out = self.work_dir.join("optimized.ll");
-        let status = tokio::process::Command::new(&self.opt)
+        let status = std::process::Command::new(&self.opt)
             .arg(format!("-passes={pipeline}"))
             .arg(&ir.file)
             .arg("-S")
             .arg("-o")
             .arg(&out)
             .status()
-            .await
             .context("failed to run opt (apply)")?;
         if !status.success() {
             bail!("opt exited with {status}");
@@ -111,17 +109,16 @@ impl Llvm {
     /// Called every step for incremental IR: O(T) total invocations vs O(T²)
     /// for re-applying the full prefix each step. Also makes the current IR
     /// state available for feature extraction and delta computation.
-    pub(crate) async fn apply_one(&self, ir: &Ir, pass: Pass, step: usize) -> Result<Ir> {
+    pub(crate) fn apply_one(&self, ir: &Ir, pass: Pass, step: usize) -> Result<Ir> {
         let out = self.work_dir.join(format!("step_{step}.ll"));
         let pipeline = opt_pipeline(&[pass]);
-        let status = tokio::process::Command::new(&self.opt)
+        let status = std::process::Command::new(&self.opt)
             .arg(format!("-passes={pipeline}"))
             .arg(&ir.file)
             .arg("-S")
             .arg("-o")
             .arg(&out)
             .status()
-            .await
             .context("failed to run opt (apply_one)")?;
         if !status.success() {
             bail!("opt exited with {status}");
@@ -131,17 +128,16 @@ impl Llvm {
 
     /// Apply a single pass for lookahead purposes. Writes to a temp file named
     /// `lookahead_{step}_{pass_idx}.ll` so it doesn't collide with episode step files.
-    pub(crate) async fn apply_one_lookahead(&self, ir: &Ir, pass: Pass, step: usize, pass_idx: usize) -> Result<Ir> {
+    pub(crate) fn apply_one_lookahead(&self, ir: &Ir, pass: Pass, step: usize, pass_idx: usize) -> Result<Ir> {
         let out = self.work_dir.join(format!("lookahead_{step}_{pass_idx}.ll"));
         let pipeline = opt_pipeline(&[pass]);
-        let status = tokio::process::Command::new(&self.opt)
+        let status = std::process::Command::new(&self.opt)
             .arg(format!("-passes={pipeline}"))
             .arg(&ir.file)
             .arg("-S")
             .arg("-o")
             .arg(&out)
             .status()
-            .await
             .context("failed to run opt (apply_one_lookahead)")?;
         if !status.success() {
             bail!("opt exited with {status}");
@@ -155,10 +151,7 @@ impl Llvm {
     /// Returns `(speedup, noop_hit)`. `noop_hit` is true when the pass was
     /// detected as a no-op (output IR unchanged) and resolved from Stop's cached
     /// speedup without running a benchmark — caller should count this as a hit.
-    /// Returns `(speedup, noop_hit)`. `noop_hit` is true when the pass was
-    /// detected as a no-op (output IR unchanged) and resolved from Stop's cached
-    /// speedup without running a benchmark — caller should count this as a hit.
-    pub(crate) async fn bench_lookahead_cached(
+    pub(crate) fn bench_lookahead_cached(
         &self,
         ir: &Ir,
         pass: Pass,
@@ -171,7 +164,7 @@ impl Llvm {
         cache: &LookaheadCache,
     ) -> Result<(f32, bool)> {
         // Hash the IR content — same content == same state regardless of path.
-        let content = tokio::fs::read(&ir.file).await.context("read IR for hash")?;
+        let content = std::fs::read(&ir.file).context("read IR for hash")?;
         let hash: [u8; 32] = *blake3::hash(&content).as_bytes();
         let key = (func_name.to_string(), hash, pass_idx as u8);
 
@@ -182,7 +175,7 @@ impl Llvm {
         let out_ir = if pass == Pass::Stop {
             ir.clone()
         } else {
-            self.apply_one_lookahead(ir, pass, step, pass_idx).await?
+            self.apply_one_lookahead(ir, pass, step, pass_idx)?
         };
 
         // No-op detection: if the pass didn't change the IR, its speedup equals
@@ -190,7 +183,7 @@ impl Llvm {
         // result if available; otherwise fall through to compile+bench which will
         // give the correct (identical) result and warm the Stop cache entry.
         if pass != Pass::Stop {
-            let out_content = tokio::fs::read(&out_ir.file).await.context("read lookahead output for no-op check")?;
+            let out_content = std::fs::read(&out_ir.file).context("read lookahead output for no-op check")?;
             let out_hash: [u8; 32] = *blake3::hash(&out_content).as_bytes();
             if out_hash == hash {
                 let stop_key = (func_name.to_string(), hash, STOP_PASS_IDX);
@@ -202,8 +195,8 @@ impl Llvm {
             }
         }
 
-        let bin = self.compile_lookahead(&out_ir, step, pass_idx).await?;
-        let mut bm = self.benchmark(&bin, runs, iters).await?;
+        let bin = self.compile_lookahead(&out_ir, step, pass_idx)?;
+        let mut bm = self.benchmark(&bin, runs, iters)?;
         bm.speedup = baselines.speedup_vs_o3(bm.mean_ns);
         cache.insert(key, bm.speedup);
         Ok((bm.speedup, false))
@@ -211,16 +204,15 @@ impl Llvm {
 
     /// Compile a lookahead IR to a binary. Output named `lookahead_{step}_{pass_idx}_bin`
     /// to avoid colliding with the episode's compiled binary.
-    pub(crate) async fn compile_lookahead(&self, ir: &Ir, step: usize, pass_idx: usize) -> Result<Bin> {
+    pub(crate) fn compile_lookahead(&self, ir: &Ir, step: usize, pass_idx: usize) -> Result<Bin> {
         let out = self.work_dir.join(format!("lookahead_{step}_{pass_idx}_bin"));
-        let status = tokio::process::Command::new(&self.clang)
+        let status = std::process::Command::new(&self.clang)
             .args(["-O3", "-Xclang", "-disable-llvm-passes"])
             .arg(&ir.file)
             .arg("-o")
             .arg(&out)
             .arg("-lm")
             .status()
-            .await
             .context("failed to run clang (compile_lookahead)")?;
         if !status.success() {
             bail!("clang exited with {status}");
@@ -230,16 +222,15 @@ impl Llvm {
 
     /// Compile an IR file to a native binary, bypassing clang's own optimisations
     /// so the benchmark reflects only the passes the model applied.
-    pub(crate) async fn compile(&self, ir: &Ir) -> Result<Bin> {
+    pub(crate) fn compile(&self, ir: &Ir) -> Result<Bin> {
         let out = self.work_dir.join("compiled");
-        let status = tokio::process::Command::new(&self.clang)
+        let status = std::process::Command::new(&self.clang)
             .args(["-O3", "-Xclang", "-disable-llvm-passes"])
             .arg(&ir.file)
             .arg("-o")
             .arg(&out)
             .arg("-lm")
             .status()
-            .await
             .context("failed to run clang (compile)")?;
         if !status.success() {
             bail!("clang exited with {status}");
@@ -250,13 +241,14 @@ impl Llvm {
     /// Run `bin` `runs` times, passing `iters` to the binary each invocation as
     /// the inner iteration count for `bench_timing.h`. Returns the mean of the
     /// per-invocation trimmed-mean nanosecond times reported to stdout.
-    pub(crate) async fn benchmark(&self, bin: &Bin, runs: usize, iters: usize) -> Result<Benchmark> {
+    /// Sync — uses std::process::Command so rayon workers don't incur tokio
+    /// scheduler overhead on the timing-sensitive benchmark path.
+    pub(crate) fn benchmark(&self, bin: &Bin, runs: usize, iters: usize) -> Result<Benchmark> {
         let mut total_ns: u64 = 0;
         for _ in 0..runs {
-            let output = tokio::process::Command::new(&bin.file)
+            let output = std::process::Command::new(&bin.file)
                 .arg(iters.to_string())
                 .output()
-                .await
                 .context("failed to run benchmark binary")?;
             if !output.status.success() {
                 bail!("benchmark binary exited with {}", output.status);
@@ -278,17 +270,17 @@ impl Llvm {
     /// Collect baselines at all four standard opt levels for a single function.
     /// Run sequentially — no worker contention, no cache pollution from parallel
     /// episode collection. Called once per function before the training epoch loop.
-    pub(crate) async fn collect_baselines(&self, src: &Source, runs: usize, iters: usize) -> Result<Baselines> {
-        let o0 = self.baseline(src, "-O0", runs, iters).await?;
-        let o1 = self.baseline(src, "-O1", runs, iters).await?;
-        let o2 = self.baseline(src, "-O2", runs, iters).await?;
-        let o3 = self.baseline(src, "-O3", runs, iters).await?;
+    pub(crate) fn collect_baselines(&self, src: &Source, runs: usize, iters: usize) -> Result<Baselines> {
+        let o0 = self.baseline(src, "-O0", runs, iters)?;
+        let o1 = self.baseline(src, "-O1", runs, iters)?;
+        let o2 = self.baseline(src, "-O2", runs, iters)?;
+        let o3 = self.baseline(src, "-O3", runs, iters)?;
         Ok(Baselines { o0, o1, o2, o3 })
     }
 
     /// Compile `src` at `opt_level` (e.g. "-O0", "-O3") and benchmark it.
     /// Returns the raw timing used to compute speedup for model-optimised builds.
-    pub(crate) async fn baseline(
+    pub(crate) fn baseline(
         &self,
         src: &Source,
         opt_level: &str,
@@ -296,18 +288,17 @@ impl Llvm {
         iters: usize,
     ) -> Result<Benchmark> {
         let bin_path = self.work_dir.join("baseline");
-        let status = tokio::process::Command::new(&self.clang)
+        let status = std::process::Command::new(&self.clang)
             .arg(opt_level)
             .arg(&src.file)
             .arg("-o")
             .arg(&bin_path)
             .arg("-lm")
             .status()
-            .await
             .context("failed to compile baseline")?;
         if !status.success() {
             bail!("clang baseline exited with {status}");
         }
-        self.benchmark(&Bin { file: bin_path }, runs, iters).await
+        self.benchmark(&Bin { file: bin_path }, runs, iters)
     }
 }

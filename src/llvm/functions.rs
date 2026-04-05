@@ -6,13 +6,12 @@ pub(crate) struct Functions {
     pub(crate) functions: Vec<Function>,
 }
 impl Functions {
-    pub(crate) async fn new(dir: &PathBuf) -> Self {
-        let mut read_dir = tokio::fs::read_dir(dir)
-            .await
+    pub(crate) fn new(dir: &PathBuf) -> Self {
+        let read_dir = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("failed to read functions dir {dir:?}: {e}"));
         let mut functions: Vec<Function> = Vec::new();
-        while let Some(entry) = read_dir.next_entry().await.expect("read_dir entry") {
-            let path = entry.path();
+        for entry in read_dir {
+            let path = entry.expect("read_dir entry").path();
             if path.extension().and_then(|e| e.to_str()) != Some("c") {
                 continue;
             }

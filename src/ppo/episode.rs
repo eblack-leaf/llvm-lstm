@@ -30,7 +30,7 @@ pub(crate) struct Episode {
     pub(crate) lookahead_misses: u64,
 }
 impl Episode {
-    pub(crate) async fn new(
+    pub(crate) fn new(
         idx: usize,
         llvm: Llvm,
         func_name: String,
@@ -38,12 +38,8 @@ impl Episode {
         cfg: Cfg,
         baselines: Baselines,
     ) -> Self {
-        tokio::fs::create_dir_all(&llvm.work_dir)
-            .await
-            .expect("failed to create worker dir");
-        let content = tokio::fs::read_to_string(&ir.file)
-            .await
-            .expect("failed to read base IR");
+        std::fs::create_dir_all(&llvm.work_dir).expect("failed to create worker dir");
+        let content = std::fs::read_to_string(&ir.file).expect("failed to read base IR");
         let base_features = Features::from_ll_str(&content)
             .expect("failed to parse base IR features")
             .to_vec();

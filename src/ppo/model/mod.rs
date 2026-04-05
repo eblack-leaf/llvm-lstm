@@ -94,8 +94,8 @@ pub(crate) struct Input<B: Backend> {
 }
 
 impl Input<BurnBackend> {
-    pub(crate) async fn new(dev: &BurnDevice, ir: &Ir, current_ir: &Ir, actions: &[Pass]) -> Self {
-        let tokens = Tokens::new(ir, current_ir, actions).await;
+    pub(crate) fn new(dev: &BurnDevice, ir: &Ir, current_ir: &Ir, actions: &[Pass]) -> Self {
+        let tokens = Tokens::new(ir, current_ir, actions);
         let n_features = tokens.features.len();
         let seq_len = tokens.actions.len();
         let features = Tensor::from_data(TensorData::new(tokens.features, [1, n_features]), dev);

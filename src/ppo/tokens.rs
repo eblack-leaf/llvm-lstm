@@ -11,15 +11,13 @@ pub(crate) struct Tokens {
     pub(crate) actions: Vec<i64>,
 }
 impl Tokens {
-    pub(crate) async fn new(ir: &Ir, current_ir: &Ir, actions: &[Pass]) -> Self {
-        let (base_content, current_content) = tokio::join!(
-            tokio::fs::read_to_string(&ir.file),
-            tokio::fs::read_to_string(&current_ir.file),
-        );
-        let base = Features::from_ll_str(&base_content.expect("failed to read base IR"))
+    pub(crate) fn new(ir: &Ir, current_ir: &Ir, actions: &[Pass]) -> Self {
+        let base_content = std::fs::read_to_string(&ir.file).expect("failed to read base IR");
+        let current_content = std::fs::read_to_string(&current_ir.file).expect("failed to read current IR");
+        let base = Features::from_ll_str(&base_content)
             .expect("failed to parse base IR features")
             .to_vec();
-        let current = Features::from_ll_str(&current_content.expect("failed to read current IR"))
+        let current = Features::from_ll_str(&current_content)
             .expect("failed to parse current IR features")
             .to_vec();
         let delta: Vec<f32> = base.iter().zip(&current).map(|(b, c)| c - b).collect();

@@ -92,7 +92,43 @@ enum Command {
         #[arg(long, default_value = "evaluation")]
         dir: PathBuf,
     },
+    /// Measure how much parallel worker contention affects benchmark timing.
+    /// Runs a single baseline benchmark alone, then 16 workers benchmarking
+    /// the same binary concurrently, and reports the timing difference.
+    BenchNoise {
+        /// Path to the C source file to benchmark.
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "work/bench_noise")]
+        work_dir: PathBuf,
+        #[arg(long, default_value = "5")]
+        runs: usize,
+        #[arg(long, default_value = "200")]
+        iters: usize,
+        #[arg(long, default_value = "16")]
+        workers: usize,
+    },
 }
+fn print_stats(label: &str, workers: usize, solo_ns: u64, results: &mut Vec<u64>) {
+    results.sort_unstable();
+    let mean   = results.iter().sum::<u64>() / results.len() as u64;
+    let median = results[results.len() / 2];
+    let min    = results[0];
+    let max    = results[results.len() - 1];
+    let solo   = solo_ns as f64;
+    let ratio  = mean as f64 / solo;
+    let pct    = (ratio - 1.0) * 100.0;
+    let spread = (max - min) as f64 / solo * 100.0;
+    println!("\n=== {} ({} workers) ===", label, workers);
+    println!("  mean:   {} ns  ({:+.1}% vs solo)", mean, pct);
+    println!("  median: {} ns", median);
+    println!("  min:    {} ns", min);
+    println!("  max:    {} ns", max);
+    println!("  spread: {:.1}% of solo  (max-min / solo)", spread);
+}
+
 fn main() {
     let args = LlvmLstm::parse();
     match args.command {
@@ -169,6 +205,34 @@ fn main() {
         }
         Command::PlotEvaluate { dir } => {
             // read dir + run python plotting
+        }
+        Command::BenchNoise { source, clang, work_dir, runs, iters, workers } => {
+            use rayon::prelude::*;
+            use crate::llvm::Llvm;
+            use crate::llvm::ir::Source;
+
+            std::fs::create_dir_all(&work_dir).expect("create work dir");
+            let llvm = Llvm::new(&clang, "opt-20", work_dir.clone());
+            let src = Source { file: source };
+
+            // Emit IR then compile through the same pipeline as a training episode.
+            println!("Emitting IR...");
+            let ir = llvm.ir(&src).expect("emit IR");
+            println!("Compiling IR...");
+            let bin = llvm.compile(&ir).expect("compile IR");
+
+            // ── 1. Serial solo run ──────────────────────────────────────────
+            let solo = llvm.benchmark(&bin, runs, iters).expect("solo benchmark");
+            println!("\n=== Serial (solo) ===");
+            println!("  mean: {} ns", solo.mean_ns);
+
+            // ── 2. Rayon parallel: `workers` threads, same binary ───────────
+            let mut rayon_ns: Vec<u64> = (0..workers).into_par_iter().map(|_| {
+                let llvm2 = llvm.clone();
+                let bin2 = crate::llvm::ir::Bin { file: bin.file.clone() };
+                llvm2.benchmark(&bin2, runs, iters).expect("rayon worker bench").mean_ns
+            }).collect();
+            print_stats("Rayon parallel", workers, solo.mean_ns, &mut rayon_ns);
         }
     }
 }
