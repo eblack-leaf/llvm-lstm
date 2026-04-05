@@ -1,3 +1,4 @@
+use crate::llvm::pass::Pass;
 use crate::ppo::episode::Results;
 use crate::ppo::model::ACTIONS;
 use crate::ppo::returns::Returns;
@@ -45,11 +46,18 @@ impl Returns for LookaheadCumulativeReturn {
         }).collect();
 
         // Discounted cumulative return, computed backwards.
+        // Stop's reward does not flow into prior steps — each non-Stop step
+        // accumulates only from its own pass quality forward, not from the
+        // quality of the terminal state. Stop still gets its own lookahead
+        // return for the PPO update on the Stop action itself.
         let mut returns = vec![0.0f32; n];
         let mut running = 0.0f32;
         for t in (0..n).rev() {
             running = rewards[t] + self.gamma * running;
             returns[t] = running;
+            if results.steps[t].pass == Pass::Stop {
+                running = 0.0;
+            }
         }
 
         // Normalise episode returns to [-1, 1].
