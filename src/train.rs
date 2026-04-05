@@ -141,7 +141,7 @@ impl Trainer {
                 let mut prev_features: Vec<f32> = episode.base_features.clone();
                 // Step-level no-op cache: if the chosen pass didn't change the IR,
                 // the next step's lookahead is identical — reuse instead of re-running.
-                let mut prev_lookahead: Option<([u8; 32], Box<[f32; 29]>)> = None;
+                let mut prev_lookahead: Option<([u8; 32], [f32; 29])> = None;
                 loop {
                     let input = Input::new(
                         &dev,
@@ -162,7 +162,7 @@ impl Trainer {
 
                     // Lookahead: bench all 29 ACTIONS from the pre-action IR.
                     // Happens before apply_one so the IR state is unmodified.
-                    let lookahead: Option<Box<[f32; 29]>> = if episode.cfg.lookahead_benchmark {
+                    let lookahead: Option<[f32; 29]> = if episode.cfg.lookahead_benchmark {
                         let pre_ir = episode.current_ir.clone();
                         let baselines = episode.baselines.clone();
                         let runs = episode.cfg.lookahead_runs;
@@ -172,11 +172,10 @@ impl Trainer {
                         let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
                         let speedups = if matches!(prev_lookahead, Some((h, _)) if h == ir_hash) {
                             // Same IR as last step (chosen pass was a no-op) — reuse.
-                            let (_, ref sp) = *prev_lookahead.as_ref().unwrap();
                             episode.lookahead_hits += 29;
-                            sp.clone()
+                            prev_lookahead.unwrap().1
                         } else {
-                            let mut speedups = Box::new([0.0f32; 29]);
+                            let mut speedups = [0.0f32; 29];
                             for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
                                 let key = (episode.func_name.clone(), ir_hash, pass_idx as u8);
                                 if let Some(cached) = cache.get(&key) {
@@ -199,7 +198,7 @@ impl Trainer {
                             }
                             speedups
                         };
-                        prev_lookahead = Some((ir_hash, speedups.clone()));
+                        prev_lookahead = Some((ir_hash, speedups));
                         Some(speedups)
                     } else {
                         None

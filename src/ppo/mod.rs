@@ -82,7 +82,7 @@ impl Ppo {
                     .iter()
                     .position(|&p| p == taken)
                     .expect("taken action not in ACTIONS");
-                let lookahead = ep.steps[t].lookahead.as_ref().map(|la| **la);
+                let lookahead = ep.steps[t].lookahead.as_ref().map(|la| *la);
                 steps.push(BatchStep {
                     features,
                     action_seq,

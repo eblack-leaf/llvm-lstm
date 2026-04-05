@@ -15,7 +15,7 @@ pub(crate) struct Step {
     /// One-step lookahead speedups for all 29 ACTIONS tried from the IR state
     /// *before* this step's pass was applied. Indexed in ACTIONS order.
     /// Some only when cfg.lookahead_benchmark is enabled.
-    pub(crate) lookahead: Option<Box<[f32; 29]>>,
+    pub(crate) lookahead: Option<[f32; 29]>,
 }
 impl Step {
     pub(crate) fn new(
@@ -23,7 +23,7 @@ impl Step {
         step_idx: usize,
         benchmark: Option<Benchmark>,
         delta_features: Vec<f32>,
-        lookahead: Option<Box<[f32; 29]>>,
+        lookahead: Option<[f32; 29]>,
     ) -> Self {
         Self {
             pass,
