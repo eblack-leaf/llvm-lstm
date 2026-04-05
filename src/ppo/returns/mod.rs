@@ -13,5 +13,13 @@ use crate::ppo::episode::Results;
 /// do finer attribution (IR feature deltas, pass no-op detection, correlation with
 /// historical orderings, etc.) without being locked into a fixed strategy now.
 pub(crate) trait Returns {
+    /// Compute per-step returns for a single episode.
     fn compute(&self, results: &Results) -> Vec<f32>;
+
+    /// Compute returns for a full batch of episodes.
+    /// Default maps `compute` over each episode. Override when cross-episode
+    /// context is needed (e.g. batch-level normalisation).
+    fn compute_batch(&self, results: &[Results]) -> Vec<Vec<f32>> {
+        results.iter().map(|r| self.compute(r)).collect()
+    }
 }

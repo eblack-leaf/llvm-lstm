@@ -29,6 +29,20 @@ impl LookaheadCumulativeReturn {
 }
 
 impl Returns for LookaheadCumulativeReturn {
+    fn compute_batch(&self, results: &[Results]) -> Vec<Vec<f32>> {
+        let mut all_returns: Vec<Vec<f32>> = results.iter().map(|r| self.compute(r)).collect();
+        let batch_max = all_returns.iter().flatten()
+            .map(|r| r.abs())
+            .fold(0.0f32, f32::max)
+            .max(1e-4);
+        for ep in &mut all_returns {
+            for r in ep.iter_mut() {
+                *r /= batch_max;
+            }
+        }
+        all_returns
+    }
+
     fn compute(&self, results: &Results) -> Vec<f32> {
         let n = results.log_probs.len();
         if n == 0 { return vec![]; }
@@ -46,15 +60,14 @@ impl Returns for LookaheadCumulativeReturn {
         }).collect();
 
         // Discounted cumulative return, computed backwards.
+        // No per-episode normalisation — caller normalises across the full batch
+        // so V sees consistent scale across episodes of different quality.
         let mut returns = vec![0.0f32; n];
         let mut running = 0.0f32;
         for t in (0..n).rev() {
             running = rewards[t] + self.gamma * running;
             returns[t] = running;
         }
-
-        // Normalise episode returns to [-1, +1].
-        let norm = returns.iter().map(|r| r.abs()).fold(0.0f32, f32::max).max(1e-4);
-        returns.iter().map(|r| r / norm).collect()
+        returns
     }
 }

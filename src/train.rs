@@ -294,8 +294,7 @@ impl Trainer {
                 metrics.record_lookahead_cache(total_hits, total_misses);
                 metrics.update_episode(&results);
 
-                let all_returns: Vec<Vec<f32>> =
-                    results.iter().map(|r| self.returns.compute(r)).collect();
+                let all_returns: Vec<Vec<f32>> = self.returns.compute_batch(&results);
 
                 // Explained variance from rollout values vs computed returns (pre-update).
                 let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();
