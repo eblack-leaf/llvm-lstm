@@ -1,5 +1,6 @@
 use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Results;
+use crate::ppo::BatchStep;
 
 /// Standard return-minus-baseline advantage.
 ///
@@ -57,5 +58,15 @@ impl Advantages for BaselineAdvantage {
         }
 
         all_advantages
+    }
+
+    fn compute_live(&self, steps: &[BatchStep], pred_v: &[f32]) -> Vec<f32> {
+        let mut advs: Vec<f32> = steps.iter().zip(pred_v).map(|(s, &v)| s.ret - v).collect();
+        if self.normalise && advs.len() > 1 {
+            let var = advs.iter().map(|a| a.powi(2)).sum::<f32>() / advs.len() as f32;
+            let std = var.sqrt().max(1e-8);
+            for a in &mut advs { *a /= std; }
+        }
+        advs
     }
 }

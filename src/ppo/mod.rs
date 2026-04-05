@@ -1,4 +1,5 @@
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
+use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Results;
 use crate::ppo::metrics::PpoLosses;
 use crate::ppo::model::{ACTIONS, Actor, Input};
@@ -30,7 +31,9 @@ pub(crate) struct BatchStep {
     pub(crate) taken_action_idx: usize,
     pub(crate) old_log_prob: f32,
     pub(crate) ret: f32,
-    pub(crate) advantage: f32,
+    /// One-step lookahead speedups for all ACTIONS from the pre-action IR state.
+    /// Available when cfg.lookahead_benchmark is enabled; None otherwise.
+    pub(crate) lookahead: Option<[f32; 29]>,
 }
 
 /// Flat collection of all steps across all episodes in one epoch.
@@ -60,13 +63,9 @@ impl Ppo {
     /// Flatten all episode results + pre-computed returns/advantages into a Batch.
     /// For step t, the model input is actions[0..=t] (the growing prefix) and
     /// features = [base | delta_at_t]. No padding — each step keeps its exact sequence.
-    pub(crate) fn batch(
-        results: &[Results],
-        returns: &[Vec<f32>],
-        advantages: &[Vec<f32>],
-    ) -> Batch {
+    pub(crate) fn batch(results: &[Results], returns: &[Vec<f32>]) -> Batch {
         let mut steps = Vec::new();
-        for ((ep, ep_rets), ep_advs) in results.iter().zip(returns).zip(advantages) {
+        for (ep, ep_rets) in results.iter().zip(returns) {
             for t in 0..ep.log_probs.len() {
                 // features = base || delta at state s_t
                 let features: Vec<f32> = ep
@@ -83,13 +82,14 @@ impl Ppo {
                     .iter()
                     .position(|&p| p == taken)
                     .expect("taken action not in ACTIONS");
+                let lookahead = ep.steps[t].lookahead.as_ref().map(|la| **la);
                 steps.push(BatchStep {
                     features,
                     action_seq,
                     taken_action_idx,
                     old_log_prob: ep.log_probs[t],
                     ret: ep_rets[t],
-                    advantage: ep_advs[t],
+                    lookahead,
                 });
             }
         }
@@ -109,6 +109,7 @@ impl Ppo {
         cfg: &Cfg,
         device: &BurnDevice,
         ppo_bar: &ProgressBar,
+        advantages_impl: &dyn Advantages,
     ) -> (A, O, PpoLosses)
     where
         A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff>,
@@ -191,20 +192,24 @@ impl Ppo {
                 );
                 let new_log_probs = log_probs_all.gather(1, taken_idx).flatten::<1>(0, 1); // [n]
 
-                let adv_data: Vec<f32> = chunk.iter().map(|s| s.advantage).collect();
                 let old_lp_data: Vec<f32> = chunk.iter().map(|s| s.old_log_prob).collect();
                 let ret_data: Vec<f32> = chunk.iter().map(|s| s.ret).collect();
 
-                let advantages = Tensor::<BurnAutoDiff, 1>::from_data(
-                    TensorData::new(adv_data, [n]),
-                    device,
-                );
                 let old_log_probs = Tensor::<BurnAutoDiff, 1>::from_data(
                     TensorData::new(old_lp_data, [n]),
                     device,
                 );
                 let targets = Tensor::<BurnAutoDiff, 1>::from_data(
                     TensorData::new(ret_data, [n]),
+                    device,
+                );
+
+                // Advantages recomputed from current V each PPO epoch via the
+                // implementor — baseline stays fresh as V improves.
+                let pred_v_f32: Vec<f32> = pred_v.clone().detach().into_data().to_vec::<f32>().unwrap();
+                let adv_data = advantages_impl.compute_live(chunk, &pred_v_f32);
+                let advantages = Tensor::<BurnAutoDiff, 1>::from_data(
+                    TensorData::new(adv_data, [n]),
                     device,
                 );
 

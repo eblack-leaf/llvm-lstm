@@ -270,7 +270,7 @@ impl Trainer {
 
                 let advantages = self.advantages.compute(&all_returns, &results);
                 metrics.update_returns_advs(&all_returns, &advantages);
-                let batch = Ppo::batch(&results, &all_returns, &advantages);
+                let batch = Ppo::batch(&results, &all_returns);
                 let lr = scheduler.step();
 
                 let t_ppo = Instant::now();
@@ -284,6 +284,7 @@ impl Trainer {
                     &self.cfg,
                     &self.device,
                     &ppo_bar,
+                    self.advantages.as_ref(),
                 );
                 ppo_bar.finish_and_clear();
                 model = new_model;
@@ -315,7 +316,6 @@ impl Trainer {
 
             logger.finish();
             // final cleanup + plot
-            todo!()
         });
     }
 }
