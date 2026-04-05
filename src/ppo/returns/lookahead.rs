@@ -29,7 +29,7 @@ impl LookaheadCumulativeReturn {
 }
 
 impl Returns for LookaheadCumulativeReturn {
-    fn compute_batch(&self, results: &[Results]) -> Vec<Vec<f32>> {
+    fn compute_batch(&mut self, results: &[Results]) -> Vec<Vec<f32>> {
         let mut all_returns: Vec<Vec<f32>> = results.iter().map(|r| self.compute(r)).collect();
         let flat: Vec<f32> = all_returns.iter().flatten().copied().collect();
         let n = flat.len() as f32;

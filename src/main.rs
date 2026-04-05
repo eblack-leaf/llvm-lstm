@@ -16,6 +16,7 @@ use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::advantages::gae::GaeAdvantage;
 use crate::ppo::advantages::lookahead::LookaheadAdvantage;
 use crate::ppo::returns::best_step::BestStepReturn;
+use crate::ppo::returns::episodic_pattern::EpisodicPatternReturn; // EpisodicPatternReturn::new(0.99, 32, 0.2)
 use crate::ppo::returns::lookahead::LookaheadCumulativeReturn;
 
 mod config;
