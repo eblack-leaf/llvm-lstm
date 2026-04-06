@@ -138,6 +138,16 @@ impl Ppo {
                 // output.policy: [N, max_k, 1, num_actions]
                 // output.value:  [N, max_k, 1]
 
+                let num_actions = ACTIONS.len();
+
+                // Extract forward values as f32 once per chunk for metric computation.
+                // Metrics never need autodiff — keeping them on f32 avoids N_eps × 4
+                // unnecessary autodiff tensor clones per chunk.
+                let policy_f32: Vec<f32> = output.policy.clone()
+                    .into_data().convert::<f32>().to_vec().unwrap(); // [N * max_k * 1 * num_actions]
+                let value_f32: Vec<f32> = output.value.clone()
+                    .into_data().convert::<f32>().to_vec().unwrap();  // [N * max_k * 1]
+
                 let mut total_loss: Option<Tensor<BurnAutoDiff, 1>> = None;
 
                 for (ep_idx, episode) in chunk.iter().enumerate() {
@@ -158,7 +168,7 @@ impl Ppo {
                     let taken_idx_data: Vec<i64> = episode.steps.iter()
                         .map(|s| s.taken_action_idx as i64).collect();
                     let taken_idx = Tensor::<BurnAutoDiff, 2, Int>::from_data(
-                        TensorData::new(taken_idx_data, [k, 1]),
+                        TensorData::new(taken_idx_data.clone(), [k, 1]),
                         device,
                     );
                     let new_log_probs = log_probs_all.gather(1, taken_idx).flatten::<1>(0, 1); // [k]
@@ -166,20 +176,15 @@ impl Ppo {
                     let old_lp_data: Vec<f32> = episode.steps.iter()
                         .map(|s| s.old_log_prob).collect();
                     let old_log_probs = Tensor::<BurnAutoDiff, 1>::from_data(
-                        TensorData::new(old_lp_data, [k]),
+                        TensorData::new(old_lp_data.clone(), [k]),
                         device,
                     );
-
-                    // Approx KL (detached, for logging only)
-                    let approx_kl = (old_log_probs.clone() - new_log_probs.clone())
-                        .mean()
-                        .into_scalar();
 
                     // Pre-computed advantages from the rollout (implementor decides normalisation).
                     let adv_data: Vec<f32> = episode.steps.iter()
                         .map(|s| s.advantage).collect();
                     let advantages = Tensor::<BurnAutoDiff, 1>::from_data(
-                        TensorData::new(adv_data, [k]),
+                        TensorData::new(adv_data.clone(), [k]),
                         device,
                     );
 
@@ -190,9 +195,7 @@ impl Ppo {
                     let diff = (a.clone() - b.clone()).abs();
                     let policy_loss = -((a + b - diff) / 2.0).mean();    // [1]
 
-                    // Value loss: per-slot predictions vs terminal return.
-                    // All slots share the same target R; V_t learns to predict it
-                    // from the sequence prefix, enabling credit differentiation.
+                    // Value loss
                     let targets = Tensor::<BurnAutoDiff, 1>::from_data(
                         TensorData::new(vec![episode.episode_return; k], [k]),
                         device,
@@ -205,11 +208,46 @@ impl Ppo {
                     let p = log_p.clone().exp();
                     let entropy = -(p * log_p).sum_dim(1).flatten::<1>(0, 1).mean(); // [1]
 
-                    // Metrics (detached scalars, weighted by episode step count)
+                    // --- Metrics: pure f32, no autodiff nodes ---
                     let k_f = k as f32;
-                    sum_policy  += policy_loss.clone().detach().into_scalar() * k_f;
-                    sum_value   += (value_loss.clone() * self.value_coef).detach().into_scalar() * k_f;
-                    sum_entropy += entropy.clone().detach().into_scalar() * k_f;
+                    let ep_base = ep_idx * max_k;
+
+                    // log-softmax over actions in f32, pick the taken action per slot
+                    let new_lp_f32: Vec<f32> = (0..k).map(|t| {
+                        let off = (ep_base + t) * num_actions;
+                        let sl  = &policy_f32[off..off + num_actions];
+                        let mx  = sl.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        let lse = sl.iter().map(|&x| (x - mx).exp()).sum::<f32>().ln() + mx;
+                        sl[taken_idx_data[t] as usize] - lse
+                    }).collect();
+
+                    let approx_kl: f32 = old_lp_data.iter().zip(&new_lp_f32)
+                        .map(|(o, n)| o - n).sum::<f32>() / k_f;
+
+                    let policy_s: f32 = new_lp_f32.iter().zip(&old_lp_data).zip(&adv_data)
+                        .map(|((n, o), a)| {
+                            let r = (n - o).exp();
+                            let rc = r.clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon);
+                            -(r * a).min(rc * a)
+                        }).sum::<f32>() / k_f;
+
+                    let target = episode.episode_return;
+                    let value_s: f32 = (0..k).map(|t| {
+                        let v = value_f32[ep_base + t];
+                        (v - target).powi(2)
+                    }).sum::<f32>() / k_f;
+
+                    let entropy_s: f32 = (0..k).map(|t| {
+                        let off = (ep_base + t) * num_actions;
+                        let sl  = &policy_f32[off..off + num_actions];
+                        let mx  = sl.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        let lse = sl.iter().map(|&x| (x - mx).exp()).sum::<f32>().ln() + mx;
+                        -sl.iter().map(|&x| { let lp = x - lse; lp.exp() * lp }).sum::<f32>()
+                    }).sum::<f32>() / k_f;
+
+                    sum_policy  += policy_s * k_f;
+                    sum_value   += value_s * self.value_coef * k_f;
+                    sum_entropy += entropy_s * k_f;
                     sum_kl      += approx_kl * k_f;
                     update_count += k;
 

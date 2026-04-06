@@ -9,8 +9,14 @@ pub(crate) type BurnBackend = burn::backend::Wgpu;
 #[cfg(feature = "wgpu")]
 pub(crate) type BurnDevice = burn::backend::wgpu::WgpuDevice;
 pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
+#[cfg(not(feature = "conclave"))]
 pub(crate) type Arch = crate::ppo::model::seq::SeqActor<BurnAutoDiff>;
+#[cfg(not(feature = "conclave"))]
 pub(crate) type ArchConfig = crate::ppo::model::seq::SeqActorConfig;
+#[cfg(feature = "conclave")]
+pub(crate) type Arch = crate::ppo::model::conclave::ConclaveActor<BurnAutoDiff>;
+#[cfg(feature = "conclave")]
+pub(crate) type ArchConfig = crate::ppo::model::conclave::ConclaveActorConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Cfg {
