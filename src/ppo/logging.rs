@@ -52,6 +52,7 @@ impl Logger {
             epoch_bar.enable_steady_tick(Duration::from_millis(100));
         }
 
+        // Truncate the log file on every new run — runs accumulate otherwise.
         let file = match mode {
             LogMode::StdoutOnly => None,
             _ => {
@@ -59,7 +60,11 @@ impl Logger {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let f = OpenOptions::new().create(true).append(true).open(path)?;
+                let f = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(path)?;
                 Some(BufWriter::new(f))
             }
         };
@@ -84,7 +89,6 @@ impl Logger {
         }
     }
 
-    /// Transient progress bar for episode collection. Caller must call `.finish_and_clear()`.
     pub(crate) fn collection_bar(&self, total_episodes: u64) -> ProgressBar {
         let style = ProgressStyle::with_template(
             "  collect {bar:30.green/black} {pos}/{len} eps",
@@ -99,7 +103,6 @@ impl Logger {
         bar
     }
 
-    /// Transient progress bar for the PPO update. Caller must call `.finish_and_clear()`.
     pub(crate) fn ppo_bar(&self, total_steps: u64) -> ProgressBar {
         let style = ProgressStyle::with_template(
             "  ppo    {bar:30.magenta/black} {pos}/{len}  {msg}",
@@ -114,7 +117,6 @@ impl Logger {
         bar
     }
 
-    /// Log a colored epoch summary to stdout and/or a JSON line to file.
     pub(crate) fn log_epoch(&mut self, epoch: usize, metrics: &Metrics, lr: f64) {
         if !matches!(self.mode, LogMode::FileOnly) {
             let speedup = metrics.avg_final_speedup();
@@ -136,19 +138,14 @@ impl Logger {
                 format!("{:.1}m", total_s / 60.0)
             };
 
-            // Grayscale helpers — varied per line so rows are visually distinct.
-            macro_rules! g1 { ($s:expr) => { $s.truecolor(210, 210, 210).to_string() } }  // bright
-            macro_rules! g2 { ($s:expr) => { $s.truecolor(160, 160, 160).to_string() } }  // mid
-            macro_rules! g3 { ($s:expr) => { $s.truecolor(115, 115, 115).to_string() } }  // dim
-            macro_rules! g4 { ($s:expr) => { $s.truecolor( 85,  85,  85).to_string() } }  // dark
+            macro_rules! g1 { ($s:expr) => { $s.truecolor(210, 210, 210).to_string() } }
+            macro_rules! g2 { ($s:expr) => { $s.truecolor(160, 160, 160).to_string() } }
+            macro_rules! g3 { ($s:expr) => { $s.truecolor(115, 115, 115).to_string() } }
 
-            // Line 1: performance + timing — bright gray labels
-            let cache_str = metrics.la_cache_hit_pct()
-                .map(|p| format!("  {}={}", g1!("la_cache"), format!("{:.1}%", p).cyan()))
-                .unwrap_or_default();
             let bench_cache_str = metrics.bench_cache_hit_pct()
                 .map(|p| format!("  {}={}", g1!("bench_cache"), format!("{:.1}%", p).cyan()))
                 .unwrap_or_default();
+
             self.epoch_bar.println(format!(
                 "{} {:>5}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
                 g1!("epoch"), epoch,
@@ -158,66 +155,32 @@ impl Logger {
                 g1!("collect="), format!("{}ms", metrics.episode_collection_ms).cyan(),
                 g1!("ppo="), format!("{}ms", metrics.ppo_update_ms).cyan(),
                 g1!("total="), total_str.cyan().to_string(),
-            ) + &cache_str + &bench_cache_str);
+            ) + &bench_cache_str);
 
-            // Line 2: training losses — mid gray labels
             self.epoch_bar.println(format!(
                 "         {}  {}{}  {}{}  {}{}  {}{}  {}{}",
                 g2!("losses"),
                 g2!("policy="), format!("{:+.4}", metrics.policy_loss()).yellow(),
-                g2!("value="),  format!("{:.4}",  metrics.value_loss()).yellow(),
-                g2!("entropy="),format!("{:.1}%", metrics.entropy_pct()).yellow(),
-                g2!("kl="),     format!("{:.4}",  metrics.kl_div()).truecolor(200, 160, 80).to_string(),
+                g2!("value="),  format!("{:.4}", metrics.value_loss()).yellow(),
+                g2!("entropy="), format!("{:.1}%", metrics.entropy_pct()).yellow(),
+                g2!("kl="),     format!("{:.4}", metrics.kl_div()).truecolor(200, 160, 80).to_string(),
                 g2!("ev="),     format!("{:+.3}", metrics.explained_variance()).truecolor(200, 160, 80).to_string(),
             ));
 
-            // Line 3: return distribution — dim gray labels
             if let Some(ra) = &metrics.ret_adv {
-                let raw_std_str = ra.raw_ret_std
-                    .map(|s| format!("  {}{}",  g3!("raw_std="), format!("{:.3}", s).cyan()))
-                    .unwrap_or_default();
                 self.epoch_bar.println(format!(
-                    "         {}  {}{}  {}[{}, {}]  {}{}  {}{}",
+                    "         {}  {}{}  {}[{}, {}]  {}{}",
                     g3!("ret"),
-                    g3!("mean="),    format!("{:+.3}", ra.ret_mean).cyan(),
-                    g3!("range="),   format!("{:+.3}", ra.ret_min).cyan(),
-                                     format!("{:+.3}", ra.ret_max).cyan(),
-                    g3!("noop="),    format!("{:.0}%", ra.noop_frac * 100.0).cyan(),
-                    g3!("adv_std="), format!("{:.3}",  ra.adv_std).cyan(),
-                ).to_string() + &raw_std_str);
-            }
-
-            // Lines 4+: one line per func, alternating dark/dim gray labels
-            if let Some(ss) = &metrics.store_stats {
-                self.epoch_bar.println(format!(
-                    "         {}  {}",
-                    g3!("store"),
-                    format!("{}", ss.total_entries).truecolor(180, 180, 180).to_string(),
+                    g3!("mean="), format!("{:+.3}", ra.ret_mean).cyan(),
+                    g3!("range="), format!("{:+.3}", ra.ret_min).cyan(),
+                                   format!("{:+.3}", ra.ret_max).cyan(),
+                    g3!("adv_std="), format!("{:.3}", ra.adv_std).cyan(),
                 ));
-                for (i, f) in ss.per_func.iter().enumerate() {
-                    let lbl = |s: &str| -> String {
-                        if i % 2 == 0 { s.truecolor(100, 100, 100).to_string() }
-                        else           { s.truecolor( 70,  70,  70).to_string() }
-                    };
-                    let best_str = if f.best >= 0.0 {
-                        format!("{:+.3}", f.best).green().to_string()
-                    } else {
-                        format!("{:+.3}", f.best).red().to_string()
-                    };
-                    self.epoch_bar.println(format!(
-                        "           {}  {}{}  {}{}  {}{}  {}{}",
-                        f.func_name.truecolor(200, 200, 200).to_string(),
-                        lbl("n="),       format!("{}", f.entries).bold(),
-                        lbl(" best="),   best_str,
-                        lbl(" spread="), format!("{:.3}", f.spread).cyan(),
-                        lbl(" div="),    format!("{:.0}%", f.diversity * 100.0).yellow(),
-                    ));
-                }
             }
         }
 
         if let Some(f) = &mut self.file {
-            let mut record = serde_json::json!({
+            let record = serde_json::json!({
                 "epoch":                  epoch,
                 "policy_loss":            metrics.policy_loss(),
                 "value_loss":             metrics.value_loss(),
@@ -234,31 +197,8 @@ impl Logger {
                 "avg_func_ir_ms":         metrics.avg_func_ir_ms(),
                 "lr":                     lr,
                 "func_speedups":          metrics.func_speedups(),
-                "la_cache_hit_pct": metrics.la_cache_hit_pct(),
                 "bench_cache_hit_pct":    metrics.bench_cache_hit_pct(),
             });
-            if let Some(ra) = &metrics.ret_adv {
-                record["ret_mean"]    = serde_json::json!(ra.ret_mean);
-                record["raw_ret_std"] = serde_json::json!(ra.raw_ret_std);
-                record["ret_min"]   = serde_json::json!(ra.ret_min);
-                record["ret_max"]   = serde_json::json!(ra.ret_max);
-                record["noop_frac"] = serde_json::json!(ra.noop_frac);
-                record["adv_std"]   = serde_json::json!(ra.adv_std);
-            }
-            if let Some(ss) = &metrics.store_stats {
-                let per_func: serde_json::Value = ss.per_func.iter().map(|f| {
-                    serde_json::json!({
-                        "func":      f.func_name,
-                        "entries":   f.entries,
-                        "best":      f.best,
-                        "worst":     f.worst,
-                        "spread":    f.spread,
-                        "diversity": f.diversity,
-                    })
-                }).collect::<Vec<_>>().into();
-                record["store_total"]   = serde_json::json!(ss.total_entries);
-                record["store_per_func"] = per_func;
-            }
             let _ = writeln!(f, "{}", record);
             let _ = f.flush();
         }
@@ -266,7 +206,6 @@ impl Logger {
         self.epoch_bar.inc(1);
     }
 
-    /// Print a one-line marker when a new best checkpoint is saved.
     pub(crate) fn log_best(&self, epoch: usize, mean: f32) {
         if !matches!(self.mode, LogMode::FileOnly) {
             self.epoch_bar.println(

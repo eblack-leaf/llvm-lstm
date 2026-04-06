@@ -26,6 +26,7 @@ impl Functions {
                 source: Source { file: path },
                 ir,
                 baselines: None,
+                ir_features: None,
             });
         }
         functions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -39,4 +40,7 @@ pub(crate) struct Function {
     pub(crate) ir: Ir,
     /// None until collect_baselines has run; always Some during training.
     pub(crate) baselines: Option<Baselines>,
+    /// 34-dim log-transformed IR feature vector for the base IR.
+    /// Populated during the baseline phase alongside baselines.
+    pub(crate) ir_features: Option<Vec<f32>>,
 }

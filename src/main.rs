@@ -1,23 +1,14 @@
 #![recursion_limit = "256"]
 #![allow(unused)]
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
-use burn::module::AutodiffModule;
-use crate::ppo::advantages::rank::RankAdvantage;
+use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::checkpoint::Checkpoint;
-use crate::ppo::logging::{LogMode, Logger};
-use crate::ppo::model::gru::GruActor;
-use crate::ppo::model::transformer::TransformerActor;
-use crate::ppo::returns::delta_weighted::DeltaWeightedReturn;
+use crate::ppo::logging::LogMode;
 use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use crate::ppo::advantages::baseline::BaselineAdvantage;
-use crate::ppo::advantages::gae::GaeAdvantage;
-use crate::ppo::advantages::lookahead::LookaheadAdvantage;
-use crate::ppo::returns::best_step::BestStepReturn;
-use crate::ppo::returns::episodic_pattern::EpisodicPatternReturn; // EpisodicPatternReturn::new(0.99, 32, 0.2)
-use crate::ppo::returns::lookahead::LookaheadCumulativeReturn;
+use burn::module::AutodiffModule;
 
 mod config;
 mod llvm;
@@ -29,6 +20,7 @@ struct LlvmLstm {
     #[command(subcommand)]
     command: Command,
 }
+
 #[derive(Subcommand)]
 enum Command {
     Train {
@@ -56,14 +48,6 @@ enum Command {
         baseline_runs: usize,
         #[arg(long, default_value = "200")]
         baseline_iters: usize,
-        #[arg(long)]
-        per_step_benchmark: bool,
-        #[arg(long)]
-        lookahead_benchmark: bool,
-        #[arg(long, default_value = "1")]
-        lookahead_runs: usize,
-        #[arg(long, default_value = "50")]
-        lookahead_iters: usize,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
         #[arg(long, default_value = "3e-4")]
@@ -74,10 +58,9 @@ enum Command {
         value_coef: f32,
         #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
-        #[arg(long, default_value = "64")]
+        /// Number of episodes per PPO mini-batch.
+        #[arg(long, default_value = "8")]
         mini_batch_size: usize,
-        /// Optional path to persist the benchmark cache across runs (episode-end
-        /// and lookahead results). Omit to start fresh each run.
         #[arg(long)]
         cache_file: Option<PathBuf>,
     },
@@ -89,15 +72,8 @@ enum Command {
         #[arg(long, default_value = "checkpoints")]
         dir: PathBuf,
     },
-    PlotEvaluate {
-        #[arg(long, default_value = "evaluation")]
-        dir: PathBuf,
-    },
-    /// Measure how much parallel worker contention affects benchmark timing.
-    /// Runs a single baseline benchmark alone, then 16 workers benchmarking
-    /// the same binary concurrently, and reports the timing difference.
+    /// Measure parallel-worker benchmark timing contention.
     BenchNoise {
-        /// Path to the C source file to benchmark.
         #[arg(long)]
         source: PathBuf,
         #[arg(long, default_value = "clang-20")]
@@ -112,6 +88,7 @@ enum Command {
         workers: usize,
     },
 }
+
 fn print_stats(label: &str, workers: usize, solo_ns: u64, results: &mut Vec<u64>) {
     results.sort_unstable();
     let mean   = results.iter().sum::<u64>() / results.len() as u64;
@@ -146,10 +123,6 @@ fn main() {
             benchmark_iters,
             baseline_runs,
             baseline_iters,
-            per_step_benchmark,
-            lookahead_benchmark,
-            lookahead_runs,
-            lookahead_iters,
             max_seq_len,
             learning_rate,
             clip_epsilon,
@@ -169,10 +142,6 @@ fn main() {
                 benchmark_iters,
                 baseline_runs,
                 baseline_iters,
-                per_step_benchmark,
-                lookahead_benchmark,
-                lookahead_runs,
-                lookahead_iters,
                 max_seq_len,
                 work_dir,
                 checkpoint_dir: checkpoint_dir.clone(),
@@ -186,8 +155,8 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let trainer = Trainer::new(
                 cfg,
-                Box::new(EpisodicPatternReturn::new(300, 0.2)),
-                Box::new(BaselineAdvantage::new(true)),
+                Box::new(EpisodeReturn),
+                Box::new(BaselineAdvantage),
                 LogMode::FileAndStdout,
                 Some(log_path),
             );
@@ -197,15 +166,10 @@ fn main() {
             let device = BurnDevice::default();
             let (loaded_model, meta) =
                 Checkpoint::load(&model, &device).expect("failed to load checkpoint");
-            let inference_model = loaded_model.valid();
-            // meta.max_seq_len, meta.speedup_ema available for eval setup
-            // TODO: do baselines / greedy / random / model / compare
+            let _inference_model = loaded_model.valid();
         }
         Command::PlotTrain { dir } => {
-            // read dir + run python plotting
-        }
-        Command::PlotEvaluate { dir } => {
-            // read dir + run python plotting
+            // TODO: read dir + run python plotting
         }
         Command::BenchNoise { source, clang, work_dir, runs, iters, workers } => {
             use rayon::prelude::*;
@@ -214,23 +178,20 @@ fn main() {
 
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, "opt-20", work_dir.clone());
-            let src = Source { file: source };
+            let src  = Source { file: source };
 
-            // Emit IR then compile through the same pipeline as a training episode.
             println!("Emitting IR...");
-            let ir = llvm.ir(&src).expect("emit IR");
+            let ir  = llvm.ir(&src).expect("emit IR");
             println!("Compiling IR...");
             let bin = llvm.compile(&ir).expect("compile IR");
 
-            // ── 1. Serial solo run ──────────────────────────────────────────
             let solo = llvm.benchmark(&bin, runs, iters).expect("solo benchmark");
             println!("\n=== Serial (solo) ===");
             println!("  mean: {} ns", solo.mean_ns);
 
-            // ── 2. Rayon parallel: `workers` threads, same binary ───────────
             let mut rayon_ns: Vec<u64> = (0..workers).into_par_iter().map(|_| {
                 let llvm2 = llvm.clone();
-                let bin2 = crate::llvm::ir::Bin { file: bin.file.clone() };
+                let bin2  = crate::llvm::ir::Bin { file: bin.file.clone() };
                 llvm2.benchmark(&bin2, runs, iters).expect("rayon worker bench").mean_ns
             }).collect();
             print_stats("Rayon parallel", workers, solo.mean_ns, &mut rayon_ns);

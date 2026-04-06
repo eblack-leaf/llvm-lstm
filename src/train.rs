@@ -1,28 +1,25 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
 use crate::llvm::{Llvm, BenchCache, load_cache, save_cache};
-use blake3;
-use dashmap::DashMap;
-use rayon::prelude::*;
-use std::sync::Arc;
-use crate::llvm::functions::Functions;
 use crate::llvm::ir::Features;
+use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
 use crate::ppo::Ppo;
 use crate::ppo::advantages::Advantages;
-use crate::ppo::episode::Episode;
+use crate::ppo::episode::Results;
 use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::metrics::{Metrics, explained_variance};
-use crate::ppo::model::transformer::TransformerActor;
-use crate::ppo::model::{Actor, Input, ACTIONS};
+use crate::ppo::model::{Actor, Input};
 use crate::ppo::returns::Returns;
-use crate::ppo::step::Step;
+use dashmap::DashMap;
+use rayon::prelude::*;
+use std::sync::Arc;
+use std::path::PathBuf;
+use std::time::Instant;
 use burn::lr_scheduler::LrScheduler;
 use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
 use burn::optim::{AdamW, AdamWConfig};
-use std::path::PathBuf;
-use std::time::Instant;
 
 pub(crate) struct Trainer {
     cfg: Cfg,
@@ -44,17 +41,8 @@ impl Trainer {
         log_path: Option<PathBuf>,
     ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
-        let ppo = Ppo::new(&cfg);
-        Self {
-            cfg,
-            llvm,
-            device: Default::default(),
-            returns,
-            advantages,
-            ppo,
-            log_mode,
-            log_path,
-        }
+        let ppo  = Ppo::new(&cfg);
+        Self { cfg, llvm, device: Default::default(), returns, advantages, ppo, log_mode, log_path }
     }
 
     pub(crate) fn train(mut self) {
@@ -68,39 +56,43 @@ impl Trainer {
         .expect("logger init");
         let mut metrics = Metrics::new(0.05);
 
-        // Compile IR and collect baselines for each function before any episode
-        // collection. Run sequentially so timing is not polluted by parallel workers.
+        // Compile IR and collect baselines before the training loop.
         for func in &mut functions.functions {
-            let t0 = Instant::now();
+            let t0       = Instant::now();
             let func_llvm = self.llvm.with_env(self.cfg.work_dir.join(&func.name));
             std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
-            func.ir = func_llvm
-                .ir(&func.source)
-                .expect("ir");
+
+            func.ir = func_llvm.ir(&func.source).expect("ir");
             func.baselines = Some(
                 func_llvm
                     .collect_baselines(&func.source, self.cfg.baseline_runs, self.cfg.baseline_iters)
                     .expect("collect_baselines"),
             );
-            let elapsed = t0.elapsed().as_millis() as u64;
-            metrics.record_func_ir_ms(elapsed);
-            logger.log_baseline_progress(&func.name, elapsed);
+
+            // Extract base IR features once per function (34-dim log-transformed).
+            let content = std::fs::read_to_string(&func.ir.file).expect("read base IR");
+            func.ir_features = Some(
+                Features::from_ll_str(&content)
+                    .expect("parse IR features")
+                    .to_vec(),
+            );
+
+            metrics.record_func_ir_ms(t0.elapsed().as_millis() as u64);
+            logger.log_baseline_progress(&func.name, t0.elapsed().as_millis() as u64);
         }
         logger.finish_baseline_phase();
 
-        let arch_cfg = Arch::cfg(&self.cfg);
+        let arch_cfg      = Arch::cfg(&self.cfg);
         let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
         let mut best_mean = f32::NEG_INFINITY;
-        // Persists across epochs — (func, ir_hash, pass_idx) → speedup is fully
-        // deterministic. Optionally loaded from / saved to disk so restarts on
-        // the same machine skip already-benchmarked states.
+
         let bench_cache: BenchCache = if let Some(ref p) = self.cfg.cache_file {
             load_cache(p).expect("load bench cache")
         } else {
             Arc::new(DashMap::new()) as BenchCache
         };
 
-        let mut model = Arch::init(arch_cfg.clone(), &self.device);
+        let mut model     = Arch::init(arch_cfg.clone(), &self.device);
         let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
         let mut scheduler =
             CosineAnnealingLrSchedulerConfig::new(self.cfg.learning_rate, self.cfg.epochs)
@@ -111,9 +103,6 @@ impl Trainer {
             let t_collect = Instant::now();
             let current = model.valid();
 
-            // Build task list, then clone actor once per episode into owned tuples.
-            // Separate steps avoid moving `current` inside an FnMut flat_map closure.
-            // Each rayon worker gets exclusive actor ownership — no Sync bound needed.
             let tasks: Vec<_> = functions.functions.iter()
                 .flat_map(|func| {
                     let func = func.clone();
@@ -125,178 +114,104 @@ impl Trainer {
             let actors: Vec<_> = (0..total_episodes).map(|_| current.clone()).collect();
             let col_bar = logger.collection_bar(total_episodes as u64);
 
-            let results: Vec<_> = tasks.into_par_iter().zip(actors).map(|((ep, func), actor)| {
-                let baselines = func.baselines.as_ref().expect("baselines not collected");
-                let mut episode = Episode::new(
-                    ep,
-                    self.llvm.with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name))),
-                    func.name.clone(),
-                    func.ir.clone(),
-                    self.cfg.clone(),
-                    baselines.clone(),
-                );
-                let dev = self.device.clone();
-                let cache = bench_cache.clone();
+            let results: Vec<Results> = tasks
+                .into_par_iter()
+                .zip(actors)
+                .map(|((ep, func), actor)| {
+                    let baselines    = func.baselines.as_ref().expect("baselines not collected");
+                    let ir_features  = func.ir_features.as_ref().expect("ir_features not collected");
+                    let dev          = self.device.clone();
+                    let cache        = bench_cache.clone();
+                    let func_name    = func.name.clone();
+                    let k            = self.cfg.max_seq_len;
 
-                let mut prev_features: Vec<f32> = episode.base_features.clone();
-                // Step-level no-op cache: if the chosen pass didn't change the IR,
-                // the next step's lookahead is identical — reuse instead of re-running.
-                let mut prev_lookahead: Option<([u8; 32], [f32; 29])> = None;
-                loop {
-                    let input = Input::new(
-                        &dev,
-                        &episode.ir,
-                        &episode.current_ir,
-                        &episode.actions,
+                    let llvm = self.llvm.with_env(
+                        self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)),
                     );
-                    let output = actor.forward(&episode.cfg, input);
-                    let action = output.action();
-                    let log_prob = output.log_prob(action);
-                    let value = output.value_scalar();
-                    episode.actions.push(action);
-                    episode.log_probs.push(log_prob);
-                    episode.values.push(value);
-                    let done = action == Pass::Stop
-                        || episode.actions.len() > episode.cfg.max_seq_len;
-                    let step_idx = episode.steps.len();
+                    std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
-                    // Lookahead: bench all 29 ACTIONS from the pre-action IR.
-                    // Happens before apply_one so the IR state is unmodified.
-                    let lookahead: Option<[f32; 29]> = if episode.cfg.lookahead_benchmark {
-                        let pre_ir = episode.current_ir.clone();
-                        let baselines = episode.baselines.clone();
-                        let runs = episode.cfg.lookahead_runs;
-                        let iters = episode.cfg.lookahead_iters;
-                        // Hash once — shared key prefix for all 29 passes.
-                        let content = std::fs::read(&pre_ir.file).expect("read IR for hash");
-                        let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-                        let speedups = if matches!(prev_lookahead, Some((h, _)) if h == ir_hash) {
-                            // Same IR as last step (chosen pass was a no-op) — reuse.
-                            episode.lookahead_hits += 29;
-                            prev_lookahead.unwrap().1
-                        } else {
-                            let mut speedups = [0.0f32; 29];
-                            for (pass_idx, &pass) in ACTIONS.iter().enumerate() {
-                                let key = (episode.func_name.clone(), ir_hash, pass_idx as u8);
-                                if let Some(cached) = cache.get(&key) {
-                                    speedups[pass_idx] = *cached;
-                                    episode.lookahead_hits += 1;
-                                    continue;
-                                }
-                                let (speedup, noop_hit) = episode.llvm
-                                    .bench_pass_cached(
-                                        &pre_ir, pass, pass_idx, step_idx,
-                                        &episode.func_name, &baselines, runs, iters, &cache,
-                                    )
-                                    .expect("bench_pass_cached");
-                                if noop_hit {
-                                    episode.lookahead_hits += 1;
-                                } else {
-                                    episode.lookahead_misses += 1;
-                                }
-                                speedups[pass_idx] = speedup;
-                            }
-                            speedups
-                        };
-                        prev_lookahead = Some((ir_hash, speedups));
-                        Some(speedups)
-                    } else {
-                        None
-                    };
+                    // Single forward pass over all K slots simultaneously.
+                    let input  = Input::new_slots(&dev, ir_features, k);
+                    let output = actor.forward(&self.cfg, input);
 
-                    // Apply the pass incrementally. Skip Stop — it terminates
-                    // the episode without changing the IR.
-                    if action != Pass::Stop {
-                        episode.current_ir = episode
-                            .llvm
-                            .apply_one(&episode.current_ir, action, step_idx)
-                            .expect("apply_one");
-                    }
-                    // Compute per-step marginal delta: features[t] - features[t-1].
-                    // Zero for Stop (IR unchanged). Also capture the post-action
-                    // IR hash for the benchmark cache check below.
-                    let (delta_features, post_ir_hash) = {
-                        let content =
-                            std::fs::read(&episode.current_ir.file)
-                                .expect("read current IR");
-                        let post_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-                        let content_str = String::from_utf8_lossy(&content);
-                        let current = Features::from_ll_str(&content_str)
-                            .expect("parse current IR features")
-                            .to_vec();
-                        let delta: Vec<f32> = prev_features
-                            .iter()
-                            .zip(&current)
-                            .map(|(p, c)| c - p)
-                            .collect();
-                        prev_features = current;
-                        (delta, post_hash)
-                    };
-                    let benchmark = if done || self.cfg.per_step_benchmark {
-                        // Check if we already have this IR's benchmark in the
-                        // lookahead cache — Stop entry gives bench(current_ir).
-                        let cache_key = (episode.func_name.clone(), post_ir_hash, crate::llvm::STOP_PASS_IDX);
-                        if let Some(&cached_speedup) = cache.get(&cache_key).as_deref() {
-                            episode.bench_cache_hits += 1;
-                            Some(crate::llvm::benchmark::Benchmark { mean_ns: 0, speedup: cached_speedup })
-                        } else {
-                            episode.bench_cache_misses += 1;
-                            let bin = episode
-                                .llvm
-                                .compile(&episode.current_ir)
-                                .expect("compile");
-                            let mut bm = episode
-                                .llvm
-                                .benchmark(&bin, episode.cfg.benchmark_runs, episode.cfg.benchmark_iters)
-                                .expect("benchmark");
-                            bm.speedup = episode.baselines.speedup_vs_o3_parallel(bm.mean_ns);
-                            cache.insert(cache_key, bm.speedup);
-                            Some(bm)
+                    let value              = output.value_scalar();
+                    let (actions, log_probs) = output.sample_sequence();
+
+                    // Apply all non-Stop actions to build the terminal IR.
+                    let mut current_ir = func.ir.clone();
+                    let mut bench_cache_hits   = 0u64;
+                    let mut bench_cache_misses = 0u64;
+
+                    for (step, &action) in actions.iter().enumerate() {
+                        if action != Pass::Stop {
+                            current_ir = llvm
+                                .apply_one(&current_ir, action, step)
+                                .expect("apply_one");
                         }
-                    } else {
-                        None
-                    };
-                    episode.steps.push(Step::new(
-                        action,
-                        step_idx,
-                        benchmark,
-                        delta_features,
-                        lookahead,
-                    ));
-                    if done {
-                        break;
                     }
-                }
-                col_bar.inc(1);
-                episode.results()
-            }).collect();
+
+                    // Benchmark terminal IR (with cache keyed by IR content hash).
+                    let content = std::fs::read(&current_ir.file).expect("read terminal IR");
+                    let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
+                    let cache_key = (func_name.clone(), ir_hash, crate::llvm::STOP_PASS_IDX);
+
+                    let speedup = if let Some(&cached) = cache.get(&cache_key).as_deref() {
+                        bench_cache_hits += 1;
+                        cached
+                    } else {
+                        bench_cache_misses += 1;
+                        let bin = llvm.compile(&current_ir).expect("compile");
+                        let mut bm = llvm
+                            .benchmark(&bin, self.cfg.benchmark_runs, self.cfg.benchmark_iters)
+                            .expect("benchmark");
+                        bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
+                        cache.insert(cache_key, bm.speedup);
+                        bm.speedup
+                    };
+
+                    col_bar.inc(1);
+
+                    Results {
+                        func_name,
+                        bench_cache_hits,
+                        bench_cache_misses,
+                        ir_features: ir_features.clone(),
+                        actions,
+                        log_probs,
+                        value,
+                        episode_return: speedup,
+                        baselines: baselines.clone(),
+                    }
+                })
+                .collect();
 
             col_bar.finish_and_clear();
             metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
-            let (total_hits, total_misses) = results.iter()
-                .fold((0u64, 0u64), |(h, m), r| (h + r.lookahead_hits, m + r.lookahead_misses));
-            metrics.record_la_cache(total_hits, total_misses);
+
             let (bench_hits, bench_misses) = results.iter()
                 .fold((0u64, 0u64), |(h, m), r| (h + r.bench_cache_hits, m + r.bench_cache_misses));
             metrics.record_bench_cache(bench_hits, bench_misses);
             metrics.update_episode(&results);
 
-            let all_returns: Vec<Vec<f32>> = self.returns.compute_batch(&results);
-            metrics.store_stats = self.returns.store_stats();
+            let all_returns = self.returns.compute_batch(&results);
 
             // Explained variance from rollout values vs computed returns (pre-update).
             let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();
-            let ev_vals: Vec<f32> = results.iter().flat_map(|r| r.values.iter().copied()).collect();
+            let ev_vals: Vec<f32> = results.iter()
+                .flat_map(|r| std::iter::repeat(r.value).take(r.log_probs.len()))
+                .collect();
             metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
 
             let advantages = self.advantages.compute(&all_returns, &results);
-            metrics.update_returns_advs(&all_returns, &advantages, self.returns.pre_norm_ret_std());
-            let batch = Ppo::batch(&results, &all_returns);
-            let lr = scheduler.step();
+            metrics.update_returns_advs(&all_returns, &advantages);
 
-            let t_ppo = Instant::now();
-            let num_chunks = batch.steps.len().div_ceil(self.cfg.mini_batch_size);
-            let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
+            let batch = Ppo::batch(&results, &all_returns);
+            let lr    = scheduler.step();
+
+            let t_ppo    = Instant::now();
+            let num_chunks = batch.episodes.len().div_ceil(self.cfg.mini_batch_size);
+            let ppo_bar  = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
+
             let (new_model, new_optimizer, losses) = self.ppo.update(
                 model,
                 optimizer,
@@ -305,10 +220,9 @@ impl Trainer {
                 &self.cfg,
                 &self.device,
                 &ppo_bar,
-                self.advantages.as_ref(),
             );
             ppo_bar.finish_and_clear();
-            model = new_model;
+            model     = new_model;
             optimizer = new_optimizer;
             metrics.record_ppo_ms(t_ppo.elapsed().as_millis() as u64);
             metrics.update_ppo(losses);
@@ -340,6 +254,5 @@ impl Trainer {
         }
 
         logger.finish();
-        // final cleanup + plot
     }
 }

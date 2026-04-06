@@ -1,102 +1,20 @@
-use crate::config::Cfg;
-use crate::llvm::Llvm;
 use crate::llvm::benchmark::Baselines;
-use crate::llvm::ir::{Features, Ir};
 use crate::llvm::pass::Pass;
-use crate::ppo::step::Step;
 
-pub(crate) struct Episode {
-    pub(crate) llvm: Llvm,
-    pub(crate) func_name: String,
-    /// Base (unoptimised) IR — constant for the episode lifetime.
-    pub(crate) ir: Ir,
-    /// Current IR state, updated by apply_one after every step.
-    /// Starts as a clone of ir; diverges as passes are applied.
-    pub(crate) current_ir: Ir,
-    pub(crate) cfg: Cfg,
-    pub(crate) steps: Vec<Step>,
-    // Initialised with Start so the model always sees a non-empty sequence.
-    pub(crate) actions: Vec<Pass>,
-    pub(crate) log_probs: Vec<f32>,
-    // V(s_t) estimate from the critic at each step; used to compute advantages
-    pub(crate) values: Vec<f32>,
-    /// Per-function baseline timings; carried so the train loop can compute
-    /// speedup and so Returns implementors can compare against any opt level.
-    pub(crate) baselines: Baselines,
-    /// Feature vector of the base IR, parsed once at construction.
-    /// Subtracted from the current IR features each step to form delta_features on Step.
-    pub(crate) base_features: Vec<f32>,
-    pub(crate) lookahead_hits: u64,
-    pub(crate) lookahead_misses: u64,
-    pub(crate) bench_cache_hits: u64,
-    pub(crate) bench_cache_misses: u64,
-}
-impl Episode {
-    pub(crate) fn new(
-        idx: usize,
-        llvm: Llvm,
-        func_name: String,
-        ir: Ir,
-        cfg: Cfg,
-        baselines: Baselines,
-    ) -> Self {
-        std::fs::create_dir_all(&llvm.work_dir).expect("failed to create worker dir");
-        let content = std::fs::read_to_string(&ir.file).expect("failed to read base IR");
-        let base_features = Features::from_ll_str(&content)
-            .expect("failed to parse base IR features")
-            .to_vec();
-        let current_ir = ir.clone();
-        Self {
-            llvm,
-            func_name,
-            current_ir,
-            ir,
-            cfg,
-            steps: vec![],
-            actions: vec![Pass::Start],
-            log_probs: vec![],
-            values: vec![],
-            baselines,
-            base_features,
-            lookahead_hits: 0,
-            lookahead_misses: 0,
-            bench_cache_hits: 0,
-            bench_cache_misses: 0,
-        }
-    }
-    pub(crate) fn results(self) -> Results {
-        Results {
-            func_name: self.func_name,
-            lookahead_hits: self.lookahead_hits,
-            lookahead_misses: self.lookahead_misses,
-            bench_cache_hits: self.bench_cache_hits,
-            bench_cache_misses: self.bench_cache_misses,
-            actions: self.actions,
-            log_probs: self.log_probs,
-            values: self.values,
-            steps: self.steps,
-            baselines: self.baselines,
-            base_features: self.base_features,
-        }
-    }
-}
-
+/// Results produced by one episode — consumed by Returns, Advantages, and metrics.
 pub(crate) struct Results {
     pub(crate) func_name: String,
-    pub(crate) lookahead_hits: u64,
-    pub(crate) lookahead_misses: u64,
     pub(crate) bench_cache_hits: u64,
     pub(crate) bench_cache_misses: u64,
+    /// 34-dim log-transformed IR feature vector for the base (unoptimised) IR.
+    pub(crate) ir_features: Vec<f32>,
+    /// K actions sampled (one per slot). Stop = no-op, doesn't change IR.
     pub(crate) actions: Vec<Pass>,
+    /// K log-probabilities, one per sampled action.
     pub(crate) log_probs: Vec<f32>,
-    pub(crate) values: Vec<f32>,
-    /// Full step record. Each Step carries pass, step_idx, and an optional
-    /// benchmark (Some when per_step_benchmark or at episode end, else None).
-    pub(crate) steps: Vec<Step>,
-    /// Per-function baselines; available to Returns implementors to compare
-    /// the episode reward against any standard opt level.
+    /// V(base_IR) — single value estimate for the whole episode.
+    pub(crate) value: f32,
+    /// Terminal speedup (vs -O3) after applying all non-Stop actions.
+    pub(crate) episode_return: f32,
     pub(crate) baselines: Baselines,
-    /// Feature vector of the base IR; combined with Step::delta_features to
-    /// reconstruct the full 68-dim model input for each step during PPO update.
-    pub(crate) base_features: Vec<f32>,
 }

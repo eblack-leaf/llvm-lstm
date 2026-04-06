@@ -1,16 +1,12 @@
-pub(crate) mod gru;
-pub(crate) mod transformer;
+pub(crate) mod seq;
 
-use crate::config::{BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
-use crate::llvm::ir::Ir;
+use crate::config::{BurnBackend, BurnDevice, Cfg};
 use crate::llvm::pass::Pass;
-use crate::ppo::tokens::Tokens;
 use burn::Tensor;
-use burn::module::AutodiffModule;
 use burn::nn::{Linear, LinearConfig};
-use burn::prelude::{Backend, Bool, Int, Module};
+use burn::prelude::{Backend, Int, Module};
 use burn::tensor::TensorData;
-use burn::tensor::activation::{log_softmax, relu, softmax};
+use burn::tensor::activation::{log_softmax, softmax};
 
 pub(crate) const ACTIONS: [Pass; 29] = [
     Pass::Instcombine,
@@ -58,11 +54,7 @@ pub(crate) struct MlpHeadConfig {
 
 impl MlpHeadConfig {
     pub(crate) fn new(in_dim: usize, hidden_dim: usize, out_dim: usize) -> Self {
-        Self {
-            in_dim,
-            hidden_dim,
-            out_dim,
-        }
+        Self { in_dim, hidden_dim, out_dim }
     }
     pub(crate) fn init<B: Backend>(&self, device: &B::Device) -> MlpHead<B> {
         MlpHead {
@@ -74,64 +66,66 @@ impl MlpHeadConfig {
 
 impl<B: Backend> MlpHead<B> {
     pub(crate) fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+        use burn::tensor::activation::relu;
         let x = self.fc1.forward(x);
         let x = relu(x);
         self.fc2.forward(x)
     }
 }
 
+/// Model input: base IR features tiled K times + slot indices [0..K].
 pub(crate) struct Input<B: Backend> {
-    pub(crate) features: Tensor<B, 2>,
-    pub(crate) actions: Tensor<B, 2, Int>,
-    /// Padding mask [batch, seq_len+1] — True where the position is padding (action tokens
-    /// beyond the actual sequence length). Position 0 (IR token) is always False.
-    /// None during inference (single step, no padding needed).
-    pub(crate) mask_pad: Option<Tensor<B, 2, Bool>>,
-    /// Actual action-sequence length for each batch item, needed by GRU to gather the
-    /// correct last hidden state when sequences have been padded to a common length.
-    /// None during inference.
-    pub(crate) action_lens: Option<Vec<usize>>,
+    /// [K, input_dim] — same IR features for every slot.
+    pub(crate) ir_features: Tensor<B, 2>,
+    /// [K] — slot positions [0, 1, ..., K-1].
+    pub(crate) slot_idx: Tensor<B, 1, Int>,
 }
 
 impl Input<BurnBackend> {
-    pub(crate) fn new(dev: &BurnDevice, ir: &Ir, current_ir: &Ir, actions: &[Pass]) -> Self {
-        let tokens = Tokens::new(ir, current_ir, actions);
-        let n_features = tokens.features.len();
-        let seq_len = tokens.actions.len();
-        let features = Tensor::from_data(TensorData::new(tokens.features, [1, n_features]), dev);
-        let actions = Tensor::from_data(TensorData::new(tokens.actions, [1, seq_len]), dev);
-        Self { features, actions, mask_pad: None, action_lens: None }
+    /// Build input for all K=max_seq_len slots in one episode.
+    pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32], k: usize) -> Self {
+        let dim = ir_features.len();
+        let feat_data: Vec<f32> = ir_features.iter().copied().cycle().take(k * dim).collect();
+        let slot_data: Vec<i64> = (0..k as i64).collect();
+        Self {
+            ir_features: Tensor::from_data(TensorData::new(feat_data, [k, dim]), dev),
+            slot_idx:    Tensor::from_data(TensorData::new(slot_data, [k]), dev),
+        }
     }
 }
 
 pub(crate) struct Output<B: Backend> {
+    /// [K, 1, num_actions] — policy logits for every slot.
     pub(crate) policy: Tensor<B, 3>,
+    /// [K, 1] — value estimate V(base_IR), same for every slot.
     pub(crate) value: Tensor<B, 2>,
 }
 
-// Inference-only methods — sampling and scalar extraction require a concrete non-autodiff backend.
 impl Output<BurnBackend> {
-    pub(crate) fn action(&self) -> Pass {
-        let logits = self.policy.clone().flatten::<1>(0, 2);
-        let probs = softmax(logits, 0);
-        let cumsum = probs.cumsum(0);
-        let u: f32 = rand::random();
-        let idx = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
-        ACTIONS[idx.min(ACTIONS.len() - 1)]
+    /// Sample the full pass sequence in one call.
+    /// Returns (actions[K], log_probs[K]) for all slots.
+    pub(crate) fn sample_sequence(&self) -> (Vec<Pass>, Vec<f32>) {
+        let k = self.policy.dims()[0];
+        let mut actions  = Vec::with_capacity(k);
+        let mut log_probs = Vec::with_capacity(k);
+        for slot in 0..k {
+            let logits   = self.policy.clone().narrow(0, slot, 1).flatten::<1>(0, 2); // [num_actions]
+            let log_p    = log_softmax(logits.clone(), 0);
+            let probs    = softmax(logits, 0);
+            let cumsum   = probs.cumsum(0);
+            let u: f32   = rand::random();
+            let idx      = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
+            let idx      = idx.min(ACTIONS.len() - 1);
+            let action   = ACTIONS[idx];
+            let lp       = log_p.narrow(0, idx, 1).into_scalar();
+            actions.push(action);
+            log_probs.push(lp);
+        }
+        (actions, log_probs)
     }
 
     pub(crate) fn value_scalar(&self) -> f32 {
-        self.value.clone().flatten::<1>(0, 1).into_scalar()
-    }
-
-    pub(crate) fn log_prob(&self, action: Pass) -> f32 {
-        let logits = self.policy.clone().flatten::<1>(0, 2);
-        let log_probs = log_softmax(logits, 0);
-        let idx = ACTIONS
-            .iter()
-            .position(|&p| p == action)
-            .expect("pass not in action space");
-        log_probs.narrow(0, idx, 1).into_scalar()
+        self.value.clone().narrow(0, 0, 1).flatten::<1>(0, 1).into_scalar()
     }
 }
 
