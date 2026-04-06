@@ -4,7 +4,7 @@ use crate::config::{BurnBackend, BurnDevice, Cfg};
 use crate::llvm::pass::Pass;
 use burn::Tensor;
 use burn::nn::{Linear, LinearConfig};
-use burn::prelude::{Backend, Int, Module};
+use burn::prelude::{Backend, Module};
 use burn::tensor::TensorData;
 use burn::tensor::activation::{log_softmax, softmax};
 
@@ -73,23 +73,20 @@ impl<B: Backend> MlpHead<B> {
     }
 }
 
-/// Model input: base IR features tiled K times + slot indices [0..K].
+/// Model input: base IR features tiled K times — one row per slot.
+/// Slot positions are derived from the batch dimension inside the forward.
 pub(crate) struct Input<B: Backend> {
-    /// [K, input_dim] — same IR features for every slot.
+    /// [K, input_dim] — same IR features for every slot position.
     pub(crate) ir_features: Tensor<B, 2>,
-    /// [K] — slot positions [0, 1, ..., K-1].
-    pub(crate) slot_idx: Tensor<B, 1, Int>,
 }
 
 impl Input<BurnBackend> {
-    /// Build input for all K=max_seq_len slots in one episode.
+    /// Build input for K slots in one episode.
     pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32], k: usize) -> Self {
         let dim = ir_features.len();
         let feat_data: Vec<f32> = ir_features.iter().copied().cycle().take(k * dim).collect();
-        let slot_data: Vec<i64> = (0..k as i64).collect();
         Self {
             ir_features: Tensor::from_data(TensorData::new(feat_data, [k, dim]), dev),
-            slot_idx:    Tensor::from_data(TensorData::new(slot_data, [k]), dev),
         }
     }
 }
@@ -102,24 +99,21 @@ pub(crate) struct Output<B: Backend> {
 }
 
 impl Output<BurnBackend> {
-    /// Sample the full pass sequence in one call.
-    /// Returns (actions[K], log_probs[K]) for all slots.
+    /// Sample the full pass sequence in one call. Returns (actions[K], log_probs[K]).
     pub(crate) fn sample_sequence(&self) -> (Vec<Pass>, Vec<f32>) {
         let k = self.policy.dims()[0];
-        let mut actions  = Vec::with_capacity(k);
+        let mut actions   = Vec::with_capacity(k);
         let mut log_probs = Vec::with_capacity(k);
         for slot in 0..k {
-            let logits   = self.policy.clone().narrow(0, slot, 1).flatten::<1>(0, 2); // [num_actions]
-            let log_p    = log_softmax(logits.clone(), 0);
-            let probs    = softmax(logits, 0);
-            let cumsum   = probs.cumsum(0);
-            let u: f32   = rand::random();
-            let idx      = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
-            let idx      = idx.min(ACTIONS.len() - 1);
-            let action   = ACTIONS[idx];
-            let lp       = log_p.narrow(0, idx, 1).into_scalar();
-            actions.push(action);
-            log_probs.push(lp);
+            let logits  = self.policy.clone().narrow(0, slot, 1).flatten::<1>(0, 2);
+            let log_p   = log_softmax(logits.clone(), 0);
+            let probs   = softmax(logits, 0);
+            let cumsum  = probs.cumsum(0);
+            let u: f32  = rand::random();
+            let idx     = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
+            let idx     = idx.min(ACTIONS.len() - 1);
+            actions.push(ACTIONS[idx]);
+            log_probs.push(log_p.narrow(0, idx, 1).into_scalar());
         }
         (actions, log_probs)
     }

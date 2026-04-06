@@ -9,6 +9,7 @@ use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::Int;
 use burn::tensor::activation::log_softmax;
 use burn::tensor::{Tensor, TensorData};
+use burn::backend::Autodiff;
 
 pub(crate) mod advantages;
 pub(crate) mod checkpoint;
@@ -22,7 +23,6 @@ pub(crate) mod tokens;
 
 /// Per-slot training data for one episode.
 pub(crate) struct BatchStep {
-    pub(crate) slot_idx: usize,
     pub(crate) taken_action_idx: usize,
     pub(crate) old_log_prob: f32,
     pub(crate) ret: f32,
@@ -69,7 +69,6 @@ impl Ppo {
                     .position(|&p| p == action)
                     .expect("action not in ACTIONS");
                 BatchStep {
-                    slot_idx: t,
                     taken_action_idx,
                     old_log_prob: ep.log_probs[t],
                     ret: ep_rets[t],
@@ -128,22 +127,17 @@ impl Ppo {
                 for episode in chunk {
                     let k = episode.steps.len();
 
-                    // Build autodiff input tensors for this episode's K slots.
+                    // Build input for this episode's ep_len slots.
+                    // Causal masking guarantees prefix-independence: running K=ep_len
+                    // gives identical outputs to the collection pass (K=max_seq_len)
+                    // for positions 0..ep_len, so old_log_probs remain valid.
                     let feat_data: Vec<f32> = episode.ir_features.iter()
                         .copied().cycle().take(k * n_features).collect();
-                    let slot_data: Vec<i64> = episode.steps.iter()
-                        .map(|s| s.slot_idx as i64).collect();
-
                     let ir_features = Tensor::<BurnAutoDiff, 2>::from_data(
                         TensorData::new(feat_data, [k, n_features]),
                         device,
                     );
-                    let slot_idx = Tensor::<BurnAutoDiff, 1, Int>::from_data(
-                        TensorData::new(slot_data, [k]),
-                        device,
-                    );
-
-                    let input = Input { ir_features, slot_idx };
+                    let input = Input { ir_features };
                     let output = model.forward(cfg, input);
 
                     // policy: [k, 1, num_actions] → [k, num_actions]

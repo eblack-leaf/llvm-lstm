@@ -134,10 +134,20 @@ impl Trainer {
                     let input  = Input::new_slots(&dev, ir_features, k);
                     let output = actor.forward(&self.cfg, input);
 
-                    let value              = output.value_scalar();
-                    let (actions, log_probs) = output.sample_sequence();
+                    let value                  = output.value_scalar();
+                    let (all_actions, all_lps) = output.sample_sequence();
 
-                    // Apply all non-Stop actions to build the terminal IR.
+                    // ep_len = first Stop index + 1, or K if no Stop was chosen.
+                    // Only slots 0..ep_len are executed and trained.
+                    let ep_len = all_actions.iter()
+                        .position(|&a| a == Pass::Stop)
+                        .map(|t| t + 1)
+                        .unwrap_or(k);
+
+                    let actions   = all_actions[..ep_len].to_vec();
+                    let log_probs = all_lps[..ep_len].to_vec();
+
+                    // Apply non-Stop actions in 0..ep_len to build the terminal IR.
                     let mut current_ir = func.ir.clone();
                     let mut bench_cache_hits   = 0u64;
                     let mut bench_cache_misses = 0u64;
@@ -178,6 +188,7 @@ impl Trainer {
                         ir_features: ir_features.clone(),
                         actions,
                         log_probs,
+                        ep_len,
                         value,
                         episode_return: speedup,
                         baselines: baselines.clone(),
@@ -198,7 +209,7 @@ impl Trainer {
             // Explained variance from rollout values vs computed returns (pre-update).
             let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();
             let ev_vals: Vec<f32> = results.iter()
-                .flat_map(|r| std::iter::repeat(r.value).take(r.log_probs.len()))
+                .flat_map(|r| std::iter::repeat(r.value).take(r.ep_len))
                 .collect();
             metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
 
