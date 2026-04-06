@@ -19,28 +19,24 @@ impl Returns for InstructionWeightedTerminal {
     fn compute(&self, results: &Results) -> Vec<f32> {
         let terminal = results.episode_return;
 
-        // Compute per-slot deltas up front.
+        // Compute per-slot deltas
         let deltas: Vec<f32> = (0..results.ep_len)
             .map(|t| {
                 let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
                 let after = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
-                before - after // positive = instructions removed = good
+                before - after
             })
             .collect();
 
-        // Only instruction-removing steps share the terminal signal.
-        // weight = d.max(0) / total_pos, so:
-        //   - no-ops and instruction-adders always get 0
-        //   - return sign always matches terminal sign (no sign flips)
-        //   - return bounded to [terminal, 0] or [0, terminal] ⊆ [-1, 1]
-        let total_pos: f32 = deltas.iter().map(|&d| d.max(0.0)).sum();
-        if total_pos == 0.0 {
+        let num_positive = deltas.iter().filter(|&&d| d > 0.0).count() as f32;
+        if num_positive == 0.0 {
             return vec![0.0; results.ep_len];
         }
 
+        let reward_per_positive = terminal / num_positive;
         deltas
             .iter()
-            .map(|&d| (d.max(0.0) / total_pos) * terminal)
+            .map(|&d| if d > 0.0 { reward_per_positive } else { 0.0 })
             .collect()
     }
 }
