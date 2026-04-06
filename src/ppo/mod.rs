@@ -312,37 +312,3 @@ impl Ppo {
         (model, optimizer, losses)
     }
 }
-
-/// Gather steps from a padded 3D tensor [n_episodes, max_k, features] → [total_steps, features]
-fn gather_steps_3d<B: Backend>(
-    x: &Tensor<B, 3>,
-    gather_indices: &Tensor<B, 2, Int>,
-    max_k: usize,
-) -> Tensor<B, 2> {
-    let flat = x.clone().flatten::<2>(0, 1); // [n_episodes * max_k, features]
-    let total_steps = gather_indices.dims()[0];
-    let flat_indices = gather_indices
-        .clone()
-        .slice([0..total_steps, 0..1])
-        .mul_scalar(max_k as i64)
-        .add(gather_indices.clone().slice([0..total_steps, 1..2]))
-        .reshape([total_steps]);
-    flat.select(0, flat_indices) // [total_steps, features]
-}
-
-/// Gather steps from a padded 2D tensor [n_episodes, max_k] → [total_steps]
-fn gather_steps_2d<B: Backend>(
-    x: &Tensor<B, 2>,
-    gather_indices: &Tensor<B, 2, Int>,
-    max_k: usize,
-) -> Tensor<B, 1> {
-    let flat = x.clone().flatten::<1>(0, 1); // [n_episodes * max_k]
-    let total_steps = gather_indices.dims()[0];
-    let flat_indices = gather_indices
-        .clone()
-        .slice([0..total_steps, 0..1])
-        .mul_scalar(max_k as i64)
-        .add(gather_indices.clone().slice([0..total_steps, 1..2]))
-        .reshape([total_steps]);
-    flat.select(0, flat_indices) // [total_steps]
-}
