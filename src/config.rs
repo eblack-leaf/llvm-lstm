@@ -47,4 +47,5 @@ pub(crate) struct Cfg {
     pub(crate) cache_file: Option<PathBuf>,
     /// Steps with |instr_delta| <= this threshold count as no-ops in metrics.
     pub(crate) noop_threshold: usize,
+    pub(crate) delta_threshold: f32,
 }

@@ -13,7 +13,9 @@ use crate::ppo::returns::Returns;
 /// If total_net_delta == 0 (no net change), all returns are 0.
 /// If a slot increases instructions (negative delta), it receives negative credit
 /// proportional to how much it undid prior work.
-pub(crate) struct InstructionWeightedTerminal;
+pub(crate) struct InstructionWeightedTerminal {
+    pub(crate) threshold: f32,
+}
 
 impl Returns for InstructionWeightedTerminal {
     fn compute(&self, results: &Results) -> Vec<f32> {
@@ -28,15 +30,15 @@ impl Returns for InstructionWeightedTerminal {
             })
             .collect();
 
-        let num_positive = deltas.iter().filter(|&&d| d > 0.0).count() as f32;
-        if num_positive == 0.0 {
+        let num_influenced = deltas.iter().filter(|&&d| d.abs() > self.threshold).count() as f32;
+        if num_influenced == 0.0 {
             return vec![0.0; results.ep_len];
         }
 
-        let reward_per_positive = terminal / num_positive;
+        let reward_per_influencer = terminal / num_influenced;
         deltas
             .iter()
-            .map(|&d| if d > 0.0 { reward_per_positive } else { 0.0 })
+            .map(|&d| if d > 0.0 { reward_per_influencer } else { 0.0 })
             .collect()
     }
 }

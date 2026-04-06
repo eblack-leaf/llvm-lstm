@@ -85,6 +85,8 @@ enum Command {
         /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
         #[arg(long, default_value = "0")]
         noop_threshold: usize,
+        #[arg(long, default_value = "0.01")]
+        delta_threshold: f32,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -181,6 +183,7 @@ fn main() {
             proxy_alpha,
             returns,
             noop_threshold,
+            delta_threshold
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -203,13 +206,14 @@ fn main() {
                 mini_batch_size,
                 cache_file,
                 noop_threshold,
+                delta_threshold
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
                 sequences_file.or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
             let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
                 "proxy" => Box::new(InstructionProxyReturn { alpha: proxy_alpha }),
-                "weighted" => Box::new(InstructionWeightedTerminal),
+                "weighted" => Box::new(InstructionWeightedTerminal { threshold: delta_threshold }),
                 _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(
