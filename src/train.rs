@@ -1,6 +1,7 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
 use crate::llvm::{Llvm, BenchCache, load_cache, save_cache};
+use crate::llvm::top_sequences::TopSequences;
 use crate::llvm::ir::Features;
 use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
@@ -30,6 +31,7 @@ pub(crate) struct Trainer {
     ppo: Ppo,
     log_mode: LogMode,
     log_path: Option<PathBuf>,
+    sequences_file: Option<PathBuf>,
 }
 
 impl Trainer {
@@ -39,10 +41,11 @@ impl Trainer {
         advantages: Box<dyn Advantages>,
         log_mode: LogMode,
         log_path: Option<PathBuf>,
+        sequences_file: Option<PathBuf>,
     ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
         let ppo  = Ppo::new(&cfg);
-        Self { cfg, llvm, device: Default::default(), returns, advantages, ppo, log_mode, log_path }
+        Self { cfg, llvm, device: Default::default(), returns, advantages, ppo, log_mode, log_path, sequences_file }
     }
 
     pub(crate) fn train(mut self) {
@@ -92,6 +95,12 @@ impl Trainer {
             Arc::new(DashMap::new()) as BenchCache
         };
 
+        let mut top_seqs = if let Some(ref p) = self.sequences_file {
+            TopSequences::load(p).unwrap_or_else(|_| TopSequences::new(50))
+        } else {
+            TopSequences::new(50)
+        };
+
         let mut model     = Arch::init(arch_cfg.clone(), &self.device);
         let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
         let mut scheduler =
@@ -134,7 +143,7 @@ impl Trainer {
                     let input  = Input::new_slots(&dev, ir_features, k);
                     let output = actor.forward(&self.cfg, input);
 
-                    let value                  = output.value_scalar();
+                    let all_values             = output.value_vec();
                     let (all_actions, all_lps) = output.sample_sequence();
 
                     // ep_len = first Stop index + 1, or K if no Stop was chosen.
@@ -143,6 +152,7 @@ impl Trainer {
                         .position(|&a| a == Pass::Stop)
                         .map(|t| t + 1)
                         .unwrap_or(k);
+                    let value = all_values[..ep_len].to_vec();
 
                     let actions   = all_actions[..ep_len].to_vec();
                     let log_probs = all_lps[..ep_len].to_vec();
@@ -160,10 +170,11 @@ impl Trainer {
                         }
                     }
 
-                    // Benchmark terminal IR (with cache keyed by IR content hash).
-                    let content = std::fs::read(&current_ir.file).expect("read terminal IR");
-                    let ir_hash: [u8; 32] = *blake3::hash(&content).as_bytes();
-                    let cache_key = (func_name.clone(), ir_hash, crate::llvm::STOP_PASS_IDX);
+                    // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
+                    let seq_key: Vec<Pass> = actions.iter().copied()
+                        .filter(|&p| p != Pass::Stop)
+                        .collect();
+                    let cache_key = (func_name.clone(), seq_key);
 
                     let speedup = if let Some(&cached) = cache.get(&cache_key).as_deref() {
                         bench_cache_hits += 1;
@@ -189,7 +200,7 @@ impl Trainer {
                         actions,
                         log_probs,
                         ep_len,
-                        value,
+                        values: value,
                         episode_return: speedup,
                         baselines: baselines.clone(),
                     }
@@ -198,6 +209,13 @@ impl Trainer {
 
             col_bar.finish_and_clear();
             metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
+
+            for r in &results {
+                top_seqs.update(r.episode_return, &r.func_name, &r.actions);
+            }
+            if let Some(ref p) = self.sequences_file {
+                top_seqs.save(p).expect("save top sequences");
+            }
 
             let (bench_hits, bench_misses) = results.iter()
                 .fold((0u64, 0u64), |(h, m), r| (h + r.bench_cache_hits, m + r.bench_cache_misses));
@@ -209,14 +227,14 @@ impl Trainer {
             // Explained variance from rollout values vs computed returns (pre-update).
             let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();
             let ev_vals: Vec<f32> = results.iter()
-                .flat_map(|r| std::iter::repeat(r.value).take(r.ep_len))
+                .flat_map(|r| r.values.iter().copied())
                 .collect();
             metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
 
             let advantages = self.advantages.compute(&all_returns, &results);
             metrics.update_returns_advs(&all_returns, &advantages);
 
-            let batch = Ppo::batch(&results, &all_returns);
+            let batch = Ppo::batch(&results, &all_returns, &advantages);
             let lr    = scheduler.step();
 
             let t_ppo    = Instant::now();

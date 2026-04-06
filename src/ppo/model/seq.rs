@@ -76,25 +76,28 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
     }
 
     fn forward(&self, _cfg: &Cfg, input: Input<B>) -> Output<B> {
-        let k      = input.ir_features.dims()[0];
+        let n      = input.ir_features.dims()[0]; // batch (episodes)
+        let k      = input.ir_features.dims()[1]; // slots per episode
+        let nf     = input.ir_features.dims()[2]; // IR feature dim
         let device = input.ir_features.device();
         let seq    = k + 1; // IR token + K slot tokens
 
-        // IR token: project first row of ir_features (all rows identical).
-        let ir_feat = input.ir_features.narrow(0, 0, 1);            // [1, input_dim]
-        let ir_emb  = self.ir_proj.forward(ir_feat);                 // [1, d_model]
+        // IR token: project first slot's features (all slots identical per episode).
+        // [N, 1, nf] → [N, nf] → ir_proj → [N, d_model] → [N, 1, d_model]
+        let ir_feat = input.ir_features.narrow(1, 0, 1).reshape([n, nf]);
+        let ir_emb  = self.ir_proj.forward(ir_feat).unsqueeze_dim(1);   // [N, 1, d_model]
 
-        // Slot tokens: embed positions 0..K.
-        let slot_ids  = Tensor::<B, 1, Int>::arange(0..k as i64, &device)
-            .unsqueeze_dim(0);                                        // [1, K]
-        let slot_emb  = self.slot_embed.forward(slot_ids);            // [1, K, d_model]
+        // Slot tokens: embed positions 0..K, broadcast over batch.
+        // [1, K] → embed → [1, K, d_model] → repeat N times → [N, K, d_model]
+        let slot_ids = Tensor::<B, 1, Int>::arange(0..k as i64, &device)
+            .unsqueeze_dim(0);                                           // [1, K]
+        let slot_emb = self.slot_embed.forward(slot_ids)                 // [1, K, d_model]
+            .repeat(&[n, 1, 1]);                                         // [N, K, d_model]
 
-        // Sequence: [IR_token | slot_0 .. slot_{K-1}], shape [1, K+1, d_model]
-        let ir_tok = ir_emb.unsqueeze_dim(0);                         // [1, 1, d_model]
-        let tokens = Tensor::cat(vec![ir_tok, slot_emb], 1);          // [1, K+1, d_model]
+        // Sequence: [IR_token | slot_0 .. slot_{K-1}], shape [N, K+1, d_model]
+        let tokens = Tensor::cat(vec![ir_emb, slot_emb], 1);
 
-        // Causal attention mask: position i cannot attend to position j > i.
-        // Shape [1, seq, seq]. true = masked (blocked).
+        // Causal mask [1, seq, seq] — same for all N, broadcast by transformer.
         let mask_data: Vec<bool> = (0..seq)
             .flat_map(|i| (0..seq).map(move |j| j > i))
             .collect();
@@ -104,16 +107,22 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
         );
 
         let enc_input = TransformerEncoderInput::new(tokens).mask_attn(causal_mask);
-        let out = self.transformer.forward(enc_input);                // [1, K+1, d_model]
+        let out = self.transformer.forward(enc_input);                   // [N, K+1, d_model]
 
-        // Value: from IR token (position 0) — pure IR representation, no slot leakage.
-        let ir_out    = out.clone().narrow(1, 0, 1).flatten::<2>(1, 2); // [1, d_model]
-        let value_one = self.value_head.forward(ir_out);                 // [1, 1]
-        let value     = Tensor::<B, 2>::ones([k, 1], &device) * value_one; // [K, 1]
+        let d_model = out.dims()[2];
 
-        // Policy: from slot token outputs (positions 1..K+1).
-        let slot_out = out.narrow(1, 1, k).flatten::<2>(0, 1);           // [K, d_model]
-        let policy   = self.policy_head.forward(slot_out).unsqueeze_dim(1); // [K, 1, num_actions]
+        // Policy and value both from slot token outputs (positions 1..K+1).
+        // V_t encodes IR + history of slots 0..t-1 via causal attention, giving
+        // learned per-slot credit assignment rather than a flat broadcast of V(IR).
+        // [N, K, d_model] → [N*K, d_model] → heads → reshape back
+        let slot_out    = out.narrow(1, 1, k).reshape([n * k, d_model]);
+        let policy_flat = self.policy_head.forward(slot_out.clone());    // [N*K, num_actions]
+        let value_flat  = self.value_head.forward(slot_out);             // [N*K, 1]
+        let num_actions = policy_flat.dims()[1];
+        let policy      = policy_flat
+            .reshape([n, k, num_actions])
+            .unsqueeze_dim(2);                                           // [N, K, 1, num_actions]
+        let value       = value_flat.reshape([n, k, 1]);                 // [N, K, 1]
 
         Output { policy, value }
     }

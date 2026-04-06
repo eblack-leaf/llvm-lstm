@@ -1,4 +1,4 @@
-#[derive(PartialEq, Copy, Clone, Eq, Hash)]
+#[derive(PartialEq, Copy, Clone, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Pass {
     Start,
     Instcombine,

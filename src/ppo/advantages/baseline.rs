@@ -4,9 +4,8 @@ use crate::ppo::episode::Results;
 /// Standard return-minus-baseline advantage: advantage[t] = return[t] − V(base_IR).
 ///
 /// With the whole-sequence approach, return[t] is the same terminal speedup for all
-/// slots, and V(base_IR) is the same scalar. So the advantage is constant per episode:
-/// speedup − V(IR). Used here only for metrics display; the PPO update computes this
-/// inline with the current model's V estimate.
+/// slots, and V(base_IR) is the same scalar for the episode. The raw difference is
+/// used without normalisation — when episodes cluster, the gradient is honestly small.
 pub(crate) struct BaselineAdvantage;
 
 impl Advantages for BaselineAdvantage {
@@ -15,8 +14,10 @@ impl Advantages for BaselineAdvantage {
             .iter()
             .enumerate()
             .map(|(i, ep_returns)| {
-                let v = results[i].value;
-                ep_returns.iter().map(|&r| r - v).collect()
+                ep_returns.iter().enumerate().map(|(t, &r)| {
+                    let v = results[i].values.get(t).copied().unwrap_or(0.0);
+                    r - v
+                }).collect()
             })
             .collect()
     }

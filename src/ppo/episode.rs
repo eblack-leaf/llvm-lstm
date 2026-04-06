@@ -12,7 +12,8 @@ pub(crate) struct Results {
     pub(crate) log_probs: Vec<f32>,
     /// Number of slots in this episode (= actions.len() = log_probs.len()).
     pub(crate) ep_len: usize,
-    pub(crate) value: f32,
+    /// Per-slot value estimates V_t from the rollout, length = ep_len.
+    pub(crate) values: Vec<f32>,
     pub(crate) episode_return: f32,
     pub(crate) baselines: Baselines,
 }

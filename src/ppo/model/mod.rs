@@ -73,53 +73,60 @@ impl<B: Backend> MlpHead<B> {
     }
 }
 
-/// Model input: base IR features tiled K times — one row per slot.
-/// Slot positions are derived from the batch dimension inside the forward.
+/// Model input: base IR features tiled K times — one row per slot, N episodes in batch.
+/// Slot positions are derived from the sequence dimension inside the forward.
 pub(crate) struct Input<B: Backend> {
-    /// [K, input_dim] — same IR features for every slot position.
-    pub(crate) ir_features: Tensor<B, 2>,
+    /// [N, K, input_dim] — same IR features for every slot; N=1 during collection.
+    pub(crate) ir_features: Tensor<B, 3>,
 }
 
 impl Input<BurnBackend> {
-    /// Build input for K slots in one episode.
+    /// Build single-episode input (N=1) for K slots.
     pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32], k: usize) -> Self {
         let dim = ir_features.len();
         let feat_data: Vec<f32> = ir_features.iter().copied().cycle().take(k * dim).collect();
         Self {
-            ir_features: Tensor::from_data(TensorData::new(feat_data, [k, dim]), dev),
+            ir_features: Tensor::from_data(TensorData::new(feat_data, [1, k, dim]), dev),
         }
     }
 }
 
 pub(crate) struct Output<B: Backend> {
-    /// [K, 1, num_actions] — policy logits for every slot.
-    pub(crate) policy: Tensor<B, 3>,
-    /// [K, 1] — value estimate V(base_IR), same for every slot.
-    pub(crate) value: Tensor<B, 2>,
+    /// [N, K, 1, num_actions] — policy logits for every slot of every episode.
+    pub(crate) policy: Tensor<B, 4>,
+    /// [N, K, 1] — value estimate V(base_IR), same for every slot of every episode.
+    pub(crate) value: Tensor<B, 3>,
 }
 
 impl Output<BurnBackend> {
-    /// Sample the full pass sequence in one call. Returns (actions[K], log_probs[K]).
+    /// Sample the full pass sequence for episode 0 (N=1 collection path).
+    /// Returns (actions[K], log_probs[K]).
     pub(crate) fn sample_sequence(&self) -> (Vec<Pass>, Vec<f32>) {
-        let k = self.policy.dims()[0];
+        let k = self.policy.dims()[1];
         let mut actions   = Vec::with_capacity(k);
         let mut log_probs = Vec::with_capacity(k);
         for slot in 0..k {
-            let logits  = self.policy.clone().narrow(0, slot, 1).flatten::<1>(0, 2);
-            let log_p   = log_softmax(logits.clone(), 0);
-            let probs   = softmax(logits, 0);
-            let cumsum  = probs.cumsum(0);
-            let u: f32  = rand::random();
-            let idx     = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
-            let idx     = idx.min(ACTIONS.len() - 1);
+            // policy[0, slot, 0, :] → logits [num_actions]
+            let logits = self.policy.clone()
+                .narrow(0, 0, 1).narrow(1, slot, 1).flatten::<1>(0, 3);
+            let log_p  = log_softmax(logits.clone(), 0);
+            let probs  = softmax(logits, 0);
+            let cumsum = probs.cumsum(0);
+            let u: f32 = rand::random();
+            let idx    = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
+            let idx    = idx.min(ACTIONS.len() - 1);
             actions.push(ACTIONS[idx]);
             log_probs.push(log_p.narrow(0, idx, 1).into_scalar());
         }
         (actions, log_probs)
     }
 
-    pub(crate) fn value_scalar(&self) -> f32 {
-        self.value.clone().narrow(0, 0, 1).flatten::<1>(0, 1).into_scalar()
+    /// Per-slot value estimates for episode 0, length = K (N=1 collection path).
+    pub(crate) fn value_vec(&self) -> Vec<f32> {
+        let k = self.value.dims()[1];
+        (0..k).map(|t| {
+            self.value.clone().narrow(0, 0, 1).narrow(1, t, 1).flatten::<1>(0, 2).into_scalar()
+        }).collect()
     }
 }
 

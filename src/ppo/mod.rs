@@ -26,6 +26,7 @@ pub(crate) struct BatchStep {
     pub(crate) taken_action_idx: usize,
     pub(crate) old_log_prob: f32,
     pub(crate) ret: f32,
+    pub(crate) advantage: f32,
 }
 
 /// All slots from one episode, grouped for the transformer forward pass.
@@ -59,9 +60,9 @@ impl Ppo {
         }
     }
 
-    /// Build per-episode batch from episode results and pre-computed returns.
-    pub(crate) fn batch(results: &[Results], returns: &[Vec<f32>]) -> Batch {
-        let episodes = results.iter().zip(returns).map(|(ep, ep_rets)| {
+    /// Build per-episode batch from episode results, pre-computed returns, and pre-computed advantages.
+    pub(crate) fn batch(results: &[Results], returns: &[Vec<f32>], advantages: &[Vec<f32>]) -> Batch {
+        let episodes = results.iter().zip(returns).zip(advantages).map(|((ep, ep_rets), ep_advs)| {
             let episode_return = ep_rets.first().copied().unwrap_or(0.0);
             let steps = ep.actions.iter().enumerate().map(|(t, &action)| {
                 let taken_action_idx = ACTIONS
@@ -72,6 +73,7 @@ impl Ppo {
                     taken_action_idx,
                     old_log_prob: ep.log_probs[t],
                     ret: ep_rets[t],
+                    advantage: ep_advs[t],
                 }
             }).collect();
             BatchEpisode {
@@ -120,34 +122,38 @@ impl Ppo {
                 let total_steps: usize = chunk.iter().map(|e| e.steps.len()).sum();
                 let n_episodes = chunk.len();
 
-                // Accumulate total loss across all episodes in this chunk before
-                // calling backward. Each episode gets one transformer forward pass.
+                // One batched forward for the whole chunk.
+                // Pad all episodes to max_k slots; causal prefix-independence ensures
+                // outputs at positions 0..ep_len are unaffected by padding positions.
+                let max_k = chunk.iter().map(|e| e.steps.len()).max().unwrap_or(1);
+
+                let feat_data: Vec<f32> = chunk.iter()
+                    .flat_map(|ep| ep.ir_features.iter().copied().cycle().take(max_k * n_features))
+                    .collect();
+                let ir_features = Tensor::<BurnAutoDiff, 3>::from_data(
+                    TensorData::new(feat_data, [n_episodes, max_k, n_features]),
+                    device,
+                );
+                let output = model.forward(cfg, Input { ir_features });
+                // output.policy: [N, max_k, 1, num_actions]
+                // output.value:  [N, max_k, 1]
+
                 let mut total_loss: Option<Tensor<BurnAutoDiff, 1>> = None;
 
-                for episode in chunk {
+                for (ep_idx, episode) in chunk.iter().enumerate() {
                     let k = episode.steps.len();
 
-                    // Build input for this episode's ep_len slots.
-                    // Causal masking guarantees prefix-independence: running K=ep_len
-                    // gives identical outputs to the collection pass (K=max_seq_len)
-                    // for positions 0..ep_len, so old_log_probs remain valid.
-                    let feat_data: Vec<f32> = episode.ir_features.iter()
-                        .copied().cycle().take(k * n_features).collect();
-                    let ir_features = Tensor::<BurnAutoDiff, 2>::from_data(
-                        TensorData::new(feat_data, [k, n_features]),
-                        device,
-                    );
-                    let input = Input { ir_features };
-                    let output = model.forward(cfg, input);
+                    // Extract this episode's outputs for slots 0..k.
+                    // policy: [1, k, 1, num_actions] → [k, num_actions]
+                    let logits = output.policy.clone()
+                        .narrow(0, ep_idx, 1).narrow(1, 0, k)
+                        .flatten::<2>(0, 2);                              // [k, num_actions]
+                    // value: [1, k, 1] → [k] per-slot estimates
+                    let pred_v = output.value.clone()
+                        .narrow(0, ep_idx, 1).narrow(1, 0, k)
+                        .flatten::<1>(0, 2);                              // [k]
 
-                    // policy: [k, 1, num_actions] → [k, num_actions]
-                    let logits = output.policy.flatten::<2>(0, 1);
-                    // value: [k, 1] — all same scalar (V(IR)), take first element
-                    let pred_v_all  = output.value.flatten::<1>(0, 1);            // [k]
-                    let pred_v      = pred_v_all.clone().narrow(0, 0, 1);         // [1]
-                    let pred_v_f32  = pred_v.clone().detach().into_scalar();
-
-                    let log_probs_all = log_softmax(logits.clone(), 1);           // [k, num_actions]
+                    let log_probs_all = log_softmax(logits.clone(), 1);   // [k, num_actions]
 
                     let taken_idx_data: Vec<i64> = episode.steps.iter()
                         .map(|s| s.taken_action_idx as i64).collect();
@@ -169,9 +175,9 @@ impl Ppo {
                         .mean()
                         .into_scalar();
 
-                    // Advantages: ret − V(IR) computed with current (detached) value.
+                    // Pre-computed advantages from the rollout (implementor decides normalisation).
                     let adv_data: Vec<f32> = episode.steps.iter()
-                        .map(|s| s.ret - pred_v_f32).collect();
+                        .map(|s| s.advantage).collect();
                     let advantages = Tensor::<BurnAutoDiff, 1>::from_data(
                         TensorData::new(adv_data, [k]),
                         device,
@@ -182,16 +188,22 @@ impl Ppo {
                     let a = ratio.clone() * advantages.clone();
                     let b = ratio.clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * advantages;
                     let diff = (a.clone() - b.clone()).abs();
-                    let policy_loss = -((a + b - diff) / 2.0).mean();             // scalar [1]
+                    let policy_loss = -((a + b - diff) / 2.0).mean();    // [1]
 
-                    // Value loss (once per episode — V(IR) is a single prediction)
-                    let d = pred_v - episode.episode_return;
-                    let value_loss = (d.clone() * d).mean();                      // scalar [1]
+                    // Value loss: per-slot predictions vs terminal return.
+                    // All slots share the same target R; V_t learns to predict it
+                    // from the sequence prefix, enabling credit differentiation.
+                    let targets = Tensor::<BurnAutoDiff, 1>::from_data(
+                        TensorData::new(vec![episode.episode_return; k], [k]),
+                        device,
+                    );
+                    let d = pred_v - targets;
+                    let value_loss = (d.clone() * d).mean();              // [1]
 
                     // Entropy
                     let log_p = log_softmax(logits, 1);
                     let p = log_p.clone().exp();
-                    let entropy = -(p * log_p).sum_dim(1).flatten::<1>(0, 1).mean(); // scalar [1]
+                    let entropy = -(p * log_p).sum_dim(1).flatten::<1>(0, 1).mean(); // [1]
 
                     // Metrics (detached scalars, weighted by episode step count)
                     let k_f = k as f32;
@@ -206,7 +218,7 @@ impl Ppo {
                         - entropy * self.entropy_coef;
 
                     total_loss = Some(match total_loss {
-                        None    => ep_loss,
+                        None       => ep_loss,
                         Some(prev) => prev + ep_loss,
                     });
                 }
