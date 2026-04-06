@@ -162,12 +162,29 @@ impl Trainer {
                     let mut bench_cache_hits   = 0u64;
                     let mut bench_cache_misses = 0u64;
 
+                    // Instruction counts: base + one per executed action.
+                    let base_instr = {
+                        let content = std::fs::read_to_string(&current_ir.file).unwrap_or_default();
+                        crate::llvm::ir::Features::from_ll_str(&content)
+                            .map(|f| f.total_instruction_count as usize)
+                            .unwrap_or(0)
+                    };
+                    let mut instr_counts = Vec::with_capacity(ep_len + 1);
+                    instr_counts.push(base_instr);
+
                     for (step, &action) in actions.iter().enumerate() {
                         if action != Pass::Stop {
                             current_ir = llvm
                                 .apply_one(&current_ir, action, step)
                                 .expect("apply_one");
                         }
+                        let count = {
+                            let content = std::fs::read_to_string(&current_ir.file).unwrap_or_default();
+                            crate::llvm::ir::Features::from_ll_str(&content)
+                                .map(|f| f.total_instruction_count as usize)
+                                .unwrap_or(0)
+                        };
+                        instr_counts.push(count);
                     }
 
                     // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
@@ -203,6 +220,7 @@ impl Trainer {
                         values: value,
                         episode_return: speedup,
                         baselines: baselines.clone(),
+                        instr_counts,
                     }
                 })
                 .collect();

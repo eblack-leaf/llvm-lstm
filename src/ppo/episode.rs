@@ -16,4 +16,7 @@ pub(crate) struct Results {
     pub(crate) values: Vec<f32>,
     pub(crate) episode_return: f32,
     pub(crate) baselines: Baselines,
+    /// Instruction count at each step: instr_counts[0] = base IR, instr_counts[t+1] = after step t.
+    /// Length = ep_len + 1 (base + one per executed action).
+    pub(crate) instr_counts: Vec<usize>,
 }

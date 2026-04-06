@@ -9,6 +9,8 @@ use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::checkpoint::Checkpoint;
 use crate::ppo::logging::LogMode;
 use crate::ppo::returns::episode_return::EpisodeReturn;
+use crate::ppo::returns::instruction_proxy::InstructionProxyReturn;
+use crate::ppo::returns::instruction_weighted_terminal::InstructionWeightedTerminal;
 use crate::train::Trainer;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -70,6 +72,16 @@ enum Command {
         /// Path to save/load the top-sequences file for the Diagnose command.
         #[arg(long)]
         sequences_file: Option<PathBuf>,
+        /// Blend weight for terminal speedup in instruction proxy returns.
+        /// 1.0 = pure speedup (default), 0.0 = pure instruction-count delta.
+        /// Values in (0, 1) blend both signals for denser credit assignment.
+        /// Only used when --returns=proxy.
+        #[arg(long, default_value = "1.0")]
+        proxy_alpha: f32,
+        /// Return signal: episode (uniform terminal), proxy (blended instr+terminal),
+        /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0).
+        #[arg(long, default_value = "episode")]
+        returns: String,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -163,6 +175,8 @@ fn main() {
             mini_batch_size,
             cache_file,
             sequences_file,
+            proxy_alpha,
+            returns,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -188,9 +202,14 @@ fn main() {
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path = sequences_file
                 .or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
+            let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
+                "proxy"    => Box::new(InstructionProxyReturn { alpha: proxy_alpha }),
+                "weighted" => Box::new(InstructionWeightedTerminal),
+                _          => Box::new(EpisodeReturn),
+            };
             let trainer = Trainer::new(
                 cfg,
-                Box::new(EpisodeReturn),
+                returns_impl,
                 Box::new(BaselineAdvantage),
                 LogMode::FileAndStdout,
                 Some(log_path),
