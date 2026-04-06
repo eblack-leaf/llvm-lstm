@@ -1,3 +1,4 @@
+pub(crate) mod conclave;
 pub(crate) mod seq;
 
 use crate::config::{BurnBackend, BurnDevice, Cfg};
