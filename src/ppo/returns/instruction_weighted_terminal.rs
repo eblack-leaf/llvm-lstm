@@ -26,13 +26,16 @@ impl Returns for InstructionWeightedTerminal {
             before - after  // positive = instructions removed = good
         }).collect();
 
-        // Normalize by total positive reduction so weights for reducing steps sum to 1.
-        // This bounds returns to roughly [-terminal, +terminal] regardless of step count.
+        // Only instruction-removing steps share the terminal signal.
+        // weight = d.max(0) / total_pos, so:
+        //   - no-ops and instruction-adders always get 0
+        //   - return sign always matches terminal sign (no sign flips)
+        //   - return bounded to [terminal, 0] or [0, terminal] ⊆ [-1, 1]
         let total_pos: f32 = deltas.iter().map(|&d| d.max(0.0)).sum();
         if total_pos == 0.0 {
             return vec![0.0; results.ep_len];
         }
 
-        deltas.iter().map(|&d| (d / total_pos) * terminal).collect()
+        deltas.iter().map(|&d| (d.max(0.0) / total_pos) * terminal).collect()
     }
 }

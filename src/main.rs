@@ -80,7 +80,7 @@ enum Command {
         proxy_alpha: f32,
         /// Return signal: episode (uniform terminal), proxy (blended instr+terminal),
         /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0).
-        #[arg(long, default_value = "episode")]
+        #[arg(long, default_value = "weighted")]
         returns: String,
         /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
         #[arg(long, default_value = "0")]

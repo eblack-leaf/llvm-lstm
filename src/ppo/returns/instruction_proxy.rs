@@ -21,7 +21,10 @@ impl Returns for InstructionProxyReturn {
         (0..results.ep_len).map(|t| {
             let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
             let after  = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
-            let delta  = (before - after) / base;
+            // Normalize by whichever is larger: the original base or the current bloated
+            // intermediate. Prevents inline-then-cleanup steps from getting delta >> 1.
+            let norm  = before.max(base).max(1.0);
+            let delta = (before - after) / norm;
             self.alpha * terminal + (1.0 - self.alpha) * delta
         }).collect()
     }
