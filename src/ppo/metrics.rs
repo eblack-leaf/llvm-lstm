@@ -67,6 +67,10 @@ pub(crate) struct Metrics {
     bench_cache_hits:   u64,
     bench_cache_misses: u64,
 
+    noop_steps:  u64,
+    total_steps: u64,
+    noop_threshold: usize,
+
     pub(crate) per_func_ir_ms_total: u64,
     pub(crate) per_func_ir_ms_count: u32,
     pub(crate) episode_collection_ms: u64,
@@ -75,7 +79,7 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    pub(crate) fn new(ema_alpha: f32) -> Self {
+    pub(crate) fn new(ema_alpha: f32, noop_threshold: usize) -> Self {
         Self {
             epoch: 0,
             policy_loss_avg:   RunningAvg::new(),
@@ -90,6 +94,9 @@ impl Metrics {
             ret_adv:           None,
             bench_cache_hits:  0,
             bench_cache_misses: 0,
+            noop_steps:  0,
+            total_steps: 0,
+            noop_threshold,
             per_func_ir_ms_total: 0,
             per_func_ir_ms_count: 0,
             episode_collection_ms: 0,
@@ -108,6 +115,17 @@ impl Metrics {
                 .or_insert_with(RunningAvg::new)
                 .push(r.episode_return);
             any_speedup = true;
+
+            // Count no-op steps by instruction delta vs threshold.
+            for t in 0..r.ep_len {
+                let before = r.instr_counts.get(t).copied().unwrap_or(0);
+                let after  = r.instr_counts.get(t + 1).copied().unwrap_or(0);
+                let delta  = before.abs_diff(after);
+                self.total_steps += 1;
+                if delta <= self.noop_threshold {
+                    self.noop_steps += 1;
+                }
+            }
         }
         if any_speedup {
             self.speedup_ema.update(self.final_speedup_avg.mean());
@@ -174,8 +192,10 @@ impl Metrics {
         self.final_speedup_avg.reset();
         self.func_speedup_avgs.clear();
         self.ret_adv = None;
-        self.bench_cache_hits  = 0;
+        self.bench_cache_hits   = 0;
         self.bench_cache_misses = 0;
+        self.noop_steps  = 0;
+        self.total_steps = 0;
         self.episode_collection_ms = 0;
         self.ppo_update_ms = 0;
     }
@@ -192,6 +212,11 @@ impl Metrics {
     pub(crate) fn bench_cache_hit_pct(&self) -> Option<f32> {
         let total = self.bench_cache_hits + self.bench_cache_misses;
         if total == 0 { None } else { Some(self.bench_cache_hits as f32 / total as f32 * 100.0) }
+    }
+    /// Fraction of executed steps where |instr_delta| <= noop_threshold, as a percentage.
+    pub(crate) fn noop_pct(&self) -> Option<f32> {
+        if self.total_steps == 0 { None }
+        else { Some(self.noop_steps as f32 / self.total_steps as f32 * 100.0) }
     }
     pub(crate) fn ema(&self)              -> f32 { self.speedup_ema.get() }
     pub(crate) fn avg_episode_len(&self)  -> f32 { self.episode_len_avg.mean() }

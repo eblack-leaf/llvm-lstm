@@ -146,6 +146,10 @@ impl Logger {
                 .map(|p| format!("  {}={}", g1!("bench_cache"), format!("{:.1}%", p).cyan()))
                 .unwrap_or_default();
 
+            let noop_str = metrics.noop_pct()
+                .map(|p| format!("  {}={}", g2!("noop%"), format!("{:.1}%", p).truecolor(180, 120, 60).to_string()))
+                .unwrap_or_default();
+
             self.epoch_bar.println(format!(
                 "{} {:>5}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
                 g1!("epoch"), epoch,
@@ -155,7 +159,7 @@ impl Logger {
                 g1!("collect="), format!("{}ms", metrics.episode_collection_ms).cyan(),
                 g1!("ppo="), format!("{}ms", metrics.ppo_update_ms).cyan(),
                 g1!("total="), total_str.cyan().to_string(),
-            ) + &bench_cache_str);
+            ) + &bench_cache_str + &noop_str);
 
             self.epoch_bar.println(format!(
                 "         {}  {}{}  {}{}  {}{}  {}{}  {}{}",
@@ -198,6 +202,7 @@ impl Logger {
                 "lr":                     lr,
                 "func_speedups":          metrics.func_speedups(),
                 "bench_cache_hit_pct":    metrics.bench_cache_hit_pct(),
+                "noop_pct":               metrics.noop_pct(),
             });
             let _ = writeln!(f, "{}", record);
             let _ = f.flush();

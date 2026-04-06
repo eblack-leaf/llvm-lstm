@@ -18,19 +18,21 @@ pub(crate) struct InstructionWeightedTerminal;
 impl Returns for InstructionWeightedTerminal {
     fn compute(&self, results: &Results) -> Vec<f32> {
         let terminal = results.episode_return;
-        let base = results.instr_counts.first().copied().unwrap_or(0);
-        let end  = results.instr_counts.get(results.ep_len).copied().unwrap_or(base);
-        let total_net = base as f32 - end as f32;
 
-        if total_net == 0.0 {
+        // Compute per-slot deltas up front.
+        let deltas: Vec<f32> = (0..results.ep_len).map(|t| {
+            let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
+            let after  = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
+            before - after  // positive = instructions removed = good
+        }).collect();
+
+        // Normalize by total positive reduction so weights for reducing steps sum to 1.
+        // This bounds returns to roughly [-terminal, +terminal] regardless of step count.
+        let total_pos: f32 = deltas.iter().map(|&d| d.max(0.0)).sum();
+        if total_pos == 0.0 {
             return vec![0.0; results.ep_len];
         }
 
-        (0..results.ep_len).map(|t| {
-            let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
-            let after  = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
-            let delta  = before - after;
-            (delta / total_net) * terminal
-        }).collect()
+        deltas.iter().map(|&d| (d / total_pos) * terminal).collect()
     }
 }

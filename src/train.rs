@@ -57,7 +57,7 @@ impl Trainer {
             functions.functions.len() as u64,
         )
         .expect("logger init");
-        let mut metrics = Metrics::new(0.05);
+        let mut metrics = Metrics::new(0.05, self.cfg.noop_threshold);
 
         // Compile IR and collect baselines before the training loop.
         for func in &mut functions.functions {

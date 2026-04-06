@@ -52,6 +52,13 @@ pub(crate) struct Features {
     // Loop structure
     pub cond_br_count: u32, // conditional branches (br i1 ...) — control flow density
     pub max_loop_nest_approx: u32, // approx max loop nesting depth from back-edge positions
+    // Opt-metadata enrichment
+    pub vector_inst_count: u32,  // <N x type> typed values — vectorization readiness
+    pub entry_alloca_count: u32, // allocas in entry block only — direct mem2reg opportunity
+    pub tail_call_count: u32,    // tail/musttail calls — tailcallelim signal
+    pub nsw_nuw_count: u32,      // instructions carrying nsw/nuw flags — instcombine strength
+    pub prof_metadata_count: u32, // !prof branch weights present — jump-threading/licm quality
+    pub freeze_count: u32,       // freeze instructions — post-SROA/instcombine marker
 }
 impl Features {
     pub fn from_ll_str(content: &str) -> Result<Self> {
@@ -62,6 +69,7 @@ impl Features {
         let mut label_order: Vec<String> = Vec::new();
         let mut loop_header_positions: Vec<usize> = Vec::new(); // positions of loop header labels
         let mut in_function = false;
+        let mut in_entry_block = false; // true until first non-entry label
 
         // Whole-file metadata counts — scan before the per-line loop.
         for line in content.lines() {
@@ -74,6 +82,18 @@ impl Features {
             }
             if t.contains("noalias") {
                 f.noalias_count += 1;
+            }
+            if t.contains("!prof") {
+                f.prof_metadata_count += 1;
+            }
+            // Vector type: <N x type> — count occurrences across all instructions/metadata
+            let mut rest = t;
+            while let Some(pos) = rest.find('<') {
+                rest = &rest[pos + 1..];
+                // Expect a digit immediately after '<' to distinguish from other uses
+                if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                    f.vector_inst_count += 1;
+                }
             }
         }
 
@@ -90,6 +110,7 @@ impl Features {
                 f.function_count += 1;
                 f.basic_block_count += 1; // implicit entry block
                 in_function = true;
+                in_entry_block = true;
                 label_order.clear();
                 loop_header_positions.clear();
                 label_order.push("entry".to_string());
@@ -122,6 +143,7 @@ impl Features {
                     && !trimmed.contains(" = ")
                 {
                     f.basic_block_count += 1;
+                    in_entry_block = false; // any named block after entry exits entry block
                     let label = before.to_string();
                     label_order.push(label.clone());
                     _current_label = Some(label);
@@ -140,6 +162,11 @@ impl Features {
             // Typical forms:
             //   %var = opcode ...
             //   opcode ...  (for terminators like br, ret, store)
+            // nsw / nuw flags on any instruction
+            if trimmed.contains(" nsw") || trimmed.contains(" nuw") {
+                f.nsw_nuw_count += 1;
+            }
+
             let opcode = extract_opcode(trimmed);
             if let Some(op) = opcode {
                 f.total_instruction_count += 1;
@@ -181,9 +208,19 @@ impl Features {
                         if trimmed.contains("@llvm.") {
                             f.intrinsic_count += 1;
                         }
+                        // tail / musttail calls — tailcallelim signal
+                        if trimmed.starts_with("tail ") || trimmed.starts_with("musttail ") {
+                            f.tail_call_count += 1;
+                        }
                     }
                     "phi" => f.phi_count += 1,
-                    "alloca" => f.alloca_count += 1,
+                    "alloca" => {
+                        f.alloca_count += 1;
+                        if in_entry_block {
+                            f.entry_alloca_count += 1;
+                        }
+                    }
+                    "freeze" => f.freeze_count += 1,
                     "getelementptr" => f.gep_count += 1,
                     "icmp" => f.icmp_count += 1,
                     "fcmp" => f.fcmp_count += 1,
@@ -277,6 +314,13 @@ impl Features {
             // Loop structure
             ln(self.cond_br_count),
             ln(self.max_loop_nest_approx),
+            // Opt-metadata enrichment
+            ln(self.vector_inst_count),
+            ln(self.entry_alloca_count),
+            ln(self.tail_call_count),
+            ln(self.nsw_nuw_count),
+            ln(self.prof_metadata_count),
+            ln(self.freeze_count),
         ]
     }
 }

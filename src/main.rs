@@ -82,6 +82,9 @@ enum Command {
         /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0).
         #[arg(long, default_value = "episode")]
         returns: String,
+        /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
+        #[arg(long, default_value = "0")]
+        noop_threshold: usize,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -177,6 +180,7 @@ fn main() {
             sequences_file,
             proxy_alpha,
             returns,
+            noop_threshold,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -198,6 +202,7 @@ fn main() {
                 entropy_coef,
                 mini_batch_size,
                 cache_file,
+                noop_threshold,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path = sequences_file

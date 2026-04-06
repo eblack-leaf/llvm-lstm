@@ -7,7 +7,7 @@ use burn::tensor::Tensor;
 
 #[derive(Config, Debug)]
 pub(crate) struct ConclaveActorConfig {
-    #[config(default = 34)]
+    #[config(default = 40)]
     pub(crate) input_dim: usize,
     #[config(default = 29)]
     pub(crate) num_passes: usize,
