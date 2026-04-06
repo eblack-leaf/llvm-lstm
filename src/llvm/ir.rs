@@ -53,12 +53,12 @@ pub(crate) struct Features {
     pub cond_br_count: u32, // conditional branches (br i1 ...) — control flow density
     pub max_loop_nest_approx: u32, // approx max loop nesting depth from back-edge positions
     // Opt-metadata enrichment
-    pub vector_inst_count: u32,  // <N x type> typed values — vectorization readiness
+    pub vector_inst_count: u32, // <N x type> typed values — vectorization readiness
     pub entry_alloca_count: u32, // allocas in entry block only — direct mem2reg opportunity
-    pub tail_call_count: u32,    // tail/musttail calls — tailcallelim signal
-    pub nsw_nuw_count: u32,      // instructions carrying nsw/nuw flags — instcombine strength
+    pub tail_call_count: u32,   // tail/musttail calls — tailcallelim signal
+    pub nsw_nuw_count: u32,     // instructions carrying nsw/nuw flags — instcombine strength
     pub prof_metadata_count: u32, // !prof branch weights present — jump-threading/licm quality
-    pub freeze_count: u32,       // freeze instructions — post-SROA/instcombine marker
+    pub freeze_count: u32,      // freeze instructions — post-SROA/instcombine marker
 }
 impl Features {
     pub fn from_ll_str(content: &str) -> Result<Self> {

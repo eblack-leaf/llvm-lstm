@@ -12,9 +12,9 @@ use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::ppo::returns::instruction_proxy::InstructionProxyReturn;
 use crate::ppo::returns::instruction_weighted_terminal::InstructionWeightedTerminal;
 use crate::train::Trainer;
+use burn::module::AutodiffModule;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use burn::module::AutodiffModule;
 
 mod config;
 mod llvm;
@@ -138,13 +138,13 @@ enum Command {
 
 fn print_stats(label: &str, workers: usize, solo_ns: u64, results: &mut Vec<u64>) {
     results.sort_unstable();
-    let mean   = results.iter().sum::<u64>() / results.len() as u64;
+    let mean = results.iter().sum::<u64>() / results.len() as u64;
     let median = results[results.len() / 2];
-    let min    = results[0];
-    let max    = results[results.len() - 1];
-    let solo   = solo_ns as f64;
-    let ratio  = mean as f64 / solo;
-    let pct    = (ratio - 1.0) * 100.0;
+    let min = results[0];
+    let max = results[results.len() - 1];
+    let solo = solo_ns as f64;
+    let ratio = mean as f64 / solo;
+    let pct = (ratio - 1.0) * 100.0;
     let spread = (max - min) as f64 / solo * 100.0;
     println!("\n=== {} ({} workers) ===", label, workers);
     println!("  mean:   {} ns  ({:+.1}% vs solo)", mean, pct);
@@ -205,12 +205,12 @@ fn main() {
                 noop_threshold,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
-            let seq_path = sequences_file
-                .or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
+            let seq_path =
+                sequences_file.or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
             let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
-                "proxy"    => Box::new(InstructionProxyReturn { alpha: proxy_alpha }),
+                "proxy" => Box::new(InstructionProxyReturn { alpha: proxy_alpha }),
                 "weighted" => Box::new(InstructionWeightedTerminal),
-                _          => Box::new(EpisodeReturn),
+                _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(
                 cfg,
@@ -231,7 +231,18 @@ fn main() {
         Command::PlotTrain { dir } => {
             // TODO: read dir + run python plotting
         }
-        Command::Diagnose { sequences, directory, work_dir, clang, opt, top, runs, iters, baseline_runs, baseline_iters } => {
+        Command::Diagnose {
+            sequences,
+            directory,
+            work_dir,
+            clang,
+            opt,
+            top,
+            runs,
+            iters,
+            baseline_runs,
+            baseline_iters,
+        } => {
             use crate::llvm::ir::Source;
 
             let top_seqs = TopSequences::load(&sequences).expect("load top sequences");
@@ -251,22 +262,38 @@ fn main() {
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
                 func.ir = func_llvm.ir(&func.source).expect("emit ir");
                 func.baselines = Some(
-                    func_llvm.collect_baselines(&func.source, baseline_runs, baseline_iters)
+                    func_llvm
+                        .collect_baselines(&func.source, baseline_runs, baseline_iters)
                         .expect("baselines"),
                 );
-                println!("  {} O3={} ns", func.name,
-                    func.baselines.as_ref().unwrap().o3.mean_ns);
+                println!(
+                    "  {} O3={} ns",
+                    func.name,
+                    func.baselines.as_ref().unwrap().o3.mean_ns
+                );
             }
 
             let candidates: Vec<_> = top_seqs.entries.iter().take(top).collect();
-            println!("\nRe-benchmarking top {} sequences ({} runs each):\n", candidates.len(), runs);
+            println!(
+                "\nRe-benchmarking top {} sequences ({} runs each):\n",
+                candidates.len(),
+                runs
+            );
 
             for (rank, entry) in candidates.iter().enumerate() {
-                let func = match functions.functions.iter().find(|f| f.name == entry.func_name) {
+                let func = match functions
+                    .functions
+                    .iter()
+                    .find(|f| f.name == entry.func_name)
+                {
                     Some(f) => f,
                     None => {
-                        println!("  #{} [{}] func '{}' not found — skipping",
-                            rank + 1, entry.speedup, entry.func_name);
+                        println!(
+                            "  #{} [{}] func '{}' not found — skipping",
+                            rank + 1,
+                            entry.speedup,
+                            entry.func_name
+                        );
                         continue;
                     }
                 };
@@ -276,13 +303,16 @@ fn main() {
 
                 // Apply passes (skip Stop).
                 let mut current_ir = func.ir.clone();
-                let pass_strs: Vec<&str> = entry.passes.iter()
+                let pass_strs: Vec<&str> = entry
+                    .passes
+                    .iter()
                     .filter(|&&p| p != Pass::Stop)
                     .map(|p| p.to_opt())
                     .collect();
                 for (step, &pass) in entry.passes.iter().enumerate() {
                     if pass != Pass::Stop {
-                        current_ir = func_llvm.apply_one(&current_ir, pass, step)
+                        current_ir = func_llvm
+                            .apply_one(&current_ir, pass, step)
                             .expect("apply pass");
                     }
                 }
@@ -296,29 +326,43 @@ fn main() {
                 }
                 speedups.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let mean = speedups.iter().sum::<f32>() / speedups.len() as f32;
-                let var  = speedups.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
+                let var = speedups.iter().map(|&x| (x - mean).powi(2)).sum::<f32>()
                     / speedups.len() as f32;
-                let std  = var.sqrt();
-                let med  = speedups[speedups.len() / 2];
+                let std = var.sqrt();
+                let med = speedups[speedups.len() / 2];
 
-                println!("  #{:2}  func={}  cached={:+.4}  mean={:+.4}  std={:.4}  med={:+.4}  [{:+.4}, {:+.4}]",
-                    rank + 1, entry.func_name, entry.speedup,
-                    mean, std, med,
-                    speedups[0], speedups[speedups.len() - 1]);
+                println!(
+                    "  #{:2}  func={}  cached={:+.4}  mean={:+.4}  std={:.4}  med={:+.4}  [{:+.4}, {:+.4}]",
+                    rank + 1,
+                    entry.func_name,
+                    entry.speedup,
+                    mean,
+                    std,
+                    med,
+                    speedups[0],
+                    speedups[speedups.len() - 1]
+                );
                 println!("       passes: [{}]", pass_strs.join(", "));
             }
         }
-        Command::BenchNoise { source, clang, work_dir, runs, iters, workers } => {
-            use rayon::prelude::*;
+        Command::BenchNoise {
+            source,
+            clang,
+            work_dir,
+            runs,
+            iters,
+            workers,
+        } => {
             use crate::llvm::Llvm;
             use crate::llvm::ir::Source;
+            use rayon::prelude::*;
 
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, "opt-20", work_dir.clone());
-            let src  = Source { file: source };
+            let src = Source { file: source };
 
             println!("Emitting IR...");
-            let ir  = llvm.ir(&src).expect("emit IR");
+            let ir = llvm.ir(&src).expect("emit IR");
             println!("Compiling IR...");
             let bin = llvm.compile(&ir).expect("compile IR");
 
@@ -326,11 +370,19 @@ fn main() {
             println!("\n=== Serial (solo) ===");
             println!("  mean: {} ns", solo.mean_ns);
 
-            let mut rayon_ns: Vec<u64> = (0..workers).into_par_iter().map(|_| {
-                let llvm2 = llvm.clone();
-                let bin2  = crate::llvm::ir::Bin { file: bin.file.clone() };
-                llvm2.benchmark(&bin2, runs, iters).expect("rayon worker bench").mean_ns
-            }).collect();
+            let mut rayon_ns: Vec<u64> = (0..workers)
+                .into_par_iter()
+                .map(|_| {
+                    let llvm2 = llvm.clone();
+                    let bin2 = crate::llvm::ir::Bin {
+                        file: bin.file.clone(),
+                    };
+                    llvm2
+                        .benchmark(&bin2, runs, iters)
+                        .expect("rayon worker bench")
+                        .mean_ns
+                })
+                .collect();
             print_stats("Rayon parallel", workers, solo.mean_ns, &mut rayon_ns);
         }
     }

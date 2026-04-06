@@ -20,11 +20,13 @@ impl Returns for InstructionWeightedTerminal {
         let terminal = results.episode_return;
 
         // Compute per-slot deltas up front.
-        let deltas: Vec<f32> = (0..results.ep_len).map(|t| {
-            let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
-            let after  = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
-            before - after  // positive = instructions removed = good
-        }).collect();
+        let deltas: Vec<f32> = (0..results.ep_len)
+            .map(|t| {
+                let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
+                let after = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
+                before - after // positive = instructions removed = good
+            })
+            .collect();
 
         // Only instruction-removing steps share the terminal signal.
         // weight = d.max(0) / total_pos, so:
@@ -36,6 +38,9 @@ impl Returns for InstructionWeightedTerminal {
             return vec![0.0; results.ep_len];
         }
 
-        deltas.iter().map(|&d| (d.max(0.0) / total_pos) * terminal).collect()
+        deltas
+            .iter()
+            .map(|&d| (d.max(0.0) / total_pos) * terminal)
+            .collect()
     }
 }

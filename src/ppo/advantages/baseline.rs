@@ -14,10 +14,14 @@ impl Advantages for BaselineAdvantage {
             .iter()
             .enumerate()
             .map(|(i, ep_returns)| {
-                ep_returns.iter().enumerate().map(|(t, &r)| {
-                    let v = results[i].values.get(t).copied().unwrap_or(0.0);
-                    r - v
-                }).collect()
+                ep_returns
+                    .iter()
+                    .enumerate()
+                    .map(|(t, &r)| {
+                        let v = results[i].values.get(t).copied().unwrap_or(0.0);
+                        r - v
+                    })
+                    .collect()
             })
             .collect()
     }

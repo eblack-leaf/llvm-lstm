@@ -14,8 +14,10 @@ pub(crate) type BenchCache = Arc<DashMap<(String, Vec<Pass>), f32>>;
 
 /// Persist the cache to disk.
 pub(crate) fn save_cache(cache: &BenchCache, path: &std::path::Path) -> Result<()> {
-    let entries: Vec<((String, Vec<Pass>), f32)> =
-        cache.iter().map(|e| (e.key().clone(), *e.value())).collect();
+    let entries: Vec<((String, Vec<Pass>), f32)> = cache
+        .iter()
+        .map(|e| (e.key().clone(), *e.value()))
+        .collect();
     let bytes = bincode::serialize(&entries).context("serialize bench cache")?;
     std::fs::write(path, bytes).context("write bench cache")?;
     Ok(())
@@ -165,7 +167,12 @@ impl Llvm {
     }
 
     /// Collect baselines at all four standard opt levels for a single function.
-    pub(crate) fn collect_baselines(&self, src: &Source, runs: usize, iters: usize) -> Result<Baselines> {
+    pub(crate) fn collect_baselines(
+        &self,
+        src: &Source,
+        runs: usize,
+        iters: usize,
+    ) -> Result<Baselines> {
         let o0 = self.baseline(src, "-O0", runs, iters)?;
         let o1 = self.baseline(src, "-O1", runs, iters)?;
         let o2 = self.baseline(src, "-O2", runs, iters)?;

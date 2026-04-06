@@ -55,7 +55,11 @@ pub(crate) struct MlpHeadConfig {
 
 impl MlpHeadConfig {
     pub(crate) fn new(in_dim: usize, hidden_dim: usize, out_dim: usize) -> Self {
-        Self { in_dim, hidden_dim, out_dim }
+        Self {
+            in_dim,
+            hidden_dim,
+            out_dim,
+        }
     }
     pub(crate) fn init<B: Backend>(&self, device: &B::Device) -> MlpHead<B> {
         MlpHead {
@@ -104,18 +108,22 @@ impl Output<BurnBackend> {
     /// Returns (actions[K], log_probs[K]).
     pub(crate) fn sample_sequence(&self) -> (Vec<Pass>, Vec<f32>) {
         let k = self.policy.dims()[1];
-        let mut actions   = Vec::with_capacity(k);
+        let mut actions = Vec::with_capacity(k);
         let mut log_probs = Vec::with_capacity(k);
         for slot in 0..k {
             // policy[0, slot, 0, :] → logits [num_actions]
-            let logits = self.policy.clone()
-                .narrow(0, 0, 1).narrow(1, slot, 1).flatten::<1>(0, 3);
-            let log_p  = log_softmax(logits.clone(), 0);
-            let probs  = softmax(logits, 0);
+            let logits = self
+                .policy
+                .clone()
+                .narrow(0, 0, 1)
+                .narrow(1, slot, 1)
+                .flatten::<1>(0, 3);
+            let log_p = log_softmax(logits.clone(), 0);
+            let probs = softmax(logits, 0);
             let cumsum = probs.cumsum(0);
             let u: f32 = rand::random();
-            let idx    = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
-            let idx    = idx.min(ACTIONS.len() - 1);
+            let idx = cumsum.lower_equal_elem(u).int().sum().into_scalar() as usize;
+            let idx = idx.min(ACTIONS.len() - 1);
             actions.push(ACTIONS[idx]);
             log_probs.push(log_p.narrow(0, idx, 1).into_scalar());
         }
@@ -125,9 +133,16 @@ impl Output<BurnBackend> {
     /// Per-slot value estimates for episode 0, length = K (N=1 collection path).
     pub(crate) fn value_vec(&self) -> Vec<f32> {
         let k = self.value.dims()[1];
-        (0..k).map(|t| {
-            self.value.clone().narrow(0, 0, 1).narrow(1, t, 1).flatten::<1>(0, 2).into_scalar()
-        }).collect()
+        (0..k)
+            .map(|t| {
+                self.value
+                    .clone()
+                    .narrow(0, 0, 1)
+                    .narrow(1, t, 1)
+                    .flatten::<1>(0, 2)
+                    .into_scalar()
+            })
+            .collect()
     }
 }
 

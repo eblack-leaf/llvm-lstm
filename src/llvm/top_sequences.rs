@@ -20,19 +20,28 @@ pub(crate) struct TopEntry {
 
 impl TopSequences {
     pub(crate) fn new(top_k: usize) -> Self {
-        Self { top_k, entries: Vec::new() }
+        Self {
+            top_k,
+            entries: Vec::new(),
+        }
     }
 
     pub(crate) fn update(&mut self, speedup: f32, func_name: &str, passes: &[Pass]) {
         if self.entries.len() < self.top_k
-            || speedup > self.entries.last().map(|e| e.speedup).unwrap_or(f32::NEG_INFINITY)
+            || speedup
+                > self
+                    .entries
+                    .last()
+                    .map(|e| e.speedup)
+                    .unwrap_or(f32::NEG_INFINITY)
         {
             self.entries.push(TopEntry {
                 speedup,
                 func_name: func_name.to_string(),
                 passes: passes.to_vec(),
             });
-            self.entries.sort_by(|a, b| b.speedup.partial_cmp(&a.speedup).unwrap());
+            self.entries
+                .sort_by(|a, b| b.speedup.partial_cmp(&a.speedup).unwrap());
             self.entries.truncate(self.top_k);
         }
     }

@@ -20,7 +20,9 @@ impl Functions {
                 .expect("file stem")
                 .to_string_lossy()
                 .into_owned();
-            let ir = Ir { file: path.with_extension("ll") };
+            let ir = Ir {
+                file: path.with_extension("ll"),
+            };
             functions.push(Function {
                 name,
                 source: Source { file: path },

@@ -30,7 +30,9 @@ impl Baselines {
     /// context where both measurements are collected under the same conditions.
     pub(crate) fn speedup_vs_o3(&self, opt_ns: u64) -> f32 {
         let base = self.o3.mean_ns as f32;
-        if base == 0.0 { return 0.0; }
+        if base == 0.0 {
+            return 0.0;
+        }
         (base - opt_ns as f32) / base
     }
 
@@ -39,7 +41,9 @@ impl Baselines {
     /// systematic overhead rayon introduces on the measured binary timing.
     pub(crate) fn speedup_vs_o3_parallel(&self, opt_ns: u64) -> f32 {
         let base = self.o3.mean_ns as f32 * PARALLEL_NOISE_MARGIN;
-        if base == 0.0 { return 0.0; }
+        if base == 0.0 {
+            return 0.0;
+        }
         (base - opt_ns as f32) / base
     }
 }

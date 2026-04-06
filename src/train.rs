@@ -1,26 +1,26 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
-use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
-use crate::llvm::{Llvm, BenchCache, load_cache, save_cache};
-use crate::llvm::top_sequences::TopSequences;
-use crate::llvm::ir::Features;
 use crate::llvm::functions::Functions;
+use crate::llvm::ir::Features;
 use crate::llvm::pass::Pass;
+use crate::llvm::top_sequences::TopSequences;
+use crate::llvm::{BenchCache, Llvm, load_cache, save_cache};
 use crate::ppo::Ppo;
 use crate::ppo::advantages::Advantages;
+use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
 use crate::ppo::episode::Results;
 use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::metrics::{Metrics, explained_variance};
 use crate::ppo::model::{Actor, Input};
 use crate::ppo::returns::Returns;
-use dashmap::DashMap;
-use rayon::prelude::*;
-use std::sync::Arc;
-use std::path::PathBuf;
-use std::time::Instant;
 use burn::lr_scheduler::LrScheduler;
 use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
 use burn::optim::{AdamW, AdamWConfig};
+use dashmap::DashMap;
+use rayon::prelude::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub(crate) struct Trainer {
     cfg: Cfg,
@@ -44,8 +44,18 @@ impl Trainer {
         sequences_file: Option<PathBuf>,
     ) -> Self {
         let llvm = Llvm::new(&cfg.clang, &cfg.opt, cfg.work_dir.clone());
-        let ppo  = Ppo::new(&cfg);
-        Self { cfg, llvm, device: Default::default(), returns, advantages, ppo, log_mode, log_path, sequences_file }
+        let ppo = Ppo::new(&cfg);
+        Self {
+            cfg,
+            llvm,
+            device: Default::default(),
+            returns,
+            advantages,
+            ppo,
+            log_mode,
+            log_path,
+            sequences_file,
+        }
     }
 
     pub(crate) fn train(mut self) {
@@ -61,14 +71,18 @@ impl Trainer {
 
         // Compile IR and collect baselines before the training loop.
         for func in &mut functions.functions {
-            let t0       = Instant::now();
+            let t0 = Instant::now();
             let func_llvm = self.llvm.with_env(self.cfg.work_dir.join(&func.name));
             std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
 
             func.ir = func_llvm.ir(&func.source).expect("ir");
             func.baselines = Some(
                 func_llvm
-                    .collect_baselines(&func.source, self.cfg.baseline_runs, self.cfg.baseline_iters)
+                    .collect_baselines(
+                        &func.source,
+                        self.cfg.baseline_runs,
+                        self.cfg.baseline_iters,
+                    )
                     .expect("collect_baselines"),
             );
 
@@ -85,7 +99,7 @@ impl Trainer {
         }
         logger.finish_baseline_phase();
 
-        let arch_cfg      = Arch::cfg(&self.cfg);
+        let arch_cfg = Arch::cfg(&self.cfg);
         let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
         let mut best_mean = f32::NEG_INFINITY;
 
@@ -101,7 +115,7 @@ impl Trainer {
             TopSequences::new(50)
         };
 
-        let mut model     = Arch::init(arch_cfg.clone(), &self.device);
+        let mut model = Arch::init(arch_cfg.clone(), &self.device);
         let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
         let mut scheduler =
             CosineAnnealingLrSchedulerConfig::new(self.cfg.learning_rate, self.cfg.epochs)
@@ -112,7 +126,9 @@ impl Trainer {
             let t_collect = Instant::now();
             let current = model.valid();
 
-            let tasks: Vec<_> = functions.functions.iter()
+            let tasks: Vec<_> = functions
+                .functions
+                .iter()
                 .flat_map(|func| {
                     let func = func.clone();
                     (0..self.cfg.episodes).map(move |ep| (ep, func.clone()))
@@ -127,39 +143,43 @@ impl Trainer {
                 .into_par_iter()
                 .zip(actors)
                 .map(|((ep, func), actor)| {
-                    let baselines    = func.baselines.as_ref().expect("baselines not collected");
-                    let ir_features  = func.ir_features.as_ref().expect("ir_features not collected");
-                    let dev          = self.device.clone();
-                    let cache        = bench_cache.clone();
-                    let func_name    = func.name.clone();
-                    let k            = self.cfg.max_seq_len;
+                    let baselines = func.baselines.as_ref().expect("baselines not collected");
+                    let ir_features = func
+                        .ir_features
+                        .as_ref()
+                        .expect("ir_features not collected");
+                    let dev = self.device.clone();
+                    let cache = bench_cache.clone();
+                    let func_name = func.name.clone();
+                    let k = self.cfg.max_seq_len;
 
-                    let llvm = self.llvm.with_env(
-                        self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)),
-                    );
+                    let llvm = self
+                        .llvm
+                        .with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)));
                     std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
                     // Single forward pass over all K slots simultaneously.
-                    let input  = Input::new_slots(&dev, ir_features, k);
+                    let input = Input::new_slots(&dev, ir_features, k);
                     let output = actor.forward(&self.cfg, input);
 
-                    let all_values             = output.value_vec();
+                    let all_values = output.value_vec();
                     let (all_actions, all_lps) = output.sample_sequence();
 
                     // ep_len = first Stop index + 1, or K if no Stop was chosen.
                     // Only slots 0..ep_len are executed and trained.
-                    let ep_len = all_actions.iter()
+                    let ep_len = all_actions
+                        .iter()
                         .position(|&a| a == Pass::Stop)
                         .map(|t| t + 1)
                         .unwrap_or(k);
                     let value = all_values[..ep_len].to_vec();
 
-                    let actions   = all_actions[..ep_len].to_vec();
+                    let actions = all_actions[..ep_len].to_vec();
                     let log_probs = all_lps[..ep_len].to_vec();
 
                     // Apply non-Stop actions in 0..ep_len to build the terminal IR.
                     let mut current_ir = func.ir.clone();
-                    let mut bench_cache_hits   = 0u64;
+                    let mut bench_cache_hits = 0u64;
                     let mut bench_cache_misses = 0u64;
 
                     // Instruction counts: base + one per executed action.
@@ -179,7 +199,8 @@ impl Trainer {
                                 .expect("apply_one");
                         }
                         let count = {
-                            let content = std::fs::read_to_string(&current_ir.file).unwrap_or_default();
+                            let content =
+                                std::fs::read_to_string(&current_ir.file).unwrap_or_default();
                             crate::llvm::ir::Features::from_ll_str(&content)
                                 .map(|f| f.total_instruction_count as usize)
                                 .unwrap_or(0)
@@ -188,7 +209,9 @@ impl Trainer {
                     }
 
                     // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
-                    let seq_key: Vec<Pass> = actions.iter().copied()
+                    let seq_key: Vec<Pass> = actions
+                        .iter()
+                        .copied()
                         .filter(|&p| p != Pass::Stop)
                         .collect();
                     let cache_key = (func_name.clone(), seq_key);
@@ -235,8 +258,9 @@ impl Trainer {
                 top_seqs.save(p).expect("save top sequences");
             }
 
-            let (bench_hits, bench_misses) = results.iter()
-                .fold((0u64, 0u64), |(h, m), r| (h + r.bench_cache_hits, m + r.bench_cache_misses));
+            let (bench_hits, bench_misses) = results.iter().fold((0u64, 0u64), |(h, m), r| {
+                (h + r.bench_cache_hits, m + r.bench_cache_misses)
+            });
             metrics.record_bench_cache(bench_hits, bench_misses);
             metrics.update_episode(&results);
 
@@ -244,7 +268,8 @@ impl Trainer {
 
             // Explained variance from rollout values vs computed returns (pre-update).
             let ev_rets: Vec<f32> = all_returns.iter().flatten().copied().collect();
-            let ev_vals: Vec<f32> = results.iter()
+            let ev_vals: Vec<f32> = results
+                .iter()
                 .flat_map(|r| r.values.iter().copied())
                 .collect();
             metrics.update_explained_variance(explained_variance(&ev_rets, &ev_vals));
@@ -253,11 +278,11 @@ impl Trainer {
             metrics.update_returns_advs(&all_returns, &advantages);
 
             let batch = Ppo::batch(&results, &all_returns, &advantages);
-            let lr    = scheduler.step();
+            let lr = scheduler.step();
 
-            let t_ppo    = Instant::now();
+            let t_ppo = Instant::now();
             let num_chunks = batch.episodes.len().div_ceil(self.cfg.mini_batch_size);
-            let ppo_bar  = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
+            let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
 
             let (new_model, new_optimizer, losses) = self.ppo.update(
                 model,
@@ -269,7 +294,7 @@ impl Trainer {
                 &ppo_bar,
             );
             ppo_bar.finish_and_clear();
-            model     = new_model;
+            model = new_model;
             optimizer = new_optimizer;
             metrics.record_ppo_ms(t_ppo.elapsed().as_millis() as u64);
             metrics.update_ppo(losses);

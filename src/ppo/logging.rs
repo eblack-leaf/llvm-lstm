@@ -69,7 +69,13 @@ impl Logger {
             }
         };
 
-        Ok(Self { mode, multi, epoch_bar, baseline_bar: Some(baseline_bar), file })
+        Ok(Self {
+            mode,
+            multi,
+            epoch_bar,
+            baseline_bar: Some(baseline_bar),
+            file,
+        })
     }
 
     pub(crate) fn log_baseline_progress(&mut self, func_name: &str, elapsed_ms: u64) {
@@ -90,12 +96,12 @@ impl Logger {
     }
 
     pub(crate) fn collection_bar(&self, total_episodes: u64) -> ProgressBar {
-        let style = ProgressStyle::with_template(
-            "  collect {bar:30.green/black} {pos}/{len} eps",
-        )
-        .unwrap()
-        .progress_chars("=>-");
-        let bar = self.multi.insert_before(&self.epoch_bar, ProgressBar::new(total_episodes));
+        let style = ProgressStyle::with_template("  collect {bar:30.green/black} {pos}/{len} eps")
+            .unwrap()
+            .progress_chars("=>-");
+        let bar = self
+            .multi
+            .insert_before(&self.epoch_bar, ProgressBar::new(total_episodes));
         bar.set_style(style);
         if matches!(self.mode, LogMode::FileOnly) {
             bar.set_draw_target(ProgressDrawTarget::hidden());
@@ -104,12 +110,13 @@ impl Logger {
     }
 
     pub(crate) fn ppo_bar(&self, total_steps: u64) -> ProgressBar {
-        let style = ProgressStyle::with_template(
-            "  ppo    {bar:30.magenta/black} {pos}/{len}  {msg}",
-        )
-        .unwrap()
-        .progress_chars("=>-");
-        let bar = self.multi.insert_before(&self.epoch_bar, ProgressBar::new(total_steps));
+        let style =
+            ProgressStyle::with_template("  ppo    {bar:30.magenta/black} {pos}/{len}  {msg}")
+                .unwrap()
+                .progress_chars("=>-");
+        let bar = self
+            .multi
+            .insert_before(&self.epoch_bar, ProgressBar::new(total_steps));
         bar.set_style(style);
         if matches!(self.mode, LogMode::FileOnly) {
             bar.set_draw_target(ProgressDrawTarget::hidden());
@@ -131,54 +138,99 @@ impl Logger {
             } else {
                 format!("{:+.4}", ema).red().to_string()
             };
-            let total_s = (metrics.total_elapsed_ms + metrics.episode_collection_ms + metrics.ppo_update_ms) as f64 / 1000.0;
+            let total_s = (metrics.total_elapsed_ms
+                + metrics.episode_collection_ms
+                + metrics.ppo_update_ms) as f64
+                / 1000.0;
             let total_str = if total_s < 60.0 {
                 format!("{:.0}s", total_s)
             } else {
                 format!("{:.1}m", total_s / 60.0)
             };
 
-            macro_rules! g1 { ($s:expr) => { $s.truecolor(210, 210, 210).to_string() } }
-            macro_rules! g2 { ($s:expr) => { $s.truecolor(160, 160, 160).to_string() } }
-            macro_rules! g3 { ($s:expr) => { $s.truecolor(115, 115, 115).to_string() } }
+            macro_rules! g1 {
+                ($s:expr) => {
+                    $s.truecolor(210, 210, 210).to_string()
+                };
+            }
+            macro_rules! g2 {
+                ($s:expr) => {
+                    $s.truecolor(160, 160, 160).to_string()
+                };
+            }
+            macro_rules! g3 {
+                ($s:expr) => {
+                    $s.truecolor(115, 115, 115).to_string()
+                };
+            }
 
-            let bench_cache_str = metrics.bench_cache_hit_pct()
+            let bench_cache_str = metrics
+                .bench_cache_hit_pct()
                 .map(|p| format!("  {}={}", g1!("bench_cache"), format!("{:.1}%", p).cyan()))
                 .unwrap_or_default();
 
-            let noop_str = metrics.noop_pct()
-                .map(|p| format!("  {}={}", g2!("noop%"), format!("{:.1}%", p).truecolor(180, 120, 60).to_string()))
+            let noop_str = metrics
+                .noop_pct()
+                .map(|p| {
+                    format!(
+                        "  {}={}",
+                        g2!("noop%"),
+                        format!("{:.1}%", p).truecolor(180, 120, 60).to_string()
+                    )
+                })
                 .unwrap_or_default();
 
-            self.epoch_bar.println(format!(
-                "{} {:>5}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
-                g1!("epoch"), epoch,
-                g1!("speedup="), speedup_str,
-                g1!("ema="), ema_str,
-                g1!("ep_len="), format!("{:.1}", metrics.avg_episode_len()).bold(),
-                g1!("collect="), format!("{}ms", metrics.episode_collection_ms).cyan(),
-                g1!("ppo="), format!("{}ms", metrics.ppo_update_ms).cyan(),
-                g1!("total="), total_str.cyan().to_string(),
-            ) + &bench_cache_str + &noop_str);
+            self.epoch_bar.println(
+                format!(
+                    "{} {:>5}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
+                    g1!("epoch"),
+                    epoch,
+                    g1!("speedup="),
+                    speedup_str,
+                    g1!("ema="),
+                    ema_str,
+                    g1!("ep_len="),
+                    format!("{:.1}", metrics.avg_episode_len()).bold(),
+                    g1!("collect="),
+                    format!("{}ms", metrics.episode_collection_ms).cyan(),
+                    g1!("ppo="),
+                    format!("{}ms", metrics.ppo_update_ms).cyan(),
+                    g1!("total="),
+                    total_str.cyan().to_string(),
+                ) + &bench_cache_str
+                    + &noop_str,
+            );
 
             self.epoch_bar.println(format!(
                 "         {}  {}{}  {}{}  {}{}  {}{}  {}{}",
                 g2!("losses"),
-                g2!("policy="), format!("{:+.4}", metrics.policy_loss()).yellow(),
-                g2!("value="),  format!("{:.4}", metrics.value_loss()).yellow(),
-                g2!("entropy="), format!("{:.1}%", metrics.entropy_pct()).yellow(),
-                g2!("kl="),     format!("{:.4}", metrics.kl_div()).truecolor(200, 160, 80).to_string(),
-                g2!("ev="),     format!("{:+.3}", metrics.explained_variance()).truecolor(200, 160, 80).to_string(),
+                g2!("policy="),
+                format!("{:+.4}", metrics.policy_loss()).yellow(),
+                g2!("value="),
+                format!("{:.4}", metrics.value_loss()).yellow(),
+                g2!("entropy="),
+                format!("{:.1}%", metrics.entropy_pct()).yellow(),
+                g2!("kl="),
+                format!("{:.4}", metrics.kl_div())
+                    .truecolor(200, 160, 80)
+                    .to_string(),
+                g2!("ev="),
+                format!("{:+.3}", metrics.explained_variance())
+                    .truecolor(200, 160, 80)
+                    .to_string(),
             ));
 
             if let Some(ra) = &metrics.ret_adv {
                 self.epoch_bar.println(format!(
                     "         {}  {}{}  {}[{}, {}]  {}{}",
                     g3!("ret"),
-                    g3!("mean="), format!("{:+.3}", ra.ret_mean).cyan(),
-                    g3!("range="), format!("{:+.3}", ra.ret_min).cyan(),
-                                   format!("{:+.3}", ra.ret_max).cyan(),
-                    g3!("adv_std="), format!("{:.3}", ra.adv_std).cyan(),
+                    g3!("mean="),
+                    format!("{:+.3}", ra.ret_mean).cyan(),
+                    g3!("range="),
+                    format!("{:+.3}", ra.ret_min).cyan(),
+                    format!("{:+.3}", ra.ret_max).cyan(),
+                    g3!("adv_std="),
+                    format!("{:.3}", ra.adv_std).cyan(),
                 ));
             }
         }
