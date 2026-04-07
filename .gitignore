@@ -6,6 +6,7 @@
 # Generated data and results
 checkpoints/
 work/
+dataset.jsonl
 
 # Training work directory (compiled IR, binaries, cached baselines)
 work/
