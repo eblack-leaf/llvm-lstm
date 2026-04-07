@@ -64,7 +64,7 @@ enum Command {
         clip_epsilon: f32,
         #[arg(long, default_value = "0.5")]
         value_coef: f32,
-        #[arg(long, default_value = "0.003")]
+        #[arg(long, default_value = "0.02")]
         entropy_coef: f32,
         /// Number of episodes per PPO mini-batch.
         #[arg(long, default_value = "64")]
@@ -96,7 +96,7 @@ enum Command {
         predictor_scale: f32,
         /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
         #[arg(long, default_value = "0.01")]
-        noop_threshold: usize,
+        noop_threshold: f32,
         #[arg(long, default_value = "0.01")]
         delta_threshold: f32,
     },

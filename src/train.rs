@@ -185,7 +185,7 @@ impl Trainer {
                     // Instruction counts: base + one per executed action.
                     let base_instr = {
                         let content = std::fs::read_to_string(&current_ir.file).unwrap_or_default();
-                        crate::llvm::ir::Features::from_ll_str(&content)
+                        Features::from_ll_str(&content)
                             .map(|f| f.total_instruction_count as usize)
                             .unwrap_or(0)
                     };
@@ -201,7 +201,7 @@ impl Trainer {
                         let count = {
                             let content =
                                 std::fs::read_to_string(&current_ir.file).unwrap_or_default();
-                            crate::llvm::ir::Features::from_ll_str(&content)
+                            Features::from_ll_str(&content)
                                 .map(|f| f.total_instruction_count as usize)
                                 .unwrap_or(0)
                         };
@@ -216,12 +216,14 @@ impl Trainer {
                         .collect();
                     let cache_key = (func_name.clone(), seq_key);
 
-                    // Normalised per-step deltas: (before - after) / before.
+                    // Per-step deltas: tanh((before - after) / before).
+                    // Raw ratio is bounded above by 1.0 but unbounded below (bloat).
+                    // tanh maps the full range smoothly into (-1, 1).
                     let step_deltas: Vec<f32> = instr_counts
                         .windows(2)
                         .map(|w| {
                             let before = w[0].max(1) as f32;
-                            (before - w[1] as f32) / before
+                            ((before - w[1] as f32) / before).tanh()
                         })
                         .collect();
 

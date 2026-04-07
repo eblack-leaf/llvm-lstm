@@ -77,7 +77,7 @@ impl Returns for PredictorReturn {
                     mask_data.push(true);
                     let instr_before = results.instr_counts.get(slot).copied().unwrap_or(1).max(1);
                     let instr_after = results.instr_counts.get(slot + 1).copied().unwrap_or(0);
-                    let delta = (instr_before as i64 - instr_after as i64) as f32 / instr_before as f32;
+                    let delta = ((instr_before as f32 - instr_after as f32) / instr_before as f32).tanh();
                     delta_data.push(delta);
                 } else {
                     pass_data.push(Pass::Start as i64);

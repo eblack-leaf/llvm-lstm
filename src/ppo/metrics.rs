@@ -102,7 +102,7 @@ pub(crate) struct Metrics {
 
     noop_steps: u64,
     total_steps: u64,
-    noop_threshold: usize,
+    noop_threshold: f32,
 
     pub(crate) per_func_ir_ms_total: u64,
     pub(crate) per_func_ir_ms_count: u32,
@@ -112,7 +112,7 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    pub(crate) fn new(ema_alpha: f32, noop_threshold: usize) -> Self {
+    pub(crate) fn new(ema_alpha: f32, noop_threshold: f32) -> Self {
         Self {
             epoch: 0,
             policy_loss_avg: RunningAvg::new(),
@@ -149,13 +149,13 @@ impl Metrics {
                 .push(r.episode_return);
             any_speedup = true;
 
-            // Count no-op steps by instruction delta vs threshold.
+            // Count no-op steps: |delta%| < threshold.
             for t in 0..r.ep_len {
-                let before = r.instr_counts.get(t).copied().unwrap_or(0);
-                let after = r.instr_counts.get(t + 1).copied().unwrap_or(0);
-                let delta = before.abs_diff(after);
+                let before = r.instr_counts.get(t).copied().unwrap_or(1).max(1) as f32;
+                let after = r.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
+                let delta_pct = (before - after).abs() / before;
                 self.total_steps += 1;
-                if delta <= self.noop_threshold {
+                if delta_pct < self.noop_threshold {
                     self.noop_steps += 1;
                 }
             }

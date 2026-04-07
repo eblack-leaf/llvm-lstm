@@ -45,7 +45,7 @@ pub(crate) struct Cfg {
     pub(crate) mini_batch_size: usize,
     /// Path to load/save the benchmark cache across runs.
     pub(crate) cache_file: Option<PathBuf>,
-    /// Steps with |instr_delta| <= this threshold count as no-ops in metrics.
-    pub(crate) noop_threshold: usize,
+    /// Steps with |instr_delta%| < this threshold count as no-ops in metrics (0.0–1.0).
+    pub(crate) noop_threshold: f32,
     pub(crate) delta_threshold: f32,
 }
