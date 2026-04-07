@@ -99,6 +99,11 @@ enum Command {
         noop_threshold: f32,
         #[arg(long, default_value = "0.01")]
         delta_threshold: f32,
+        /// Maximum IR opcode tokens fed to the IR encoder. Sequences shorter than this are
+        /// padded; longer sequences are truncated. Adjust based on your functions' IR lengths
+        /// (run export-features to inspect before setting).
+        #[arg(long, default_value = "1986")]
+        max_ir_len: usize,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -191,6 +196,21 @@ enum Command {
         val_split: f32,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
+        /// Max IR opcode tokens for the IR encoder (match the value used during collect).
+        #[arg(long, default_value = "1986")]
+        max_ir_len: usize,
+        /// IR encoder hidden dim.
+        #[arg(long, default_value = "64")]
+        d_ir: usize,
+        /// IR encoder attention heads (d_ir must be divisible by this).
+        #[arg(long, default_value = "4")]
+        ir_n_heads: usize,
+        /// IR encoder transformer layers.
+        #[arg(long, default_value = "2")]
+        ir_n_layers: usize,
+        /// IR encoder feed-forward dim.
+        #[arg(long, default_value = "128")]
+        ir_d_ff: usize,
         #[arg(long, default_value = "128")]
         d_model: usize,
         #[arg(long, default_value = "8")]
@@ -201,15 +221,10 @@ enum Command {
         d_ff: usize,
         #[arg(long, default_value = "0.1")]
         dropout: f64,
-        /// Clip target speedups below this value — removes measurement-noise outliers
-        /// while keeping genuinely bad sequences.
         #[arg(long, default_value = "-3.0")]
         clip_min: f32,
-        /// Huber loss delta — quadratic within ±delta of target, linear beyond.
         #[arg(long, default_value = "3.0")]
         huber_delta: f32,
-        /// Cap total samples by taking this many evenly across all functions.
-        /// Omit to use the full dataset.
         #[arg(long)]
         max_samples: Option<usize>,
     },
@@ -264,6 +279,7 @@ fn main() {
             predictor_checkpoint,
             predictor_noop_threshold,
             predictor_scale,
+            max_ir_len,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -287,6 +303,7 @@ fn main() {
                 cache_file,
                 noop_threshold,
                 delta_threshold,
+                max_ir_len,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
@@ -493,7 +510,7 @@ fn main() {
         } => {
             use crate::llvm::Llvm;
             use crate::llvm::functions::Functions;
-            use crate::llvm::ir::{Features, Source};
+            use crate::llvm::ir::extract_opcode_sequence;
             use crate::llvm::pass::Pass;
             use std::collections::HashMap;
 
@@ -517,7 +534,7 @@ fn main() {
                     .push((passes, speedup, step_deltas));
             }
 
-            // Setup LLVM to compute IR features for each function
+            // Setup LLVM to extract IR opcode sequences for each function.
             let llvm = Llvm::new(&clang, &opt, work_dir.clone());
             let mut functions = Functions::new(&functions_dir);
             std::fs::create_dir_all(&work_dir).expect("create work dir");
@@ -529,14 +546,13 @@ fn main() {
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
                 let ir = func_llvm.ir(&func.source).expect("emit IR");
                 let content = std::fs::read_to_string(&ir.file).expect("read IR");
-                let features = Features::from_ll_str(&content).expect("parse features");
-                let ir_features = features.to_vec();
+                let ir_opcodes = extract_opcode_sequence(&content);
 
                 if let Some(entries) = func_cache.get(&func.name) {
                     for (passes, speedup, step_deltas) in entries {
                         for len in 1..=passes.len() {
                             let sample = crate::predictor::data::Sample {
-                                ir_features: ir_features.clone(),
+                                ir_opcodes: ir_opcodes.clone(),
                                 passes: passes[0..len].to_vec(),
                                 step_deltas: step_deltas[0..len].to_vec(),
                                 speedup: *speedup,
@@ -556,8 +572,6 @@ fn main() {
             opt,
             work_dir,
         } => {
-            use crate::llvm::ir::Features;
-
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, &opt, work_dir.clone());
             let mut functions = Functions::new(&directory);
@@ -567,13 +581,13 @@ fn main() {
                 let func_llvm = llvm.with_env(work_dir.join(&func.name));
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
                 let ir = func_llvm.ir(&func.source).expect("emit IR");
-                let content = std::fs::read_to_string(&ir.file).expect("read IR");
-                let features = Features::from_ll_str(&content).expect("parse features");
+                let opcodes = ir.opcode_sequence();
+                println!("  {}  seq_len={}", func.name, opcodes.len());
                 records.push(serde_json::json!({
                     "name": func.name,
-                    "features": features.to_vec(),
+                    "seq_len": opcodes.len(),
+                    "opcodes": opcodes,
                 }));
-                println!("  {}", func.name);
             }
 
             let json = serde_json::to_string_pretty(&records).expect("serialize");
@@ -588,6 +602,11 @@ fn main() {
             learning_rate,
             val_split,
             max_seq_len,
+            max_ir_len,
+            d_ir,
+            ir_n_heads,
+            ir_n_layers,
+            ir_d_ff,
             d_model,
             n_heads,
             n_layers,
@@ -599,7 +618,12 @@ fn main() {
         } => {
             let config = crate::predictor::model::SpeedupPredictorConfig {
                 num_passes: 29,
-                ir_feature_dim: 40,
+                ir_vocab_size: crate::llvm::ir::IR_VOCAB_SIZE,
+                d_ir,
+                ir_n_layers,
+                ir_n_heads,
+                ir_d_ff,
+                max_ir_len,
                 output_dim: 1,
                 d_model,
                 n_heads,

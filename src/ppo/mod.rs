@@ -65,9 +65,9 @@ impl Ppo {
         }
 
         // Build flat batch once directly from results + returns + advantages
-        let flat_batch = FlatBatch::from_results(results, returns, advantages, device);
+        let flat_batch = FlatBatch::from_results(results, returns, advantages, cfg.max_ir_len, device);
         let max_k = cfg.max_seq_len;
-        let n_features = flat_batch.ir_features.dims()[1];
+        let max_ir_len = cfg.max_ir_len;
 
         // Local helper closures for gathering steps.
         // ep_offset converts global episode indices stored in `gather` to indices
@@ -133,11 +133,15 @@ impl Ppo {
                 let step_end = episode_boundaries[end_ep - 1].1;
                 let chunk_num_steps = step_end - step_start;
 
-                // Slice IR features: [chunk_size, n_features]
-                let chunk_ir = flat_batch
-                    .ir_features
+                // Slice IR opcode sequences and padding masks for this chunk.
+                let chunk_opcodes = flat_batch
+                    .ir_opcodes
                     .clone()
-                    .slice([start_ep..end_ep, 0..n_features]);
+                    .slice([start_ep..end_ep, 0..max_ir_len]);
+                let chunk_ir_mask = flat_batch
+                    .ir_padding_mask
+                    .clone()
+                    .slice([start_ep..end_ep, 0..max_ir_len]);
 
                 // Slice flat tensors
                 let chunk_gather = flat_batch
@@ -156,7 +160,8 @@ impl Ppo {
                 let output = model.forward(
                     cfg,
                     Input {
-                        ir_features: chunk_ir,
+                        ir_opcodes: chunk_opcodes,
+                        ir_padding_mask: chunk_ir_mask,
                     },
                 );
                 let policy_logits = output.policy.squeeze::<3>();

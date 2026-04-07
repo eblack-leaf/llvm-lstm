@@ -1,6 +1,6 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::llvm::functions::Functions;
-use crate::llvm::ir::Features;
+use crate::llvm::ir::step_delta;
 use crate::llvm::pass::Pass;
 use crate::llvm::top_sequences::TopSequences;
 use crate::llvm::{BenchCache, Llvm, load_cache, save_cache};
@@ -86,13 +86,7 @@ impl Trainer {
                     .expect("collect_baselines"),
             );
 
-            // Extract base IR features once per function (34-dim log-transformed).
-            let content = std::fs::read_to_string(&func.ir.file).expect("read base IR");
-            func.ir_features = Some(
-                Features::from_ll_str(&content)
-                    .expect("parse IR features")
-                    .to_vec(),
-            );
+            func.ir_opcodes = Some(func.ir.opcode_sequence());
 
             metrics.record_func_ir_ms(t0.elapsed().as_millis() as u64);
             logger.log_baseline_progress(&func.name, t0.elapsed().as_millis() as u64);
@@ -144,10 +138,10 @@ impl Trainer {
                 .zip(actors)
                 .map(|((ep, func), actor)| {
                     let baselines = func.baselines.as_ref().expect("baselines not collected");
-                    let ir_features = func
-                        .ir_features
+                    let ir_opcodes = func
+                        .ir_opcodes
                         .as_ref()
-                        .expect("ir_features not collected");
+                        .expect("ir_opcodes not collected");
                     let dev = self.device.clone();
                     let cache = bench_cache.clone();
                     let func_name = func.name.clone();
@@ -159,7 +153,7 @@ impl Trainer {
                     std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
                     // Single forward pass over all K slots simultaneously.
-                    let input = Input::new_slots(&dev, ir_features);
+                    let input = Input::new_slots(&dev, ir_opcodes, self.cfg.max_ir_len);
                     let output = actor.forward(&self.cfg, input);
 
                     let all_values = output.value_vec();
@@ -182,13 +176,10 @@ impl Trainer {
                     let mut bench_cache_hits = 0u64;
                     let mut bench_cache_misses = 0u64;
 
-                    // Instruction counts: base + one per executed action.
-                    let base_instr = {
-                        let content = std::fs::read_to_string(&current_ir.file).unwrap_or_default();
-                        Features::from_ll_str(&content)
-                            .map(|f| f.total_instruction_count as usize)
-                            .unwrap_or(0)
-                    };
+                    // Read base IR once: get instruction count and float features for predictor.
+                    let base_feats = func.ir.features();
+                    let base_instr = base_feats.total_instruction_count as usize;
+                    let ir_features_for_predictor = base_feats.to_vec();
                     let mut instr_counts = Vec::with_capacity(ep_len + 1);
                     instr_counts.push(base_instr);
 
@@ -198,14 +189,7 @@ impl Trainer {
                                 .apply_one(&current_ir, action, step)
                                 .expect("apply_one");
                         }
-                        let count = {
-                            let content =
-                                std::fs::read_to_string(&current_ir.file).unwrap_or_default();
-                            Features::from_ll_str(&content)
-                                .map(|f| f.total_instruction_count as usize)
-                                .unwrap_or(0)
-                        };
-                        instr_counts.push(count);
+                        instr_counts.push(current_ir.instruction_count());
                     }
 
                     // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
@@ -216,15 +200,9 @@ impl Trainer {
                         .collect();
                     let cache_key = (func_name.clone(), seq_key);
 
-                    // Per-step deltas: tanh((before - after) / before).
-                    // Raw ratio is bounded above by 1.0 but unbounded below (bloat).
-                    // tanh maps the full range smoothly into (-1, 1).
                     let step_deltas: Vec<f32> = instr_counts
                         .windows(2)
-                        .map(|w| {
-                            let before = w[0].max(1) as f32;
-                            ((before - w[1] as f32) / before).tanh()
-                        })
+                        .map(|w| step_delta(w[0], w[1]))
                         .collect();
 
                     let speedup = if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
@@ -247,7 +225,8 @@ impl Trainer {
                         func_name,
                         bench_cache_hits,
                         bench_cache_misses,
-                        ir_features: ir_features.clone(),
+                        ir_features: ir_features_for_predictor,
+                        ir_opcodes: ir_opcodes.clone(),
                         actions,
                         log_probs,
                         ep_len,

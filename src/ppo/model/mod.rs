@@ -1,13 +1,15 @@
 pub(crate) mod conclave;
 pub(crate) mod seq;
 
-use crate::config::{BurnBackend, BurnDevice, Cfg};
+use crate::config::{BurnBackend, BurnDevice};
+use crate::llvm::ir::PAD_OPCODE;
 use crate::llvm::pass::Pass;
 use burn::Tensor;
 use burn::nn::{Linear, LinearConfig};
-use burn::prelude::{Backend, Module};
+use burn::prelude::{Backend, Bool, Int, Module};
 use burn::tensor::TensorData;
 use burn::tensor::activation::{log_softmax, softmax};
+use crate::config::Cfg;
 
 pub(crate) const ACTIONS: [Pass; 29] = [
     Pass::Instcombine,
@@ -78,18 +80,27 @@ impl<B: Backend> MlpHead<B> {
     }
 }
 
-/// Model input: base IR features for N episodes.
+/// Model input: padded IR opcode-ID sequence for N episodes.
 pub(crate) struct Input<B: Backend> {
-    /// [N, input_dim] — one feature vector per episode; N=1 during collection.
-    pub(crate) ir_features: Tensor<B, 2>,
+    /// [N, max_ir_len] — opcode IDs, padded with PAD_OPCODE.
+    pub(crate) ir_opcodes: Tensor<B, 2, Int>,
+    /// [N, max_ir_len] — true = PAD position (excluded from attention and mean-pool).
+    pub(crate) ir_padding_mask: Tensor<B, 2, Bool>,
 }
 
 impl Input<BurnBackend> {
-    /// Build single-episode input (N=1).
-    pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32]) -> Self {
-        let dim = ir_features.len();
+    /// Build single-episode input (N=1) from a raw unpadded opcode sequence.
+    pub(crate) fn new_slots(dev: &BurnDevice, opcodes: &[u8], max_ir_len: usize) -> Self {
+        let raw_len = opcodes.len().min(max_ir_len);
+        let mut ids: Vec<i64> = vec![PAD_OPCODE as i64; max_ir_len];
+        let mut mask: Vec<bool> = vec![true; max_ir_len];
+        for (i, &op) in opcodes[..raw_len].iter().enumerate() {
+            ids[i] = op as i64;
+            mask[i] = false;
+        }
         Self {
-            ir_features: Tensor::from_data(TensorData::new(ir_features.to_vec(), [1, dim]), dev),
+            ir_opcodes: Tensor::from_data(TensorData::new(ids, [1, max_ir_len]), dev),
+            ir_padding_mask: Tensor::from_data(TensorData::new(mask, [1, max_ir_len]), dev),
         }
     }
 }

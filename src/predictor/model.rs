@@ -1,3 +1,4 @@
+use crate::llvm::ir::IR_VOCAB_SIZE;
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::transformer::{
@@ -11,8 +12,10 @@ use burn::tensor::TensorData;
 
 #[derive(Module, Debug)]
 pub struct SpeedupPredictor<B: Backend> {
-    pass_embed: Embedding<B>,
+    ir_opcode_embed: Embedding<B>,
+    ir_encoder: TransformerEncoder<B>,
     ir_proj: Linear<B>,
+    pass_embed: Embedding<B>,
     delta_proj: Linear<B>,
     pos_embed: Embedding<B>,
     transformer: TransformerEncoder<B>,
@@ -22,7 +25,24 @@ pub struct SpeedupPredictor<B: Backend> {
 #[derive(Config, Debug)]
 pub struct SpeedupPredictorConfig {
     pub num_passes: usize,
-    pub ir_feature_dim: usize,
+    /// Opcode vocabulary size — must match IR_VOCAB_SIZE (64).
+    #[config(default = 64)]
+    pub ir_vocab_size: usize,
+    /// Hidden dim of the small IR encoder.
+    #[config(default = 64)]
+    pub d_ir: usize,
+    /// Layers in the IR encoder.
+    #[config(default = 2)]
+    pub ir_n_layers: usize,
+    /// Attention heads in the IR encoder (d_ir must be divisible by this).
+    #[config(default = 4)]
+    pub ir_n_heads: usize,
+    /// Feed-forward dim in the IR encoder.
+    #[config(default = 128)]
+    pub ir_d_ff: usize,
+    /// Max IR opcode sequence length (shorter sequences are padded).
+    #[config(default = 512)]
+    pub max_ir_len: usize,
     pub output_dim: usize,
     pub d_model: usize,
     pub n_heads: usize,
@@ -36,8 +56,17 @@ impl SpeedupPredictorConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> SpeedupPredictor<B> {
         let max_positions = self.max_seq_len + 1;
         SpeedupPredictor {
+            ir_opcode_embed: EmbeddingConfig::new(self.ir_vocab_size, self.d_ir).init(device),
+            ir_encoder: TransformerEncoderConfig::new(
+                self.d_ir,
+                self.ir_d_ff,
+                self.ir_n_heads,
+                self.ir_n_layers,
+            )
+            .with_dropout(self.dropout)
+            .init(device),
+            ir_proj: LinearConfig::new(self.d_ir, self.d_model).init(device),
             pass_embed: EmbeddingConfig::new(self.num_passes, self.d_model).init(device),
-            ir_proj: LinearConfig::new(self.ir_feature_dim, self.d_model).init(device),
             delta_proj: LinearConfig::new(1, self.d_model)
                 .with_bias(false)
                 .init(device),
@@ -58,52 +87,56 @@ impl SpeedupPredictorConfig {
 impl<B: Backend> SpeedupPredictor<B> {
     pub fn forward(
         &self,
-        ir_features: Tensor<B, 2>, // [batch, ir_dim]
-        passes: Tensor<B, 2, Int>, // [batch, seq_len]
-        mask: Tensor<B, 2, Bool>,  // [batch, seq_len] true = valid
-        step_deltas: Tensor<B, 2>, // [batch, seq_len] normalised instr-count delta per step
+        ir_opcodes: Tensor<B, 2, Int>,    // [batch, max_ir_len]
+        ir_padding_mask: Tensor<B, 2, Bool>, // [batch, max_ir_len] true=PAD
+        passes: Tensor<B, 2, Int>,        // [batch, seq_len]
+        mask: Tensor<B, 2, Bool>,         // [batch, seq_len] true = valid
+        step_deltas: Tensor<B, 2>,        // [batch, seq_len]
     ) -> Tensor<B, 2> {
         let batch_size = passes.dims()[0];
         let seq_len = passes.dims()[1];
         let device = passes.device();
 
-        // 1. Embed passes and add per-step instruction-delta signal: [batch, seq_len, d_model]
+        // --- IR encoder ---
+        let ir_tok = self.ir_opcode_embed.forward(ir_opcodes); // [batch, L, d_ir]
+        let ir_enc_input = TransformerEncoderInput::new(ir_tok).mask_pad(ir_padding_mask.clone());
+        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [batch, L, d_ir]
+
+        // Masked mean pool.
+        let not_pad = ir_padding_mask.float().neg() + 1.0f32; // [batch, L]
+        let counts = not_pad.clone().sum_dim(1).unsqueeze_dim(2).clamp_min(1.0); // [batch, 1, 1]
+        let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1); // [batch, 1, d_ir]
+        let d_ir = weighted_sum.dims()[2];
+        let ir_mean = (weighted_sum / counts).reshape([batch_size, d_ir]); // [batch, d_ir]
+        let ir_token = self.ir_proj.forward(ir_mean).unsqueeze_dim(1);     // [batch, 1, d_model]
+
+        // Pass embeddings + per-step delta signal.
         let pass_embeds = self.pass_embed.forward(passes);
-        let delta_embeds = self.delta_proj.forward(step_deltas.unsqueeze_dim(2)); // [batch, seq_len, d_model]
-        let pass_embeds = pass_embeds + delta_embeds;
+        let delta_embeds = self.delta_proj.forward(step_deltas.unsqueeze_dim(2));
+        let pass_embeds = pass_embeds + delta_embeds; // [batch, seq_len, d_model]
 
-        // 2. Project IR features: [batch, d_model] -> [batch, 1, d_model]
-        let ir_token = self.ir_proj.forward(ir_features).unsqueeze_dim(1);
-
-        // 3. Positional embeddings for all positions (IR token + passes)
+        // Positional embeddings.
         let positions = Tensor::<B, 1, Int>::arange(0..(1 + seq_len) as i64, &device)
             .unsqueeze_dim(0)
             .repeat(&[batch_size, 1]);
         let pos_embeds = self.pos_embed.forward(positions); // [batch, 1+seq_len, d_model]
 
-        // 4. Build full sequence and add position embeddings
-        let tokens = Tensor::cat(vec![ir_token, pass_embeds], 1);
-        let tokens = tokens + pos_embeds;
+        // Full sequence: [IR_token | pass_0 .. pass_{seq_len-1}].
+        let tokens = Tensor::cat(vec![ir_token, pass_embeds], 1) + pos_embeds;
 
-        // 5. Build padding mask for transformer: true = ignore (mask out)
-        //    mask is [batch, seq_len] where true = valid token.
-        //    For IR token (position 0) we always keep it (valid).
-        //    So we prepend a column of false (keep) to the inverted mask.
+        // Padding mask: true = ignore. IR token is never masked; pass positions use `mask`.
         let pad_mask = mask.equal_elem(false); // [batch, seq_len], true where padding
         let ir_pad = Tensor::<B, 2, Bool>::from_data(
             TensorData::new(vec![false; batch_size], [batch_size, 1]),
             &device,
-        ); // [batch, 1], false (IR token is never masked)
+        );
         let full_pad_mask = Tensor::cat(vec![ir_pad, pad_mask], 1); // [batch, 1+seq_len]
 
-        // 6. Run transformer with padding mask (2D padding mask)
         let encoder_input = TransformerEncoderInput::new(tokens).mask_pad(full_pad_mask);
         let encoded = self.transformer.forward(encoder_input); // [batch, 1+seq_len, d_model]
 
-        // 7. Take [CLS] token (first position) and remove the singleton dimension
+        // CLS token output → regression head.
         let cls_output = encoded.narrow(1, 0, 1).squeeze_dim(1); // [batch, d_model]
-
-        // 8. Regression head
         self.output_head.forward(cls_output)
     }
 }

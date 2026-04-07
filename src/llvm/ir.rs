@@ -1,5 +1,125 @@
 use anyhow::Result;
 use std::path::PathBuf;
+
+/// Fixed opcode vocabulary for IR sequence encoding.
+/// 0 = PAD, 1 = BB_SEP (basic-block boundary), 2..63 = LLVM opcodes, 63 = UNKNOWN.
+pub(crate) const IR_VOCAB_SIZE: usize = 64;
+pub(crate) const PAD_OPCODE: u8 = 0;
+pub(crate) const BB_SEP_OPCODE: u8 = 1;
+
+pub(crate) fn opcode_to_id(op: &str) -> u8 {
+    match op {
+        "add"            => 2,
+        "fadd"           => 3,
+        "sub"            => 4,
+        "fsub"           => 5,
+        "mul"            => 6,
+        "fmul"           => 7,
+        "udiv"           => 8,
+        "sdiv"           => 9,
+        "fdiv"           => 10,
+        "urem"           => 11,
+        "srem"           => 12,
+        "frem"           => 13,
+        "and"            => 14,
+        "or"             => 15,
+        "xor"            => 16,
+        "shl"            => 17,
+        "lshr"           => 18,
+        "ashr"           => 19,
+        "alloca"         => 20,
+        "load"           => 21,
+        "store"          => 22,
+        "getelementptr"  => 23,
+        "fence"          => 24,
+        "cmpxchg"        => 25,
+        "atomicrmw"      => 26,
+        "trunc"          => 27,
+        "zext"           => 28,
+        "sext"           => 29,
+        "fptrunc"        => 30,
+        "fpext"          => 31,
+        "fptoui"         => 32,
+        "fptosi"         => 33,
+        "uitofp"         => 34,
+        "sitofp"         => 35,
+        "ptrtoint"       => 36,
+        "inttoptr"       => 37,
+        "bitcast"        => 38,
+        "addrspacecast"  => 39,
+        "ret"            => 40,
+        "br"             => 41,
+        "switch"         => 42,
+        "indirectbr"     => 43,
+        "invoke"         => 44,
+        "resume"         => 45,
+        "unreachable"    => 46,
+        "callbr"         => 47,
+        "phi"            => 48,
+        "select"         => 49,
+        "call"           => 50,
+        "freeze"         => 51,
+        "va_arg"         => 52,
+        "landingpad"     => 53,
+        "catchpad"       => 54,
+        "cleanuppad"     => 55,
+        "icmp"           => 56,
+        "fcmp"           => 57,
+        "extractelement" => 58,
+        "insertelement"  => 59,
+        "shufflevector"  => 60,
+        "extractvalue"   => 61,
+        "insertvalue"    => 62,
+        _                => 63, // UNKNOWN
+    }
+}
+
+/// Extract the raw opcode-ID sequence for one IR file's function body.
+/// Basic-block boundaries are marked with `BB_SEP_OPCODE`.
+/// Returns the unpadded sequence; caller pads to max_ir_len.
+pub(crate) fn extract_opcode_sequence(content: &str) -> Vec<u8> {
+    let mut seq = Vec::new();
+    let mut in_function = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(';') || trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("define ") {
+            in_function = true;
+            seq.push(BB_SEP_OPCODE); // entry block start
+            continue;
+        }
+        if trimmed == "}" {
+            in_function = false;
+            continue;
+        }
+        if !in_function {
+            continue;
+        }
+        // Basic-block label → block boundary token.
+        if let Some(colon_pos) = trimmed.find(':') {
+            let before = &trimmed[..colon_pos];
+            if !before.is_empty()
+                && !before.contains(' ')
+                && !before.starts_with('%')
+                && !before.starts_with('@')
+                && !before.starts_with('!')
+                && !before.contains('(')
+                && !trimmed.contains(" = ")
+            {
+                seq.push(BB_SEP_OPCODE);
+                continue;
+            }
+        }
+        if let Some(op) = extract_opcode(trimmed) {
+            seq.push(opcode_to_id(op));
+        }
+    }
+
+    seq
+}
 #[derive(Clone)]
 pub(crate) struct Source {
     pub(crate) file: PathBuf,
@@ -10,6 +130,32 @@ pub(crate) struct Bin {
 #[derive(Clone)]
 pub(crate) struct Ir {
     pub(crate) file: PathBuf,
+}
+
+impl Ir {
+    pub(crate) fn read_content(&self) -> String {
+        std::fs::read_to_string(&self.file).unwrap_or_default()
+    }
+    /// Parse IR and return the full feature struct (single file read).
+    pub(crate) fn features(&self) -> Features {
+        Features::from_ll_str(&self.read_content()).unwrap_or_default()
+    }
+    /// Total instruction count for this IR file.
+    pub(crate) fn instruction_count(&self) -> usize {
+        self.features().total_instruction_count as usize
+    }
+    /// Raw opcode-ID sequence (unpadded) for this IR file.
+    pub(crate) fn opcode_sequence(&self) -> Vec<u8> {
+        extract_opcode_sequence(&self.read_content())
+    }
+}
+
+/// tanh-normalised instruction-count reduction between two consecutive IR steps.
+/// Returns tanh((before − after) / before), bounded in (−1, 1).
+/// Positive = instructions removed, ~0 = no-op, negative = bloat.
+pub(crate) fn step_delta(before: usize, after: usize) -> f32 {
+    let b = before.max(1) as f32;
+    ((b - after as f32) / b).tanh()
 }
 #[derive(Default)]
 pub(crate) struct Features {

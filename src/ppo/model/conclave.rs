@@ -1,4 +1,5 @@
 use crate::config::Cfg;
+use crate::llvm::ir::IR_VOCAB_SIZE;
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
@@ -9,8 +10,24 @@ use burn::tensor::Tensor;
 
 #[derive(Config, Debug)]
 pub(crate) struct ConclaveActorConfig {
-    #[config(default = 40)]
-    pub(crate) input_dim: usize,
+    /// Opcode vocabulary size — must match IR_VOCAB_SIZE.
+    #[config(default = 64)]
+    pub(crate) ir_vocab_size: usize,
+    /// Hidden dim of the small IR encoder (projects up to d_model via ir_proj).
+    #[config(default = 64)]
+    pub(crate) d_ir: usize,
+    /// Number of transformer layers in the IR encoder.
+    #[config(default = 2)]
+    pub(crate) ir_n_layers: usize,
+    /// Number of attention heads in the IR encoder (d_ir must be divisible by this).
+    #[config(default = 4)]
+    pub(crate) ir_n_heads: usize,
+    /// Feed-forward dim inside the IR encoder.
+    #[config(default = 128)]
+    pub(crate) ir_d_ff: usize,
+    /// Max IR opcode sequence length (must match Cfg::max_ir_len).
+    #[config(default = 512)]
+    pub(crate) max_ir_len: usize,
     #[config(default = 29)]
     pub(crate) num_passes: usize,
     #[config(default = 256)]
@@ -32,6 +49,8 @@ pub(crate) struct ConclaveActorConfig {
 /// ConclaveActor — passes convene with full knowledge of the slot ordering context,
 /// slots listen to the resolved pass deliberation without coordinating with each other.
 ///
+/// IR input: opcode-ID sequence [N, max_ir_len] → small IR encoder → mean pool → [N, d_model].
+///
 /// Joint sequence: [pass_0 .. pass_28 | slot_0 .. slot_{K-1}]
 ///
 /// Attention mask:
@@ -39,17 +58,10 @@ pub(crate) struct ConclaveActorConfig {
 ///   pass → slot : open   — passes know which positions are asking
 ///   slot → pass : open   — slots absorb the full pass deliberation
 ///   slot → slot : closed — slots don't coordinate; each reads the conclave independently
-///
-/// This means:
-///   - instcombine resolves against inline knowing slot 0 is querying nearby — ordering
-///     context flows into the pass negotiation, not bolted on after
-///   - each slot's policy and value are conditioned on passes that resolved WITH that
-///     slot's positional identity present — credit flows back to pass embeddings, not
-///     to position embeddings
-///   - gradient for pass_i accumulates from every slot that attended to it across all
-///     episodes — one coherent signal per pass identity, not one per (pass, position) pair
 #[derive(Module, Debug)]
 pub(crate) struct ConclaveActor<B: Backend> {
+    ir_opcode_embed: Embedding<B>,
+    ir_encoder: TransformerEncoder<B>,
     ir_proj: Linear<B>,
     pass_embed: Embedding<B>,
     slot_embed: Embedding<B>,
@@ -63,7 +75,11 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
-            ir_proj: LinearConfig::new(cfg.input_dim, cfg.d_model).init(device),
+            ir_opcode_embed: EmbeddingConfig::new(cfg.ir_vocab_size, cfg.d_ir).init(device),
+            ir_encoder: TransformerEncoderConfig::new(cfg.d_ir, cfg.ir_d_ff, cfg.ir_n_heads, cfg.ir_n_layers)
+                .with_dropout(cfg.dropout)
+                .init(device),
+            ir_proj: LinearConfig::new(cfg.d_ir, cfg.d_model).init(device),
             pass_embed: EmbeddingConfig::new(cfg.num_passes, cfg.d_model).init(device),
             slot_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
@@ -81,44 +97,50 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
     }
 
     fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
-        let n = input.ir_features.dims()[0]; // batch (episodes)
-        let k = cfg.max_seq_len; // slots per episode
-        let device = input.ir_features.device();
-        let np = 29usize; // number of passes (fixed)
-        let seq = np + k; // joint sequence length
+        let n = input.ir_opcodes.dims()[0];
+        let max_ir_len = input.ir_opcodes.dims()[1];
+        let k = cfg.max_seq_len;
+        let device = input.ir_opcodes.device();
+        let np = 29usize;
+        let seq = np + k;
 
-        // IR embedding: project IR features directly — [N, nf] → [N, d_model]
-        let ir_emb = self.ir_proj.forward(input.ir_features); // [N, d_model]
+        // --- IR encoder ---
+        // Embed opcode IDs: [N, L] → [N, L, d_ir]
+        let ir_tok = self.ir_opcode_embed.forward(input.ir_opcodes);
+        // Encode with padding mask so PAD positions don't pollute attention.
+        let ir_enc_input = TransformerEncoderInput::new(ir_tok)
+            .mask_pad(input.ir_padding_mask.clone());
+        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [N, L, d_ir]
+
+        // Masked mean pool: average over real (non-PAD) positions.
+        // ir_padding_mask: true=PAD → float gives 1.0=PAD; invert to get 1.0=real.
+        let not_pad = input.ir_padding_mask.float().neg() + 1.0f32; // [N, L]
+        let counts = not_pad.clone().sum_dim(1).unsqueeze_dim(2).clamp_min(1.0); // [N, 1, 1]
+        let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1); // [N, 1, d_ir]
+        let d_ir = weighted_sum.dims()[2];
+        let ir_mean = (weighted_sum / counts).reshape([n, d_ir]); // [N, d_ir]
+        let ir_emb = self.ir_proj.forward(ir_mean); // [N, d_model]
 
         // Pass nodes: learned pass identity + IR conditioning, broadcast over batch.
-        // [1, np] → embed → [1, np, d_model] + ir_emb [N, 1, d_model] → [N, np, d_model]
         let pass_ids = Tensor::<B, 1, Int>::arange(0..np as i64, &device).unsqueeze_dim(0); // [1, np]
-        let pass_emb = self.pass_embed.forward(pass_ids)                   // [1, np, d_model]
-            .repeat(&[n, 1, 1])                                              // [N, np, d_model]
-            + ir_emb.clone().unsqueeze_dim(1).repeat(&[1, np, 1]); // broadcast IR
+        let pass_emb = self.pass_embed.forward(pass_ids)     // [1, np, d_model]
+            .repeat(&[n, 1, 1])                               // [N, np, d_model]
+            + ir_emb.clone().unsqueeze_dim(1).repeat(&[1, np, 1]);
 
-        // Slot nodes: positional identity, broadcast over batch.
-        // [1, K] → embed → [1, K, d_model] → [N, K, d_model]
-        let slot_ids = Tensor::<B, 1, Int>::arange(0..k as i64, &device).unsqueeze_dim(0); // [1, K]
-        let slot_emb = self
-            .slot_embed
-            .forward(slot_ids) // [1, K, d_model]
-            .repeat(&[n, 1, 1]); // [N, K, d_model]
+        // Slot nodes: positional identity.
+        let slot_ids = Tensor::<B, 1, Int>::arange(0..k as i64, &device).unsqueeze_dim(0);
+        let slot_emb = self.slot_embed.forward(slot_ids).repeat(&[n, 1, 1]); // [N, K, d_model]
 
         // Joint sequence: [pass_0..pass_28 | slot_0..slot_{K-1}]
         let tokens = Tensor::cat(vec![pass_emb, slot_emb], 1); // [N, np+K, d_model]
 
-        // Attention mask [1, seq, seq]:  true = blocked.
-        //   pass i → pass j : always open  (i < np, j < np)
-        //   pass i → slot j : always open  (i < np, j >= np)
-        //   slot i → pass j : always open  (i >= np, j < np)
-        //   slot i → slot j : blocked      (i >= np, j >= np, i != j)
+        // Attention mask: slot→slot blocked (except self).
         let mask_data: Vec<bool> = (0..seq)
             .flat_map(|i| {
                 (0..seq).map(move |j| {
                     let i_is_slot = i >= np;
                     let j_is_slot = j >= np;
-                    i_is_slot && j_is_slot && i != j // slots cannot see other slots
+                    i_is_slot && j_is_slot && i != j
                 })
             })
             .collect();
@@ -131,20 +153,20 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
         let out = self.transformer.forward(enc_input); // [N, np+K, d_model]
 
         let d_model = out.dims()[2];
-
-        // Slot outputs: positions np..np+K carry the resolved slot representations.
-        // [N, K, d_model] → [N*K, d_model] → heads → reshape
         let slot_out = out.narrow(1, np, k).reshape([n * k, d_model]);
         let policy_flat = self.policy_head.forward(slot_out.clone()); // [N*K, num_passes]
-        let value_flat = self.value_head.forward(slot_out); // [N*K, 1]
+        let value_flat = self.value_head.forward(slot_out);           // [N*K, 1]
         let num_actions = policy_flat.dims()[1];
         let policy = policy_flat.reshape([n, k, num_actions]).unsqueeze_dim(2); // [N, K, 1, num_passes]
-        let value = value_flat.reshape([n, k, 1]); // [N, K, 1]
+        let value = value_flat.reshape([n, k, 1]);                               // [N, K, 1]
 
         Output { policy, value }
     }
 
     fn cfg(cfg: &Cfg) -> Self::Config {
-        ConclaveActorConfig::new().with_max_seq_len(cfg.max_seq_len)
+        ConclaveActorConfig::new()
+            .with_max_seq_len(cfg.max_seq_len)
+            .with_max_ir_len(cfg.max_ir_len)
+            .with_ir_vocab_size(IR_VOCAB_SIZE)
     }
 }

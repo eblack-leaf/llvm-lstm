@@ -7,7 +7,8 @@ use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sample {
-    pub ir_features: Vec<f32>,
+    /// Raw opcode-ID sequence for the base IR (unpadded).
+    pub ir_opcodes: Vec<u8>,
     pub passes: Vec<Pass>,
     /// Normalised instruction-count delta per step.
     /// step_deltas[t] = (instr_counts[t] - instr_counts[t+1]) / instr_counts[t].

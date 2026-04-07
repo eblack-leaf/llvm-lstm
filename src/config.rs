@@ -48,4 +48,6 @@ pub(crate) struct Cfg {
     /// Steps with |instr_delta%| < this threshold count as no-ops in metrics (0.0–1.0).
     pub(crate) noop_threshold: f32,
     pub(crate) delta_threshold: f32,
+    /// Maximum number of IR opcode tokens fed to the IR encoder (shorter sequences are padded).
+    pub(crate) max_ir_len: usize,
 }

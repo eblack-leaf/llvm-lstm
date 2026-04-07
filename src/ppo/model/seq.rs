@@ -1,4 +1,5 @@
-use crate::config::{BurnAutoDiff, Cfg};
+use crate::config::Cfg;
+use crate::llvm::ir::IR_VOCAB_SIZE;
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
@@ -9,8 +10,24 @@ use burn::tensor::Tensor;
 
 #[derive(Config, Debug)]
 pub(crate) struct SeqActorConfig {
-    #[config(default = 40)]
-    pub(crate) input_dim: usize,
+    /// Opcode vocabulary size — must match IR_VOCAB_SIZE.
+    #[config(default = 64)]
+    pub(crate) ir_vocab_size: usize,
+    /// Hidden dim of the small IR encoder.
+    #[config(default = 64)]
+    pub(crate) d_ir: usize,
+    /// Number of transformer layers in the IR encoder.
+    #[config(default = 2)]
+    pub(crate) ir_n_layers: usize,
+    /// Number of attention heads in the IR encoder.
+    #[config(default = 4)]
+    pub(crate) ir_n_heads: usize,
+    /// Feed-forward dim inside the IR encoder.
+    #[config(default = 128)]
+    pub(crate) ir_d_ff: usize,
+    /// Max IR opcode sequence length (must match Cfg::max_ir_len).
+    #[config(default = 512)]
+    pub(crate) max_ir_len: usize,
     #[config(default = 29)]
     pub(crate) num_actions: usize,
     #[config(default = 256)]
@@ -32,22 +49,15 @@ pub(crate) struct SeqActorConfig {
 
 /// Sequence actor with causal attention.
 ///
+/// IR input: opcode-ID sequence [N, max_ir_len] → small IR encoder → mean pool → [N, d_model]
+/// → prepended as a single IR token to the slot sequence.
+///
 /// Tokens: [IR_token, slot_0, slot_1, ..., slot_{K-1}]
-///
-/// IR token (position 0): ir_proj(ir_features[0])
-/// Slot token t (position t+1): slot_embed(t)
-///
 /// Causal mask: position i can only attend to positions 0..=i.
-/// This means:
-///   - IR token sees only itself  → value head reads pure IR representation
-///   - slot_t sees IR token + slots 0..t → policy conditioned on IR + prior slots
-///   - slot_{t+1..K-1} CANNOT reach slot_t → no gradient corruption from untrained late slots
-///
-/// Prefix-independence: slot_t's output is identical whether the sequence has
-/// K or ep_len tokens (as long as ep_len > t). PPO can therefore run with
-/// K=ep_len and get exactly the same distributions as collection used for those slots.
 #[derive(Module, Debug)]
 pub(crate) struct SeqActor<B: Backend> {
+    ir_opcode_embed: Embedding<B>,
+    ir_encoder: TransformerEncoder<B>,
     ir_proj: Linear<B>,
     slot_embed: Embedding<B>,
     transformer: TransformerEncoder<B>,
@@ -60,7 +70,11 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
-            ir_proj: LinearConfig::new(cfg.input_dim, cfg.d_model).init(device),
+            ir_opcode_embed: EmbeddingConfig::new(cfg.ir_vocab_size, cfg.d_ir).init(device),
+            ir_encoder: TransformerEncoderConfig::new(cfg.d_ir, cfg.ir_d_ff, cfg.ir_n_heads, cfg.ir_n_layers)
+                .with_dropout(cfg.dropout)
+                .init(device),
+            ir_proj: LinearConfig::new(cfg.d_ir, cfg.d_model).init(device),
             slot_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
                 cfg.d_model,
@@ -77,26 +91,34 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
     }
 
     fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
-        let n = input.ir_features.dims()[0]; // batch (episodes)
-        let k = cfg.max_seq_len; // slots per episode
-        let device = input.ir_features.device();
+        let n = input.ir_opcodes.dims()[0];
+        let k = cfg.max_seq_len;
+        let device = input.ir_opcodes.device();
         let seq = k + 1; // IR token + K slot tokens
 
-        // IR token: project IR features directly — [N, nf] → [N, d_model] → [N, 1, d_model]
-        let ir_emb = self.ir_proj.forward(input.ir_features).unsqueeze_dim(1);
+        // --- IR encoder ---
+        let ir_tok = self.ir_opcode_embed.forward(input.ir_opcodes); // [N, L, d_ir]
+        let ir_enc_input = TransformerEncoderInput::new(ir_tok)
+            .mask_pad(input.ir_padding_mask.clone());
+        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [N, L, d_ir]
 
-        // Slot tokens: embed positions 0..K, broadcast over batch.
-        // [1, K] → embed → [1, K, d_model] → repeat N times → [N, K, d_model]
-        let slot_ids = Tensor::<B, 1, Int>::arange(0..k as i64, &device).unsqueeze_dim(0); // [1, K]
-        let slot_emb = self
-            .slot_embed
-            .forward(slot_ids) // [1, K, d_model]
-            .repeat(&[n, 1, 1]); // [N, K, d_model]
+        let not_pad = input.ir_padding_mask.float().neg() + 1.0f32; // [N, L]
+        let counts = not_pad.clone().sum_dim(1).unsqueeze_dim(2).clamp_min(1.0); // [N, 1, 1]
+        let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1); // [N, 1, d_ir]
+        let d_ir = weighted_sum.dims()[2];
+        let ir_mean = (weighted_sum / counts).reshape([n, d_ir]); // [N, d_ir]
 
-        // Sequence: [IR_token | slot_0 .. slot_{K-1}], shape [N, K+1, d_model]
-        let tokens = Tensor::cat(vec![ir_emb, slot_emb], 1);
+        // Project to d_model, use as the single prepended IR token.
+        let ir_emb = self.ir_proj.forward(ir_mean).unsqueeze_dim(1); // [N, 1, d_model]
 
-        // Causal mask [1, seq, seq] — same for all N, broadcast by transformer.
+        // Slot tokens.
+        let slot_ids = Tensor::<B, 1, Int>::arange(0..k as i64, &device).unsqueeze_dim(0);
+        let slot_emb = self.slot_embed.forward(slot_ids).repeat(&[n, 1, 1]); // [N, K, d_model]
+
+        // Sequence: [IR_token | slot_0 .. slot_{K-1}]
+        let tokens = Tensor::cat(vec![ir_emb, slot_emb], 1); // [N, K+1, d_model]
+
+        // Causal mask.
         let mask_data: Vec<bool> = (0..seq)
             .flat_map(|i| (0..seq).map(move |j| j > i))
             .collect();
@@ -109,22 +131,20 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
         let out = self.transformer.forward(enc_input); // [N, K+1, d_model]
 
         let d_model = out.dims()[2];
-
-        // Policy and value both from slot token outputs (positions 1..K+1).
-        // V_t encodes IR + history of slots 0..t-1 via causal attention, giving
-        // learned per-slot credit assignment rather than a flat broadcast of V(IR).
-        // [N, K, d_model] → [N*K, d_model] → heads → reshape back
         let slot_out = out.narrow(1, 1, k).reshape([n * k, d_model]);
         let policy_flat = self.policy_head.forward(slot_out.clone()); // [N*K, num_actions]
-        let value_flat = self.value_head.forward(slot_out); // [N*K, 1]
+        let value_flat = self.value_head.forward(slot_out);           // [N*K, 1]
         let num_actions = policy_flat.dims()[1];
         let policy = policy_flat.reshape([n, k, num_actions]).unsqueeze_dim(2); // [N, K, 1, num_actions]
-        let value = value_flat.reshape([n, k, 1]); // [N, K, 1]
+        let value = value_flat.reshape([n, k, 1]);                               // [N, K, 1]
 
         Output { policy, value }
     }
 
     fn cfg(cfg: &Cfg) -> Self::Config {
-        SeqActorConfig::new().with_max_seq_len(cfg.max_seq_len)
+        SeqActorConfig::new()
+            .with_max_seq_len(cfg.max_seq_len)
+            .with_max_ir_len(cfg.max_ir_len)
+            .with_ir_vocab_size(IR_VOCAB_SIZE)
     }
 }

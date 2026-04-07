@@ -1,3 +1,4 @@
+use crate::llvm::ir::step_delta;
 use crate::ppo::episode::Results;
 use crate::ppo::model::ACTIONS;
 use std::collections::HashMap;
@@ -160,13 +161,12 @@ impl Metrics {
                 .update(r.episode_return);
             any_speedup = true;
 
-            // Count no-op steps: |delta%| < threshold.
+            // Count no-op steps: |step_delta| < threshold.
             for t in 0..r.ep_len {
-                let before = r.instr_counts.get(t).copied().unwrap_or(1).max(1) as f32;
-                let after = r.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
-                let delta_pct = (before - after).abs() / before;
+                let before = r.instr_counts.get(t).copied().unwrap_or(1);
+                let after = r.instr_counts.get(t + 1).copied().unwrap_or(0);
                 self.total_steps += 1;
-                if delta_pct < self.noop_threshold {
+                if step_delta(before, after).abs() < self.noop_threshold {
                     self.noop_steps += 1;
                 }
             }

@@ -19,45 +19,58 @@ use std::time::Instant;
 /// A single sample for the predictor.
 #[derive(Clone)]
 pub struct PredictorSample {
-    pub ir_features: Vec<f32>,
+    pub ir_opcodes: Vec<u8>,
     pub passes: Vec<crate::llvm::pass::Pass>,
     pub step_deltas: Vec<f32>,
     pub mask: Vec<bool>,
     pub speedup: f32,
 }
 
-/// Stable hash of ir_features to identify which function a sample came from.
-/// Samples from the same function always have byte-identical feature vectors.
-fn ir_features_key(features: &[f32]) -> u64 {
+/// Stable hash of ir_opcodes to identify which function a sample came from.
+fn ir_features_key(opcodes: &[u8]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    for &f in features {
-        f.to_bits().hash(&mut h);
-    }
+    opcodes.hash(&mut h);
     h.finish()
 }
 
 /// Convert a batch of samples into batched tensors.
+#[allow(clippy::type_complexity)]
 fn batch_to_tensors<B: Backend>(
     batch: &[PredictorSample],
     device: &B::Device,
     max_seq_len: usize,
+    max_ir_len: usize,
     clip_min: f32,
 ) -> (
-    Tensor<B, 2>,
-    Tensor<B, 2, burn::tensor::Int>,
-    Tensor<B, 2, burn::tensor::Bool>,
-    Tensor<B, 2>,
-    Tensor<B, 1>,
+    Tensor<B, 2, burn::tensor::Int>,  // ir_opcodes [batch, max_ir_len]
+    Tensor<B, 2, burn::tensor::Bool>, // ir_padding_mask [batch, max_ir_len]
+    Tensor<B, 2, burn::tensor::Int>,  // passes [batch, max_seq_len]
+    Tensor<B, 2, burn::tensor::Bool>, // mask [batch, max_seq_len]
+    Tensor<B, 2>,                     // deltas [batch, max_seq_len]
+    Tensor<B, 1>,                     // targets [batch]
 ) {
+    use crate::llvm::ir::PAD_OPCODE;
     let batch_size = batch.len();
-    let feat_dim = batch[0].ir_features.len();
-    let mut ir_data: Vec<f32> = Vec::with_capacity(batch_size * feat_dim);
+    let mut opcode_data: Vec<i64> = Vec::with_capacity(batch_size * max_ir_len);
+    let mut ir_mask_data: Vec<bool> = Vec::with_capacity(batch_size * max_ir_len);
     let mut pass_data: Vec<i64> = Vec::with_capacity(batch_size * max_seq_len);
     let mut delta_data: Vec<f32> = Vec::with_capacity(batch_size * max_seq_len);
     let mut mask_data: Vec<bool> = Vec::with_capacity(batch_size * max_seq_len);
     let mut target_data: Vec<f32> = Vec::with_capacity(batch_size);
 
     for sample in batch {
+        // Pad/truncate IR opcode sequence.
+        let raw_len = sample.ir_opcodes.len().min(max_ir_len);
+        for i in 0..max_ir_len {
+            if i < raw_len {
+                opcode_data.push(sample.ir_opcodes[i] as i64);
+                ir_mask_data.push(false);
+            } else {
+                opcode_data.push(PAD_OPCODE as i64);
+                ir_mask_data.push(true);
+            }
+        }
+
         let mut padded_passes = sample.passes.clone();
         padded_passes.resize(max_seq_len, crate::llvm::pass::Pass::Start);
         let mut padded_deltas = sample.step_deltas.clone();
@@ -65,14 +78,20 @@ fn batch_to_tensors<B: Backend>(
         let mut padded_mask = sample.mask.clone();
         padded_mask.resize(max_seq_len, false);
 
-        ir_data.extend(&sample.ir_features);
         pass_data.extend(padded_passes.iter().map(|&p| p as i64));
         delta_data.extend(padded_deltas);
         mask_data.extend(padded_mask.iter().copied());
         target_data.push(sample.speedup.max(clip_min));
     }
 
-    let ir = Tensor::from_data(TensorData::new(ir_data, [batch_size, feat_dim]), device);
+    let ir_opcodes = Tensor::<B, 2, burn::tensor::Int>::from_data(
+        TensorData::new(opcode_data, [batch_size, max_ir_len]),
+        device,
+    );
+    let ir_mask = Tensor::<B, 2, burn::tensor::Bool>::from_data(
+        TensorData::new(ir_mask_data, [batch_size, max_ir_len]),
+        device,
+    );
     let passes = Tensor::from_data(
         TensorData::new(pass_data, [batch_size, max_seq_len]),
         device,
@@ -86,7 +105,7 @@ fn batch_to_tensors<B: Backend>(
         device,
     );
     let targets = Tensor::from_data(TensorData::new(target_data, [batch_size]), device);
-    (ir, passes, mask, deltas, targets)
+    (ir_opcodes, ir_mask, passes, mask, deltas, targets)
 }
 
 /// Huber loss: quadratic for |diff| ≤ delta, linear beyond — robust to outliers.
@@ -167,7 +186,7 @@ pub fn train_predictor(
     let all_predictor_samples: Vec<PredictorSample> = all_samples
         .iter()
         .map(|s| PredictorSample {
-            ir_features: s.ir_features.clone(),
+            ir_opcodes: s.ir_opcodes.clone(),
             passes: s.passes.clone(),
             step_deltas: s.step_deltas.clone(),
             mask: (0..s.passes.len()).map(|_| true).collect(),
@@ -181,7 +200,7 @@ pub fn train_predictor(
     let mut func_groups: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, s) in all_predictor_samples.iter().enumerate() {
         func_groups
-            .entry(ir_features_key(&s.ir_features))
+            .entry(ir_features_key(&s.ir_opcodes))
             .or_default()
             .push(i);
     }
@@ -385,10 +404,10 @@ pub fn train_predictor(
                 .map(|&i| train_samples[i].clone())
                 .collect();
 
-            let (ir, passes, mask, deltas, targets) =
-                batch_to_tensors(&batch, &device, config.max_seq_len, clip_min);
+            let (ir_opcodes, ir_mask, passes, mask, deltas, targets) =
+                batch_to_tensors(&batch, &device, config.max_seq_len, config.max_ir_len, clip_min);
 
-            let output = model.forward(ir, passes, mask, deltas); // [B, 1]
+            let output = model.forward(ir_opcodes, ir_mask, passes, mask, deltas); // [B, 1]
             let output_flat = output.squeeze::<1>(); // [B]
 
             // Collect predictions before consuming tensors in the graph
@@ -448,14 +467,16 @@ pub fn train_predictor(
         while batch_start < val_samples.len() {
             let end = (batch_start + batch_size).min(val_samples.len());
             let batch = val_samples[batch_start..end].to_vec();
-            let (ir, passes, mask, deltas, targets) = batch_to_tensors::<crate::config::BurnBackend>(
-                &batch,
-                &device,
-                config.max_seq_len,
-                clip_min,
-            );
+            let (ir_opcodes, ir_mask, passes, mask, deltas, targets) =
+                batch_to_tensors::<crate::config::BurnBackend>(
+                    &batch,
+                    &device,
+                    config.max_seq_len,
+                    config.max_ir_len,
+                    clip_min,
+                );
 
-            let output = valid_model.forward(ir, passes, mask, deltas);
+            let output = valid_model.forward(ir_opcodes, ir_mask, passes, mask, deltas);
             let output_flat = output.squeeze::<1>();
 
             let pred_vec: Vec<f32> = output_flat.clone().into_data().to_vec::<f32>().unwrap();
