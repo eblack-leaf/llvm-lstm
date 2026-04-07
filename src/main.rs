@@ -163,6 +163,19 @@ enum Command {
         #[arg(long, default_value = "dataset.jsonl")]
         output: PathBuf,
     },
+    /// Export IR features for all functions in a benchmark directory to JSON.
+    ExportFeatures {
+        #[arg(long, default_value = "benchmarks")]
+        directory: PathBuf,
+        #[arg(long, default_value = "features.json")]
+        output: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "opt-20")]
+        opt: String,
+        #[arg(long, default_value = "work/export_features")]
+        work_dir: PathBuf,
+    },
     TrainPredictor {
         #[arg(long, default_value = "dataset.jsonl")]
         data: PathBuf,
@@ -535,6 +548,37 @@ fn main() {
                 }
             }
             println!("Dataset written to {:?}", output);
+        }
+        Command::ExportFeatures {
+            directory,
+            output,
+            clang,
+            opt,
+            work_dir,
+        } => {
+            use crate::llvm::ir::Features;
+
+            std::fs::create_dir_all(&work_dir).expect("create work dir");
+            let llvm = Llvm::new(&clang, &opt, work_dir.clone());
+            let mut functions = Functions::new(&directory);
+
+            let mut records: Vec<serde_json::Value> = Vec::new();
+            for func in &mut functions.functions {
+                let func_llvm = llvm.with_env(work_dir.join(&func.name));
+                std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
+                let ir = func_llvm.ir(&func.source).expect("emit IR");
+                let content = std::fs::read_to_string(&ir.file).expect("read IR");
+                let features = Features::from_ll_str(&content).expect("parse features");
+                records.push(serde_json::json!({
+                    "name": func.name,
+                    "features": features.to_vec(),
+                }));
+                println!("  {}", func.name);
+            }
+
+            let json = serde_json::to_string_pretty(&records).expect("serialize");
+            std::fs::write(&output, json).expect("write output");
+            println!("Wrote {} entries to {:?}", records.len(), output);
         }
         Command::TrainPredictor {
             data,
