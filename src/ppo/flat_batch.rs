@@ -65,7 +65,7 @@ impl<B: Backend> FlatBatch<B> {
                 taken_idx.push(step.taken_action_idx as i64);
                 old_log_probs.push(step.old_log_prob);
                 advantages.push(step.advantage);
-                targets.push(ep.episode_return);
+                targets.push(step.ret);
                 total_steps += 1;
             }
         }

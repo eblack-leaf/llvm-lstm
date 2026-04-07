@@ -20,8 +20,6 @@ pub(crate) mod logging;
 pub(crate) mod metrics;
 pub(crate) mod model;
 pub(crate) mod returns;
-pub(crate) mod step;
-pub(crate) mod tokens;
 
 /// Per-slot training data for one episode.
 pub(crate) struct BatchStep {

@@ -38,7 +38,13 @@ impl Returns for InstructionWeightedTerminal {
         let reward_per_influencer = terminal / num_influenced;
         deltas
             .iter()
-            .map(|&d| if d > 0.0 { reward_per_influencer } else { 0.0 })
+            .map(|&d| {
+                if d.abs() > self.threshold {
+                    reward_per_influencer
+                } else {
+                    0.0
+                }
+            })
             .collect()
     }
 }
