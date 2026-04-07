@@ -288,17 +288,18 @@ impl Trainer {
             let advantages = self.advantages.compute(&all_returns, &results);
             metrics.update_returns_advs(&all_returns, &advantages);
 
-            let batch = Ppo::batch(&results, &all_returns, &advantages);
             let lr = scheduler.step();
 
             let t_ppo = Instant::now();
-            let num_chunks = batch.episodes.len().div_ceil(self.cfg.mini_batch_size);
+            let num_chunks = results.len().div_ceil(self.cfg.mini_batch_size);
             let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
 
             let (new_model, new_optimizer, losses) = self.ppo.update(
                 model,
                 optimizer,
-                &batch,
+                &results,
+                &all_returns,
+                &advantages,
                 lr,
                 &self.cfg,
                 &self.device,

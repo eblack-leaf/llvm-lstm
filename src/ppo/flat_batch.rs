@@ -1,19 +1,17 @@
-// Place this in your `ppo` module, e.g., in `batch.rs` or inside `model.rs`
-
-use crate::ppo::BatchEpisode;
+use crate::ppo::episode::Results;
+use crate::ppo::model::ACTIONS;
 use burn::prelude::*;
 use burn::tensor::Tensor;
 
 pub(crate) struct FlatBatch<B: Backend> {
-    /// Total number of valid steps across all episodes in this mini‑batch.
+    /// Total number of valid steps across all episodes in this mini-batch.
     pub total_steps: usize,
 
     /// IR features, shape [n_episodes, n_features]
     pub ir_features: Tensor<B, 2>,
 
-    /// For each valid step, its episode index and position in padded sequence.
-    /// Used to gather logits/values from padded output.
-    /// Shape [total_steps, 2] where [ep_idx, step_idx]
+    /// For each valid step, its episode index and position in the episode.
+    /// Shape [total_steps, 2] where col 0 = ep_idx (global), col 1 = step_idx.
     pub gather_indices: Tensor<B, 2, Int>,
 
     /// Taken action index for each step, shape [total_steps]
@@ -25,45 +23,54 @@ pub(crate) struct FlatBatch<B: Backend> {
     /// Advantage for each step, shape [total_steps]
     pub advantages: Tensor<B, 1>,
 
-    /// Target value (episode return) for each step, shape [total_steps]
+    /// Per-step return (target for value head) for each step, shape [total_steps]
     pub targets: Tensor<B, 1>,
 }
 
 impl<B: Backend> FlatBatch<B> {
-    /// Build a `FlatBatch` from a collection of episodes, moving all data to the given device.
-    pub fn from_episodes(episodes: &[BatchEpisode], device: &B::Device) -> Self {
-        let n_episodes = episodes.len();
-        let max_k = episodes.iter().map(|e| e.steps.len()).max().unwrap_or(1);
-        let n_features = episodes[0].ir_features.len();
+    /// Build a `FlatBatch` directly from episode results, per-step returns, and advantages.
+    pub fn from_results(
+        results: &[Results],
+        returns: &[Vec<f32>],
+        advantages: &[Vec<f32>],
+        device: &B::Device,
+    ) -> Self {
+        let n_episodes = results.len();
+        let n_features = results[0].ir_features.len();
 
-        // Build IR features: [n_episodes, n_features] — one vector per episode.
+        // IR features: one vector per episode [n_episodes, n_features]
         let mut feat_data: Vec<f32> = Vec::with_capacity(n_episodes * n_features);
-        for ep in episodes {
-            feat_data.extend(&ep.ir_features);
+        for r in results {
+            feat_data.extend(&r.ir_features);
         }
-        let ir_features = Tensor::<B, 2>::from_data(
-            TensorData::new(feat_data, [n_episodes, n_features]),
-            device,
-        );
+        let ir_features =
+            Tensor::<B, 2>::from_data(TensorData::new(feat_data, [n_episodes, n_features]), device);
 
-        // Build flat arrays for all steps
-        let mut total_steps = 0;
-        let mut gather_ep = Vec::new();
-        let mut gather_step = Vec::new();
-        let mut taken_idx = Vec::new();
-        let mut old_log_probs = Vec::new();
-        let mut advantages = Vec::new();
-        let mut targets = Vec::new();
+        let mut total_steps = 0usize;
+        let mut gather_ep: Vec<i64> = Vec::new();
+        let mut gather_step: Vec<i64> = Vec::new();
+        let mut taken_idx: Vec<i64> = Vec::new();
+        let mut old_log_probs: Vec<f32> = Vec::new();
+        let mut adv_data: Vec<f32> = Vec::new();
+        let mut target_data: Vec<f32> = Vec::new();
 
-        for (ep_idx, ep) in episodes.iter().enumerate() {
-            let k = ep.steps.len();
-            for (step_idx, step) in ep.steps.iter().enumerate() {
+        for (ep_idx, ((r, ep_rets), ep_advs)) in results
+            .iter()
+            .zip(returns.iter())
+            .zip(advantages.iter())
+            .enumerate()
+        {
+            for t in 0..r.ep_len {
+                let action_idx = ACTIONS
+                    .iter()
+                    .position(|&p| p == r.actions[t])
+                    .expect("action not in ACTIONS");
                 gather_ep.push(ep_idx as i64);
-                gather_step.push(step_idx as i64);
-                taken_idx.push(step.taken_action_idx as i64);
-                old_log_probs.push(step.old_log_prob);
-                advantages.push(step.advantage);
-                targets.push(step.ret);
+                gather_step.push(t as i64);
+                taken_idx.push(action_idx as i64);
+                old_log_probs.push(r.log_probs[t]);
+                adv_data.push(ep_advs[t]);
+                target_data.push(ep_rets[t]);
                 total_steps += 1;
             }
         }
@@ -73,8 +80,8 @@ impl<B: Backend> FlatBatch<B> {
                 gather_ep
                     .into_iter()
                     .zip(gather_step)
-                    .flat_map(|(e, s)| vec![e, s])
-                    .collect(),
+                    .flat_map(|(e, s)| [e, s])
+                    .collect::<Vec<_>>(),
                 [total_steps, 2],
             ),
             device,
@@ -84,8 +91,9 @@ impl<B: Backend> FlatBatch<B> {
         let old_log_probs =
             Tensor::<B, 1>::from_data(TensorData::new(old_log_probs, [total_steps]), device);
         let advantages =
-            Tensor::<B, 1>::from_data(TensorData::new(advantages, [total_steps]), device);
-        let targets = Tensor::<B, 1>::from_data(TensorData::new(targets, [total_steps]), device);
+            Tensor::<B, 1>::from_data(TensorData::new(adv_data, [total_steps]), device);
+        let targets =
+            Tensor::<B, 1>::from_data(TensorData::new(target_data, [total_steps]), device);
 
         FlatBatch {
             total_steps,

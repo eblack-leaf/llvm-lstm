@@ -302,10 +302,10 @@ impl Features {
             ln(self.function_count),
             ln(self.loop_depth_approx),
             // Derived ratios: bounded ones kept as-is, unbounded ones log-scaled
-            lnf(self.load_store_ratio),  // raw load count when stores=0 → log it
-            self.mem_ratio,              // [0, 1]
-            self.call_ratio,             // [0, 1]
-            lnf(self.avg_bb_size),       // total_instrs / BBs, unbounded → log it
+            lnf(self.load_store_ratio), // raw load count when stores=0 → log it
+            self.mem_ratio,             // [0, 1]
+            self.call_ratio,            // [0, 1]
+            lnf(self.avg_bb_size),      // total_instrs / BBs, unbounded → log it
             // Pass-opportunity indicators
             ln(self.unreachable_count),
             ln(self.invoke_count),

@@ -89,10 +89,7 @@ impl Input<BurnBackend> {
     pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32], _k: usize) -> Self {
         let dim = ir_features.len();
         Self {
-            ir_features: Tensor::from_data(
-                TensorData::new(ir_features.to_vec(), [1, dim]),
-                dev,
-            ),
+            ir_features: Tensor::from_data(TensorData::new(ir_features.to_vec(), [1, dim]), dev),
         }
     }
 }

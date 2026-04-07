@@ -1,20 +1,20 @@
 use crate::config::BurnAutoDiff;
+use crate::config::BurnDevice;
 use crate::predictor::data::Sample;
 use crate::predictor::model::{SpeedupPredictor, SpeedupPredictorConfig};
 use anyhow::Result;
 use burn::lr_scheduler::LrScheduler;
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::module::AutodiffModule;
+use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::{Backend, Module, Tensor};
 use burn::tensor::TensorData;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
-use crate::config::BurnDevice;
 
 /// A single sample for the predictor.
 #[derive(Clone)]
@@ -42,7 +42,13 @@ fn batch_to_tensors<B: Backend>(
     device: &B::Device,
     max_seq_len: usize,
     clip_min: f32,
-) -> (Tensor<B, 2>, Tensor<B, 2, burn::tensor::Int>, Tensor<B, 2, burn::tensor::Bool>, Tensor<B, 2>, Tensor<B, 1>) {
+) -> (
+    Tensor<B, 2>,
+    Tensor<B, 2, burn::tensor::Int>,
+    Tensor<B, 2, burn::tensor::Bool>,
+    Tensor<B, 2>,
+    Tensor<B, 1>,
+) {
     let batch_size = batch.len();
     let feat_dim = batch[0].ir_features.len();
     let mut ir_data: Vec<f32> = Vec::with_capacity(batch_size * feat_dim);
@@ -67,8 +73,14 @@ fn batch_to_tensors<B: Backend>(
     }
 
     let ir = Tensor::from_data(TensorData::new(ir_data, [batch_size, feat_dim]), device);
-    let passes = Tensor::from_data(TensorData::new(pass_data, [batch_size, max_seq_len]), device);
-    let deltas = Tensor::from_data(TensorData::new(delta_data, [batch_size, max_seq_len]), device);
+    let passes = Tensor::from_data(
+        TensorData::new(pass_data, [batch_size, max_seq_len]),
+        device,
+    );
+    let deltas = Tensor::from_data(
+        TensorData::new(delta_data, [batch_size, max_seq_len]),
+        device,
+    );
     let mask = Tensor::<B, 2, burn::tensor::Bool>::from_data(
         TensorData::new(mask_data, [batch_size, max_seq_len]),
         device,
@@ -111,14 +123,25 @@ fn compute_metrics<B: Backend<FloatElem = f32>>(
     let target_mean: f32 = targets.clone().mean().into_scalar();
     let dev = targets.clone() - target_mean;
     let ss_tot: f32 = (dev.clone() * dev).sum().into_scalar();
-    let r2 = if ss_tot.abs() < 1e-10 { 0.0 } else { 1.0 - ss_res / ss_tot };
+    let r2 = if ss_tot.abs() < 1e-10 {
+        0.0
+    } else {
+        1.0 - ss_res / ss_tot
+    };
 
     let pred_mean: f32 = predictions.clone().mean().into_scalar();
     let pred_dev = predictions.clone() - pred_mean;
     let pred_var: f32 = (pred_dev.clone() * pred_dev).mean().into_scalar();
     let pred_std = pred_var.sqrt();
 
-    Metrics { mse, rmse: mse.sqrt(), mae, r2, bias, pred_std }
+    Metrics {
+        mse,
+        rmse: mse.sqrt(),
+        mae,
+        r2,
+        bias,
+        pred_std,
+    }
 }
 
 /// Train the predictor model.
@@ -157,7 +180,10 @@ pub fn train_predictor(
     // ---- Group samples by function (identical ir_features → same function) ----
     let mut func_groups: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, s) in all_predictor_samples.iter().enumerate() {
-        func_groups.entry(ir_features_key(&s.ir_features)).or_default().push(i);
+        func_groups
+            .entry(ir_features_key(&s.ir_features))
+            .or_default()
+            .push(i);
     }
     let n_funcs = func_groups.len();
     let n_total = all_predictor_samples.len();
@@ -191,7 +217,9 @@ pub fn train_predictor(
             for &idx in &selected {
                 keep[idx] = true;
             }
-            all_predictor_samples.into_iter().zip(keep)
+            all_predictor_samples
+                .into_iter()
+                .zip(keep)
                 .filter_map(|(s, k)| if k { Some(s) } else { None })
                 .collect()
         } else {
@@ -207,7 +235,8 @@ pub fn train_predictor(
         let mut speedups: Vec<f32> = working_samples.iter().map(|s| s.speedup).collect();
         speedups.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let sp_mean = speedups.iter().sum::<f32>() / n as f32;
-        let sp_std = (speedups.iter().map(|&x| (x - sp_mean).powi(2)).sum::<f32>() / n as f32).sqrt();
+        let sp_std =
+            (speedups.iter().map(|&x| (x - sp_mean).powi(2)).sum::<f32>() / n as f32).sqrt();
         let p25 = speedups[n / 4];
         let p50 = speedups[n / 2];
         let p75 = speedups[n * 3 / 4];
@@ -221,19 +250,45 @@ pub fn train_predictor(
         println!("=== Dataset ===");
         if let Some(cap) = max_samples.filter(|&c| c < n_total) {
             let per_func = cap / n_funcs;
-            println!("  samples : {} → capped to {}  ({} functions, ~{}/func)",
-                n_total, n, n_funcs, per_func);
+            println!(
+                "  samples : {} → capped to {}  ({} functions, ~{}/func)",
+                n_total, n, n_funcs, per_func
+            );
         } else {
             println!("  samples : {}  ({} functions)", n_total, n_funcs);
         }
-        println!("  speedup : min={:.4}  p25={:.4}  p50={:.4}  p75={:.4}  max={:.4}  mean={:.4}  std={:.4}  positive={:.1}%",
-            speedups[0], p25, p50, p75, speedups[n - 1], sp_mean, sp_std, pct_positive);
-        println!("  seq_len : min={}  max={}  mean={:.1}", sl_min, sl_max, sl_mean);
-        println!("  split   : train={:.0}%  val={:.0}%", (1.0 - val_split) * 100.0, val_split * 100.0);
-        println!("  model   : d_model={}  n_layers={}  n_heads={}  d_ff={}  dropout={}",
-            config.d_model, config.n_layers, config.n_heads, config.d_ff, config.dropout);
-        println!("  optim   : lr={:.2e}  epochs={}  batch={}", learning_rate, epochs, batch_size);
-        println!("  loss    : huber(delta={})  clip_min={}", huber_delta, clip_min);
+        println!(
+            "  speedup : min={:.4}  p25={:.4}  p50={:.4}  p75={:.4}  max={:.4}  mean={:.4}  std={:.4}  positive={:.1}%",
+            speedups[0],
+            p25,
+            p50,
+            p75,
+            speedups[n - 1],
+            sp_mean,
+            sp_std,
+            pct_positive
+        );
+        println!(
+            "  seq_len : min={}  max={}  mean={:.1}",
+            sl_min, sl_max, sl_mean
+        );
+        println!(
+            "  split   : train={:.0}%  val={:.0}%",
+            (1.0 - val_split) * 100.0,
+            val_split * 100.0
+        );
+        println!(
+            "  model   : d_model={}  n_layers={}  n_heads={}  d_ff={}  dropout={}",
+            config.d_model, config.n_layers, config.n_heads, config.d_ff, config.dropout
+        );
+        println!(
+            "  optim   : lr={:.2e}  epochs={}  batch={}",
+            learning_rate, epochs, batch_size
+        );
+        println!(
+            "  loss    : huber(delta={})  clip_min={}",
+            huber_delta, clip_min
+        );
         println!();
     }
 
@@ -253,12 +308,10 @@ pub fn train_predictor(
     let mut model: SpeedupPredictor<BurnAutoDiff> = config.init(&device);
 
     let mut optimizer = AdamConfig::new().init::<BurnAutoDiff, _>();
-    let mut scheduler = burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig::new(
-        learning_rate,
-        epochs,
-    )
-        .init()
-        .expect("Failed to initialize scheduler");
+    let mut scheduler =
+        burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig::new(learning_rate, epochs)
+            .init()
+            .expect("Failed to initialize scheduler");
 
     let mut best_val_loss = f32::INFINITY;
     let mut best_epoch = 0usize;
@@ -290,9 +343,17 @@ pub fn train_predictor(
 
     epoch_pb.println(format!(
         "{:>6}  {:>10}  {:>8} {:>7} {:>6} {:>+7} {:>6}  |  {:>8} {:>7} {:>6} {:>+7}  {:>6}",
-        "epoch", "lr",
-        "tr_rmse", "tr_mae", "tr_r²", "tr_bias", "pstd",
-        "va_rmse", "va_mae", "va_r²", "va_bias",
+        "epoch",
+        "lr",
+        "tr_rmse",
+        "tr_mae",
+        "tr_r²",
+        "tr_bias",
+        "pstd",
+        "va_rmse",
+        "va_mae",
+        "va_r²",
+        "va_bias",
         "gap"
     ));
 
@@ -324,7 +385,8 @@ pub fn train_predictor(
                 .map(|&i| train_samples[i].clone())
                 .collect();
 
-            let (ir, passes, mask, deltas, targets) = batch_to_tensors(&batch, &device, config.max_seq_len, clip_min);
+            let (ir, passes, mask, deltas, targets) =
+                batch_to_tensors(&batch, &device, config.max_seq_len, clip_min);
 
             let output = model.forward(ir, passes, mask, deltas); // [B, 1]
             let output_flat = output.squeeze::<1>(); // [B]
@@ -350,7 +412,8 @@ pub fn train_predictor(
             let samp_per_sec = samples_done as f32 / phase_start.elapsed().as_secs_f32().max(1e-6);
             batch_pb.set_message(format!(
                 "loss={:.5}  {:.1}k samp/s",
-                loss_val, samp_per_sec / 1000.0,
+                loss_val,
+                samp_per_sec / 1000.0,
             ));
             batch_pb.inc(1);
 
@@ -359,14 +422,10 @@ pub fn train_predictor(
         let avg_train_loss = train_loss_sum / train_steps as f32;
 
         let n_train = train_preds.len();
-        let train_pred_tensor = Tensor::<BurnAutoDiff, 1>::from_data(
-            TensorData::new(train_preds, [n_train]),
-            &device,
-        );
-        let train_targ_tensor = Tensor::<BurnAutoDiff, 1>::from_data(
-            TensorData::new(train_targs, [n_train]),
-            &device,
-        );
+        let train_pred_tensor =
+            Tensor::<BurnAutoDiff, 1>::from_data(TensorData::new(train_preds, [n_train]), &device);
+        let train_targ_tensor =
+            Tensor::<BurnAutoDiff, 1>::from_data(TensorData::new(train_targs, [n_train]), &device);
         let tr = compute_metrics(&train_pred_tensor, &train_targ_tensor);
 
         // ---------------- Validation ----------------
@@ -389,8 +448,12 @@ pub fn train_predictor(
         while batch_start < val_samples.len() {
             let end = (batch_start + batch_size).min(val_samples.len());
             let batch = val_samples[batch_start..end].to_vec();
-            let (ir, passes, mask, deltas, targets) =
-                batch_to_tensors::<crate::config::BurnBackend>(&batch, &device, config.max_seq_len, clip_min);
+            let (ir, passes, mask, deltas, targets) = batch_to_tensors::<crate::config::BurnBackend>(
+                &batch,
+                &device,
+                config.max_seq_len,
+                clip_min,
+            );
 
             let output = valid_model.forward(ir, passes, mask, deltas);
             let output_flat = output.squeeze::<1>();
@@ -407,7 +470,8 @@ pub fn train_predictor(
             val_preds.extend(pred_vec);
             val_targs.extend(targ_vec);
 
-            let samp_per_sec = val_samples_done as f32 / val_start.elapsed().as_secs_f32().max(1e-6);
+            let samp_per_sec =
+                val_samples_done as f32 / val_start.elapsed().as_secs_f32().max(1e-6);
             batch_pb.set_message(format!("{:.1}k samp/s", samp_per_sec / 1000.0));
             batch_pb.inc(1);
 
@@ -417,14 +481,10 @@ pub fn train_predictor(
         let avg_val_loss = val_loss_sum / val_steps as f32;
 
         let n_val = val_preds.len();
-        let val_pred_tensor = Tensor::<BurnAutoDiff, 1>::from_data(
-            TensorData::new(val_preds, [n_val]),
-            &device,
-        );
-        let val_targ_tensor = Tensor::<BurnAutoDiff, 1>::from_data(
-            TensorData::new(val_targs, [n_val]),
-            &device,
-        );
+        let val_pred_tensor =
+            Tensor::<BurnAutoDiff, 1>::from_data(TensorData::new(val_preds, [n_val]), &device);
+        let val_targ_tensor =
+            Tensor::<BurnAutoDiff, 1>::from_data(TensorData::new(val_targs, [n_val]), &device);
         let va = compute_metrics(&val_pred_tensor, &val_targ_tensor);
 
         let is_best = avg_val_loss < best_val_loss;
@@ -438,7 +498,11 @@ pub fn train_predictor(
             best_model.save_file(&checkpoint_dir.join("best_model"), &recorder)?;
         }
 
-        let gap = if avg_train_loss > 0.0 { avg_val_loss / avg_train_loss } else { f32::NAN };
+        let gap = if avg_train_loss > 0.0 {
+            avg_val_loss / avg_train_loss
+        } else {
+            f32::NAN
+        };
         let best_marker = if is_best { " ★" } else { "" };
         epoch_pb.println(format!(
             "{:>6}  {:>10.3e}  {:>8.5} {:>7.5} {:>7.3} {:>+6.4} {:>6.4}  |  {:>8.5} {:>7.5} {:>7.3} {:>+6.4}  {:>5.2}x{}",
@@ -452,7 +516,8 @@ pub fn train_predictor(
 
     epoch_pb.finish_with_message(format!(
         "done — best val rmse={:.5} at epoch {}",
-        best_val_loss.sqrt(), best_epoch
+        best_val_loss.sqrt(),
+        best_epoch
     ));
     Ok(())
 }

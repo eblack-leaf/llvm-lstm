@@ -3,7 +3,7 @@ use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Results;
 use crate::ppo::flat_batch::FlatBatch;
 use crate::ppo::metrics::PpoLosses;
-use crate::ppo::model::{ACTIONS, Actor, Input};
+use crate::ppo::model::{Actor, Input};
 use burn::backend::Autodiff;
 use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
@@ -20,26 +20,6 @@ pub(crate) mod logging;
 pub(crate) mod metrics;
 pub(crate) mod model;
 pub(crate) mod returns;
-
-/// Per-slot training data for one episode.
-pub(crate) struct BatchStep {
-    pub(crate) taken_action_idx: usize,
-    pub(crate) old_log_prob: f32,
-    pub(crate) ret: f32,
-    pub(crate) advantage: f32,
-}
-
-/// All slots from one episode, grouped for the transformer forward pass.
-pub(crate) struct BatchEpisode {
-    pub(crate) ir_features: Vec<f32>,
-    pub(crate) steps: Vec<BatchStep>,
-    pub(crate) episode_return: f32,
-}
-
-/// Collection of episodes for one PPO update.
-pub(crate) struct Batch {
-    pub(crate) episodes: Vec<BatchEpisode>,
-}
 
 pub(crate) struct Ppo {
     clip_epsilon: f32,
@@ -60,45 +40,6 @@ impl Ppo {
         }
     }
 
-    /// Build per-episode batch from episode results, pre-computed returns, and pre-computed advantages.
-    pub(crate) fn batch(
-        results: &[Results],
-        returns: &[Vec<f32>],
-        advantages: &[Vec<f32>],
-    ) -> Batch {
-        let episodes = results
-            .iter()
-            .zip(returns)
-            .zip(advantages)
-            .map(|((ep, ep_rets), ep_advs)| {
-                let episode_return = ep_rets.first().copied().unwrap_or(0.0);
-                let steps = ep
-                    .actions
-                    .iter()
-                    .enumerate()
-                    .map(|(t, &action)| {
-                        let taken_action_idx = ACTIONS
-                            .iter()
-                            .position(|&p| p == action)
-                            .expect("action not in ACTIONS");
-                        BatchStep {
-                            taken_action_idx,
-                            old_log_prob: ep.log_probs[t],
-                            ret: ep_rets[t],
-                            advantage: ep_advs[t],
-                        }
-                    })
-                    .collect();
-                BatchEpisode {
-                    ir_features: ep.ir_features.clone(),
-                    steps,
-                    episode_return,
-                }
-            })
-            .collect();
-        Batch { episodes }
-    }
-
     /// PPO update. Mini-batches are groups of episodes. For each episode, one
     /// transformer forward is run over all K slots simultaneously (inter-slot
     /// attention preserved). Losses are accumulated across the mini-batch before
@@ -107,7 +48,9 @@ impl Ppo {
         &self,
         mut model: A,
         mut optimizer: O,
-        batch: &Batch,
+        results: &[Results],
+        returns: &[Vec<f32>],
+        advantages: &[Vec<f32>],
         lr: f64,
         cfg: &Cfg,
         device: &BurnDevice,
@@ -117,12 +60,12 @@ impl Ppo {
         A: Actor<BurnAutoDiff> + AutodiffModule<BurnAutoDiff>,
         O: Optimizer<A, BurnAutoDiff>,
     {
-        if batch.episodes.is_empty() {
+        if results.is_empty() {
             return (model, optimizer, PpoLosses::zero());
         }
 
-        // Build flat batch once
-        let flat_batch = FlatBatch::from_episodes(&batch.episodes, device);
+        // Build flat batch once directly from results + returns + advantages
+        let flat_batch = FlatBatch::from_results(results, returns, advantages, device);
         let max_k = cfg.max_seq_len;
         let n_features = flat_batch.ir_features.dims()[1];
 
@@ -162,18 +105,18 @@ impl Ppo {
 
         // Precompute episode boundaries (global step indices)
         let episode_boundaries: Vec<(usize, usize)> = {
-            let mut b = Vec::with_capacity(batch.episodes.len());
+            let mut b = Vec::with_capacity(results.len());
             let mut cur = 0;
-            for ep in &batch.episodes {
+            for r in results {
                 let start = cur;
-                let end = cur + ep.steps.len();
+                let end = cur + r.ep_len;
                 b.push((start, end));
                 cur = end;
             }
             b
         };
 
-        let num_episodes = batch.episodes.len();
+        let num_episodes = results.len();
         let num_chunks = num_episodes.div_ceil(self.mini_batch_size);
 
         let mut sum_policy = 0.0_f32;
@@ -191,10 +134,10 @@ impl Ppo {
                 let chunk_num_steps = step_end - step_start;
 
                 // Slice IR features: [chunk_size, n_features]
-                let chunk_ir = flat_batch.ir_features.clone().slice([
-                    start_ep..end_ep,
-                    0..n_features,
-                ]);
+                let chunk_ir = flat_batch
+                    .ir_features
+                    .clone()
+                    .slice([start_ep..end_ep, 0..n_features]);
 
                 // Slice flat tensors
                 let chunk_gather = flat_batch
@@ -244,8 +187,8 @@ impl Ppo {
                 let diff = step_values - chunk_targets;
 
                 // Entropy component
-                let log_probs = log_probs_all.clone();        // already log-softmax
-                let probs = log_probs.clone().exp();          // probabilities
+                let log_probs = log_probs_all.clone(); // already log-softmax
+                let probs = log_probs.clone().exp(); // probabilities
 
                 // Shannon entropy per step: H = -Σ p log p
                 let entropy_per_step = -(probs * log_probs).sum_dim(1).squeeze::<1>(); // [total_steps]

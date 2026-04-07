@@ -82,7 +82,7 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
 
     fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
         let n = input.ir_features.dims()[0]; // batch (episodes)
-        let k = cfg.max_seq_len;             // slots per episode
+        let k = cfg.max_seq_len; // slots per episode
         let device = input.ir_features.device();
         let np = 29usize; // number of passes (fixed)
         let seq = np + k; // joint sequence length

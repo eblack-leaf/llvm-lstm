@@ -38,7 +38,9 @@ impl SpeedupPredictorConfig {
         SpeedupPredictor {
             pass_embed: EmbeddingConfig::new(self.num_passes, self.d_model).init(device),
             ir_proj: LinearConfig::new(self.ir_feature_dim, self.d_model).init(device),
-            delta_proj: LinearConfig::new(1, self.d_model).with_bias(false).init(device),
+            delta_proj: LinearConfig::new(1, self.d_model)
+                .with_bias(false)
+                .init(device),
             pos_embed: EmbeddingConfig::new(max_positions, self.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
                 self.d_model,
@@ -46,8 +48,8 @@ impl SpeedupPredictorConfig {
                 self.n_heads,
                 self.n_layers,
             )
-                .with_dropout(self.dropout)
-                .init(device),
+            .with_dropout(self.dropout)
+            .init(device),
             output_head: LinearConfig::new(self.d_model, self.output_dim).init(device),
         }
     }
@@ -56,10 +58,10 @@ impl SpeedupPredictorConfig {
 impl<B: Backend> SpeedupPredictor<B> {
     pub fn forward(
         &self,
-        ir_features: Tensor<B, 2>,             // [batch, ir_dim]
-        passes: Tensor<B, 2, Int>,             // [batch, seq_len]
-        mask: Tensor<B, 2, Bool>,              // [batch, seq_len] true = valid
-        step_deltas: Tensor<B, 2>,             // [batch, seq_len] normalised instr-count delta per step
+        ir_features: Tensor<B, 2>, // [batch, ir_dim]
+        passes: Tensor<B, 2, Int>, // [batch, seq_len]
+        mask: Tensor<B, 2, Bool>,  // [batch, seq_len] true = valid
+        step_deltas: Tensor<B, 2>, // [batch, seq_len] normalised instr-count delta per step
     ) -> Tensor<B, 2> {
         let batch_size = passes.dims()[0];
         let seq_len = passes.dims()[1];

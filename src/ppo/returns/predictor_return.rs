@@ -39,9 +39,9 @@ impl PredictorReturn {
     ) -> anyhow::Result<Self> {
         let device = BurnDevice::default();
 
-        let config: SpeedupPredictorConfig = serde_json::from_str(
-            &std::fs::read_to_string(checkpoint_dir.join("config.json"))?,
-        )?;
+        let config: SpeedupPredictorConfig = serde_json::from_str(&std::fs::read_to_string(
+            checkpoint_dir.join("config.json"),
+        )?)?;
 
         let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
         let record = recorder
@@ -50,7 +50,13 @@ impl PredictorReturn {
 
         let model = config.init::<BurnBackend>(&device).load_record(record);
 
-        Ok(Self { model, device, max_seq_len: config.max_seq_len, noop_threshold, scale })
+        Ok(Self {
+            model,
+            device,
+            max_seq_len: config.max_seq_len,
+            noop_threshold,
+            scale,
+        })
     }
 }
 
@@ -77,7 +83,8 @@ impl Returns for PredictorReturn {
                     mask_data.push(true);
                     let instr_before = results.instr_counts.get(slot).copied().unwrap_or(1).max(1);
                     let instr_after = results.instr_counts.get(slot + 1).copied().unwrap_or(0);
-                    let delta = ((instr_before as f32 - instr_after as f32) / instr_before as f32).tanh();
+                    let delta =
+                        ((instr_before as f32 - instr_after as f32) / instr_before as f32).tanh();
                     delta_data.push(delta);
                 } else {
                     pass_data.push(Pass::Start as i64);
@@ -107,7 +114,7 @@ impl Returns for PredictorReturn {
         let preds: Vec<f32> = self
             .model
             .forward(ir, passes, mask, deltas) // [ep_len, 1]
-            .squeeze::<1>()            // [ep_len]
+            .squeeze::<1>() // [ep_len]
             .into_data()
             .to_vec::<f32>()
             .unwrap();
@@ -124,7 +131,11 @@ impl Returns for PredictorReturn {
             let instr_after = results.instr_counts.get(t + 1).copied().unwrap_or(0);
             let instr_delta = (instr_before as i64 - instr_after as i64).unsigned_abs() as f32
                 / instr_before as f32;
-            let r = if instr_delta < self.noop_threshold { 0.0 } else { delta };
+            let r = if instr_delta < self.noop_threshold {
+                0.0
+            } else {
+                delta
+            };
             returns.push(r * self.scale);
             prev = pred;
         }

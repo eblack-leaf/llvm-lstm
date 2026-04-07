@@ -1,6 +1,5 @@
 #![recursion_limit = "256"]
 #![allow(unused)]
-use std::io::Write;
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
@@ -15,13 +14,14 @@ use crate::ppo::returns::instruction_weighted_terminal::InstructionWeightedTermi
 use crate::train::Trainer;
 use burn::module::AutodiffModule;
 use clap::{Parser, Subcommand};
+use std::io::Write;
 use std::path::PathBuf;
 
 mod config;
 mod llvm;
 mod ppo;
-mod train;
 mod predictor;
+mod train;
 
 #[derive(Parser)]
 struct LlvmLstm {
@@ -284,9 +284,8 @@ fn main() {
                     threshold: delta_threshold,
                 }),
                 "predictor" => {
-                    let ckpt = predictor_checkpoint.expect(
-                        "--predictor-checkpoint required when --returns=predictor",
-                    );
+                    let ckpt = predictor_checkpoint
+                        .expect("--predictor-checkpoint required when --returns=predictor");
                     Box::new(
                         crate::ppo::returns::predictor_return::PredictorReturn::load(
                             &ckpt,
@@ -479,9 +478,9 @@ fn main() {
             work_dir,
             output,
         } => {
-            use crate::llvm::ir::{Features, Source};
-            use crate::llvm::functions::Functions;
             use crate::llvm::Llvm;
+            use crate::llvm::functions::Functions;
+            use crate::llvm::ir::{Features, Source};
             use crate::llvm::pass::Pass;
             use std::collections::HashMap;
 
@@ -499,7 +498,10 @@ fn main() {
             // Group by func_name
             let mut func_cache: HashMap<String, Vec<(Vec<Pass>, f32, Vec<f32>)>> = HashMap::new();
             for ((func_name, passes), (speedup, step_deltas)) in cache_data {
-                func_cache.entry(func_name).or_default().push((passes, speedup, step_deltas));
+                func_cache
+                    .entry(func_name)
+                    .or_default()
+                    .push((passes, speedup, step_deltas));
             }
 
             // Setup LLVM to compute IR features for each function
@@ -573,7 +575,8 @@ fn main() {
                 huber_delta,
                 max_samples,
                 config,
-            ).expect("training failed");
+            )
+            .expect("training failed");
         }
     }
 }
