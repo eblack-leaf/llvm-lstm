@@ -216,7 +216,16 @@ impl Trainer {
                         .collect();
                     let cache_key = (func_name.clone(), seq_key);
 
-                    let speedup = if let Some(&cached) = cache.get(&cache_key).as_deref() {
+                    // Normalised per-step deltas: (before - after) / before.
+                    let step_deltas: Vec<f32> = instr_counts
+                        .windows(2)
+                        .map(|w| {
+                            let before = w[0].max(1) as f32;
+                            (before - w[1] as f32) / before
+                        })
+                        .collect();
+
+                    let speedup = if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
                         bench_cache_hits += 1;
                         cached
                     } else {
@@ -226,7 +235,7 @@ impl Trainer {
                             .benchmark(&bin, self.cfg.benchmark_runs, self.cfg.benchmark_iters)
                             .expect("benchmark");
                         bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
-                        cache.insert(cache_key, bm.speedup);
+                        cache.insert(cache_key, (bm.speedup, step_deltas.clone()));
                         bm.speedup
                     };
 

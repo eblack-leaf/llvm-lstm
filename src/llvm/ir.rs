@@ -274,6 +274,10 @@ impl Features {
     /// left as-is (they're bounded or near-bounded in practice).
     pub fn to_vec(&self) -> Vec<f32> {
         let ln = |x: u32| (1.0 + x as f32).ln();
+        // ln for unbounded floats — keeps them on the same ~[0, 12] scale as the
+        // integer log features.  load_store_ratio can be a raw load count when
+        // stores == 0 (hundreds+), and avg_bb_size is total/BBs (unbounded).
+        let lnf = |x: f32| (1.0 + x.max(0.0)).ln();
         vec![
             // Log-transformed instruction counts
             ln(self.add_count),
@@ -297,11 +301,11 @@ impl Features {
             ln(self.total_instruction_count),
             ln(self.function_count),
             ln(self.loop_depth_approx),
-            // Derived ratios (scale-invariant)
-            self.load_store_ratio,
-            self.mem_ratio,
-            self.call_ratio,
-            self.avg_bb_size,
+            // Derived ratios: bounded ones kept as-is, unbounded ones log-scaled
+            lnf(self.load_store_ratio),  // raw load count when stores=0 → log it
+            self.mem_ratio,              // [0, 1]
+            self.call_ratio,             // [0, 1]
+            lnf(self.avg_bb_size),       // total_instrs / BBs, unbounded → log it
             // Pass-opportunity indicators
             ln(self.unreachable_count),
             ln(self.invoke_count),

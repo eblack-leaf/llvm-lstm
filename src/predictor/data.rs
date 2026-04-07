@@ -9,6 +9,10 @@ use std::path::Path;
 pub struct Sample {
     pub ir_features: Vec<f32>,
     pub passes: Vec<Pass>,
+    /// Normalised instruction-count delta per step.
+    /// step_deltas[t] = (instr_counts[t] - instr_counts[t+1]) / instr_counts[t].
+    /// Positive = count reduced, ~0 = no-op, negative = bloat.  len == passes.len().
+    pub step_deltas: Vec<f32>,
     pub speedup: f32,
 }
 

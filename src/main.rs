@@ -46,9 +46,9 @@ enum Command {
         epochs: usize,
         #[arg(long, default_value = "4")]
         ppo_epochs: usize,
-        #[arg(long, default_value = "32")]
+        #[arg(long, default_value = "256")]
         episodes: usize,
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "2")]
         benchmark_runs: usize,
         #[arg(long, default_value = "100")]
         benchmark_iters: usize,
@@ -56,13 +56,13 @@ enum Command {
         baseline_runs: usize,
         #[arg(long, default_value = "200")]
         baseline_iters: usize,
-        #[arg(long, default_value = "40")]
+        #[arg(long, default_value = "30")]
         max_seq_len: usize,
         #[arg(long, default_value = "3e-4")]
         learning_rate: f64,
         #[arg(long, default_value = "0.1")]
         clip_epsilon: f32,
-        #[arg(long, default_value = "0.75")]
+        #[arg(long, default_value = "0.5")]
         value_coef: f32,
         #[arg(long, default_value = "0.003")]
         entropy_coef: f32,
@@ -81,11 +81,21 @@ enum Command {
         #[arg(long, default_value = "1.0")]
         proxy_alpha: f32,
         /// Return signal: episode (uniform terminal), proxy (blended instr+terminal),
-        /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0).
+        /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0),
+        /// predictor (per-step marginal from pretrained SpeedupPredictor).
         #[arg(long, default_value = "weighted")]
         returns: String,
+        /// Path to predictor checkpoint directory. Required when --returns=predictor.
+        #[arg(long)]
+        predictor_checkpoint: Option<PathBuf>,
+        /// Instruction-count delta below which a step is considered a no-op and gets zero return (predictor mode).
+        #[arg(long, default_value = "0.01")]
+        predictor_noop_threshold: f32,
+        /// Scale factor applied to all predictor returns.
+        #[arg(long, default_value = "1.0")]
+        predictor_scale: f32,
         /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
-        #[arg(long, default_value = "0")]
+        #[arg(long, default_value = "0.01")]
         noop_threshold: usize,
         #[arg(long, default_value = "0.01")]
         delta_threshold: f32,
@@ -158,7 +168,7 @@ enum Command {
         data: PathBuf,
         #[arg(long, default_value = "predictor_checkpoints")]
         checkpoint_dir: PathBuf,
-        #[arg(long, default_value = "100")]
+        #[arg(long, default_value = "300")]
         epochs: usize,
         #[arg(long, default_value = "4096")]
         batch_size: usize,
@@ -183,7 +193,7 @@ enum Command {
         #[arg(long, default_value = "-3.0")]
         clip_min: f32,
         /// Huber loss delta — quadratic within ±delta of target, linear beyond.
-        #[arg(long, default_value = "0.1")]
+        #[arg(long, default_value = "3.0")]
         huber_delta: f32,
         /// Cap total samples by taking this many evenly across all functions.
         /// Omit to use the full dataset.
@@ -238,6 +248,9 @@ fn main() {
             returns,
             noop_threshold,
             delta_threshold,
+            predictor_checkpoint,
+            predictor_noop_threshold,
+            predictor_scale,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -270,6 +283,19 @@ fn main() {
                 "weighted" => Box::new(InstructionWeightedTerminal {
                     threshold: delta_threshold,
                 }),
+                "predictor" => {
+                    let ckpt = predictor_checkpoint.expect(
+                        "--predictor-checkpoint required when --returns=predictor",
+                    );
+                    Box::new(
+                        crate::ppo::returns::predictor_return::PredictorReturn::load(
+                            &ckpt,
+                            predictor_noop_threshold,
+                            predictor_scale,
+                        )
+                        .expect("failed to load predictor checkpoint"),
+                    )
+                }
                 _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(
@@ -464,16 +490,16 @@ fn main() {
             }
 
             // Load cache
-            let cache_data: Vec<((String, Vec<Pass>), f32)> = {
+            let cache_data: Vec<((String, Vec<Pass>), (f32, Vec<f32>))> = {
                 let bytes = std::fs::read(&cache_file).expect("read cache file");
                 bincode::deserialize(&bytes).expect("deserialize cache")
             };
 
             println!("loaded cache w/ {} samples", cache_data.len());
             // Group by func_name
-            let mut func_cache: HashMap<String, Vec<(Vec<Pass>, f32)>> = HashMap::new();
-            for ((func_name, passes), speedup) in cache_data {
-                func_cache.entry(func_name).or_default().push((passes, speedup));
+            let mut func_cache: HashMap<String, Vec<(Vec<Pass>, f32, Vec<f32>)>> = HashMap::new();
+            for ((func_name, passes), (speedup, step_deltas)) in cache_data {
+                func_cache.entry(func_name).or_default().push((passes, speedup, step_deltas));
             }
 
             // Setup LLVM to compute IR features for each function
@@ -487,18 +513,17 @@ fn main() {
                 let func_llvm = llvm.with_env(work_dir.join(&func.name));
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
                 let ir = func_llvm.ir(&func.source).expect("emit IR");
-                let content = std::fs::read_to_string(ir.file).expect("read IR");
+                let content = std::fs::read_to_string(&ir.file).expect("read IR");
                 let features = Features::from_ll_str(&content).expect("parse features");
                 let ir_features = features.to_vec();
 
                 if let Some(entries) = func_cache.get(&func.name) {
-                    for (passes, speedup) in entries {
-                        // For each prefix length 1..len(passes)
+                    for (passes, speedup, step_deltas) in entries {
                         for len in 1..=passes.len() {
-                            let prefix = passes[0..len].to_vec();
                             let sample = crate::predictor::data::Sample {
                                 ir_features: ir_features.clone(),
-                                passes: prefix,
+                                passes: passes[0..len].to_vec(),
+                                step_deltas: step_deltas[0..len].to_vec(),
                                 speedup: *speedup,
                             };
                             serde_json::to_writer(&mut out_file, &sample).expect("write sample");

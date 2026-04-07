@@ -6,17 +6,20 @@ use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Shared cache mapping (func_name, pass_sequence) → speedup.
+/// Shared cache mapping (func_name, pass_sequence) → (speedup, step_deltas).
+/// step_deltas[t] = (instr_counts[t] - instr_counts[t+1]) / instr_counts[t]:
+/// positive = instructions reduced, ~0 = no-op, negative = bloat.
+/// Length equals the pass sequence length.
 /// Keyed on the actual sequence of passes applied so repeated sequences across
 /// episodes and epochs never re-benchmark the same combination.
 /// Stop is stripped from the key since it produces no IR change.
-pub(crate) type BenchCache = Arc<DashMap<(String, Vec<Pass>), f32>>;
+pub(crate) type BenchCache = Arc<DashMap<(String, Vec<Pass>), (f32, Vec<f32>)>>;
 
 /// Persist the cache to disk.
 pub(crate) fn save_cache(cache: &BenchCache, path: &std::path::Path) -> Result<()> {
-    let entries: Vec<((String, Vec<Pass>), f32)> = cache
+    let entries: Vec<((String, Vec<Pass>), (f32, Vec<f32>))> = cache
         .iter()
-        .map(|e| (e.key().clone(), *e.value()))
+        .map(|e| (e.key().clone(), e.value().clone()))
         .collect();
     let bytes = bincode::serialize(&entries).context("serialize bench cache")?;
     std::fs::write(path, bytes).context("write bench cache")?;
@@ -29,7 +32,7 @@ pub(crate) fn load_cache(path: &std::path::Path) -> Result<BenchCache> {
     let cache = Arc::new(DashMap::new());
     match std::fs::read(path) {
         Ok(bytes) => {
-            let entries: Vec<((String, Vec<Pass>), f32)> =
+            let entries: Vec<((String, Vec<Pass>), (f32, Vec<f32>))> =
                 bincode::deserialize(&bytes).context("deserialize bench cache")?;
             for (key, value) in entries {
                 cache.insert(key, value);

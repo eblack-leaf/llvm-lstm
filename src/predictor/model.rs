@@ -13,6 +13,7 @@ use burn::tensor::TensorData;
 pub struct SpeedupPredictor<B: Backend> {
     pass_embed: Embedding<B>,
     ir_proj: Linear<B>,
+    delta_proj: Linear<B>,
     pos_embed: Embedding<B>,
     transformer: TransformerEncoder<B>,
     output_head: Linear<B>,
@@ -37,6 +38,7 @@ impl SpeedupPredictorConfig {
         SpeedupPredictor {
             pass_embed: EmbeddingConfig::new(self.num_passes, self.d_model).init(device),
             ir_proj: LinearConfig::new(self.ir_feature_dim, self.d_model).init(device),
+            delta_proj: LinearConfig::new(1, self.d_model).with_bias(false).init(device),
             pos_embed: EmbeddingConfig::new(max_positions, self.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
                 self.d_model,
@@ -57,13 +59,16 @@ impl<B: Backend> SpeedupPredictor<B> {
         ir_features: Tensor<B, 2>,             // [batch, ir_dim]
         passes: Tensor<B, 2, Int>,             // [batch, seq_len]
         mask: Tensor<B, 2, Bool>,              // [batch, seq_len] true = valid
+        step_deltas: Tensor<B, 2>,             // [batch, seq_len] normalised instr-count delta per step
     ) -> Tensor<B, 2> {
         let batch_size = passes.dims()[0];
         let seq_len = passes.dims()[1];
         let device = passes.device();
 
-        // 1. Embed passes: [batch, seq_len, d_model]
+        // 1. Embed passes and add per-step instruction-delta signal: [batch, seq_len, d_model]
         let pass_embeds = self.pass_embed.forward(passes);
+        let delta_embeds = self.delta_proj.forward(step_deltas.unsqueeze_dim(2)); // [batch, seq_len, d_model]
+        let pass_embeds = pass_embeds + delta_embeds;
 
         // 2. Project IR features: [batch, d_model] -> [batch, 1, d_model]
         let ir_token = self.ir_proj.forward(ir_features).unsqueeze_dim(1);

@@ -126,28 +126,34 @@ impl Ppo {
         let max_k = flat_batch.ir_features.dims()[1];
         let n_features = flat_batch.ir_features.dims()[2];
 
-        // Local helper closures for gathering steps
+        // Local helper closures for gathering steps.
+        // ep_offset converts global episode indices stored in `gather` to indices
+        // local to the chunk slice passed as `x`.
         let gather_3d = |x: &Tensor<BurnAutoDiff, 3>,
-                         gather: &Tensor<BurnAutoDiff, 2, Int>|
+                         gather: &Tensor<BurnAutoDiff, 2, Int>,
+                         ep_offset: usize|
          -> Tensor<BurnAutoDiff, 2> {
             let flat = x.clone().flatten::<2>(0, 1);
             let total = gather.dims()[0];
             let idx = gather
                 .clone()
                 .slice([0..total, 0..1])
+                .sub_scalar(ep_offset as i64)
                 .mul_scalar(max_k as i64)
                 .add(gather.clone().slice([0..total, 1..2]))
                 .reshape([total]);
             flat.select(0, idx)
         };
         let gather_2d = |x: &Tensor<BurnAutoDiff, 2>,
-                         gather: &Tensor<BurnAutoDiff, 2, Int>|
+                         gather: &Tensor<BurnAutoDiff, 2, Int>,
+                         ep_offset: usize|
          -> Tensor<BurnAutoDiff, 1> {
             let flat = x.clone().flatten::<1>(0, 1);
             let total = gather.dims()[0];
             let idx = gather
                 .clone()
                 .slice([0..total, 0..1])
+                .sub_scalar(ep_offset as i64)
                 .mul_scalar(max_k as i64)
                 .add(gather.clone().slice([0..total, 1..2]))
                 .reshape([total]);
@@ -174,7 +180,7 @@ impl Ppo {
         let mut sum_value = 0.0_f32;
         let mut sum_entropy = 0.0_f32;
         let mut sum_kl = 0.0_f32;
-        let mut total_steps_processed = 0usize;
+        let mut total_chunks_processed = 0usize;
 
         for ppo_ep in 0..self.ppo_epochs {
             for chunk_idx in 0..num_chunks {
@@ -214,9 +220,10 @@ impl Ppo {
                 let policy_logits = output.policy.squeeze::<3>();
                 let values = output.value.squeeze::<2>();
 
-                // Gather valid steps
-                let step_logits = gather_3d(&policy_logits, &chunk_gather);
-                let step_values = gather_2d(&values, &chunk_gather);
+                // Gather valid steps (ep indices in chunk_gather are global; pass start_ep so
+                // the closures convert them to local indices within the chunk slice).
+                let step_logits = gather_3d(&policy_logits, &chunk_gather, start_ep);
+                let step_values = gather_2d(&values, &chunk_gather, start_ep);
 
                 // Compute log probs
                 let log_probs_all = log_softmax(step_logits, 1);
@@ -246,6 +253,7 @@ impl Ppo {
 
                 // ---------- Episode‑wise weighting ----------
                 // Build weight tensor: for each step, weight = 1 / (num_episodes * K_ep)
+                let chunk_episodes = end_ep - start_ep;
                 let mut step_weights = vec![0.0_f32; chunk_num_steps];
                 for (ep_idx, &(g_start, g_end)) in episode_boundaries.iter().enumerate() {
                     if g_start >= step_end || g_end <= step_start {
@@ -254,7 +262,7 @@ impl Ppo {
                     let local_start = g_start.saturating_sub(step_start);
                     let local_end = g_end.saturating_sub(step_start);
                     let ep_len = g_end - g_start;
-                    let w = 1.0 / (num_episodes as f32 * ep_len as f32);
+                    let w = 1.0 / (chunk_episodes as f32 * ep_len as f32);
                     for t in local_start..local_end {
                         step_weights[t] = w;
                     }
@@ -278,18 +286,18 @@ impl Ppo {
                 let grads = GradientsParams::from_grads(grads, &model);
                 model = optimizer.step(lr, model, grads);
 
-                // Metrics (use the same weighted values, detached)
-                let steps_f = chunk_num_steps as f32;
+                // Metrics — policy/value/entropy are already chunk-weighted sums (weights
+                // sum to 1.0 per chunk), so accumulate directly and average over chunks.
                 let policy_metric = policy_loss.clone().into_scalar();
                 let value_metric = value_loss.clone().into_scalar();
                 let entropy_metric = entropy.clone().into_scalar();
                 let kl_metric = (chunk_old_lp - new_log_probs.detach()).mean().into_scalar();
 
-                sum_policy += policy_metric * steps_f;
-                sum_value += value_metric * self.value_coef * steps_f;
-                sum_entropy += entropy_metric * steps_f;
-                sum_kl += kl_metric * steps_f;
-                total_steps_processed += chunk_num_steps;
+                sum_policy += policy_metric;
+                sum_value += value_metric * self.value_coef;
+                sum_entropy += entropy_metric;
+                sum_kl += kl_metric;
+                total_chunks_processed += 1;
 
                 ppo_bar.set_message(format!(
                     "ep {}/{} mb {}/{} loss={:.4}",
@@ -304,7 +312,7 @@ impl Ppo {
             }
         }
 
-        let n = (total_steps_processed.max(1)) as f32;
+        let n = total_chunks_processed.max(1) as f32;
         let losses = PpoLosses {
             policy_loss: sum_policy / n,
             value_loss: sum_value / n,
