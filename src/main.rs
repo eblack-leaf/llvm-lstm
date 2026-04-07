@@ -150,7 +150,7 @@ enum Command {
     },
     // Inside Command enum, add:
     Collect {
-        #[arg(long, default_value = "checkpoints/cache.bin")]
+        #[arg(long, default_value = "checkpoints/selected-6.cache")]
         cache_file: PathBuf,
         #[arg(long, default_value = "benchmarks")]
         functions_dir: PathBuf,
