@@ -1,37 +1,52 @@
 use burn::config::Config;
 use burn::module::Module;
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, Tensor};
-use burn::tensor::activation::relu;
 use burn::tensor::Bool;
 use burn::tensor::Int;
+use burn::tensor::TensorData;
 
 #[derive(Module, Debug)]
 pub struct SpeedupPredictor<B: Backend> {
     pass_embed: Embedding<B>,
-    pass_proj: Linear<B>,
     ir_proj: Linear<B>,
-    combined_proj: Linear<B>,
-    output: Linear<B>,
+    pos_embed: Embedding<B>,
+    transformer: TransformerEncoder<B>,
+    output_head: Linear<B>,
 }
 
 #[derive(Config, Debug)]
 pub struct SpeedupPredictorConfig {
     pub num_passes: usize,
-    pub pass_embed_dim: usize,
     pub ir_feature_dim: usize,
-    pub hidden_dim: usize,
     pub output_dim: usize,
+    pub d_model: usize,
+    pub n_heads: usize,
+    pub n_layers: usize,
+    pub d_ff: usize,
+    pub dropout: f64,
+    pub max_seq_len: usize,
 }
 
 impl SpeedupPredictorConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> SpeedupPredictor<B> {
+        let max_positions = self.max_seq_len + 1;
         SpeedupPredictor {
-            pass_embed: EmbeddingConfig::new(self.num_passes, self.pass_embed_dim).init(device),
-            pass_proj: LinearConfig::new(self.pass_embed_dim, self.hidden_dim).init(device),
-            ir_proj: LinearConfig::new(self.ir_feature_dim, self.hidden_dim).init(device),
-            combined_proj: LinearConfig::new(self.hidden_dim * 2, self.hidden_dim).init(device),
-            output: LinearConfig::new(self.hidden_dim, self.output_dim).init(device),
+            pass_embed: EmbeddingConfig::new(self.num_passes, self.d_model).init(device),
+            ir_proj: LinearConfig::new(self.ir_feature_dim, self.d_model).init(device),
+            pos_embed: EmbeddingConfig::new(max_positions, self.d_model).init(device),
+            transformer: TransformerEncoderConfig::new(
+                self.d_model,
+                self.d_ff,
+                self.n_heads,
+                self.n_layers,
+            )
+                .with_dropout(self.dropout)
+                .init(device),
+            output_head: LinearConfig::new(self.d_model, self.output_dim).init(device),
         }
     }
 }
@@ -40,38 +55,48 @@ impl<B: Backend> SpeedupPredictor<B> {
     pub fn forward(
         &self,
         ir_features: Tensor<B, 2>,             // [batch, ir_dim]
-        passes: Tensor<B, 2, burn::tensor::Int>, // [batch, seq_len]
-        mask: Tensor<B, 2, burn::tensor::Bool>,  // [batch, seq_len]
-    ) -> Tensor<B, 2> {                        // [batch, output_dim]
+        passes: Tensor<B, 2, Int>,             // [batch, seq_len]
+        mask: Tensor<B, 2, Bool>,              // [batch, seq_len] true = valid
+    ) -> Tensor<B, 2> {
         let batch_size = passes.dims()[0];
+        let seq_len = passes.dims()[1];
+        let device = passes.device();
 
-        // 1️⃣ Embed passes: [B, seq_len, E]
-        let embedded = self.pass_embed.forward(passes);
+        // 1. Embed passes: [batch, seq_len, d_model]
+        let pass_embeds = self.pass_embed.forward(passes);
 
-        // 2️⃣ Apply mask
-        let mask_float = mask.float().unsqueeze_dim(2); // [B, seq_len, 1]
-        let masked = embedded * mask_float;
+        // 2. Project IR features: [batch, d_model] -> [batch, 1, d_model]
+        let ir_token = self.ir_proj.forward(ir_features).unsqueeze_dim(1);
 
-        // 3️⃣ Sum over sequence → [B, 1, E]
-        let pass_sum_3d = masked.sum_dim(1);
+        // 3. Positional embeddings for all positions (IR token + passes)
+        let positions = Tensor::<B, 1, Int>::arange(0..(1 + seq_len) as i64, &device)
+            .unsqueeze_dim(0)
+            .repeat(&[batch_size, 1]);
+        let pos_embeds = self.pos_embed.forward(positions); // [batch, 1+seq_len, d_model]
 
-        // 4️⃣ Flatten to 2D → [B, E]
-        let pass_sum: Tensor<B, 2> = {
-            let seq_dim = pass_sum_3d.dims()[2];
-            pass_sum_3d.reshape([batch_size, seq_dim])
-        };
+        // 4. Build full sequence and add position embeddings
+        let tokens = Tensor::cat(vec![ir_token, pass_embeds], 1);
+        let tokens = tokens + pos_embeds;
 
-        // 5️⃣ Project pass and IR features → [B, hidden_dim]
-        let pass_hidden = self.pass_proj.forward(pass_sum);
-        let ir_hidden = self.ir_proj.forward(ir_features);
+        // 5. Build padding mask for transformer: true = ignore (mask out)
+        //    mask is [batch, seq_len] where true = valid token.
+        //    For IR token (position 0) we always keep it (valid).
+        //    So we prepend a column of false (keep) to the inverted mask.
+        let pad_mask = mask.equal_elem(false); // [batch, seq_len], true where padding
+        let ir_pad = Tensor::<B, 2, Bool>::from_data(
+            TensorData::new(vec![false; batch_size], [batch_size, 1]),
+            &device,
+        ); // [batch, 1], false (IR token is never masked)
+        let full_pad_mask = Tensor::cat(vec![ir_pad, pad_mask], 1); // [batch, 1+seq_len]
 
-        // 6️⃣ Concatenate along feature dimension → [B, hidden_dim*2]
-        let combined = Tensor::cat(vec![pass_hidden, ir_hidden], 1);
+        // 6. Run transformer with padding mask (2D padding mask)
+        let encoder_input = TransformerEncoderInput::new(tokens).mask_pad(full_pad_mask);
+        let encoded = self.transformer.forward(encoder_input); // [batch, 1+seq_len, d_model]
 
-        // 7️⃣ Hidden layer
-        let hidden = relu(self.combined_proj.forward(combined));
+        // 7. Take [CLS] token (first position) and remove the singleton dimension
+        let cls_output = encoded.narrow(1, 0, 1).squeeze_dim(1); // [batch, d_model]
 
-        // 8️⃣ Output layer → [B, output_dim]
-        self.output.forward(hidden)
+        // 8. Regression head
+        self.output_head.forward(cls_output)
     }
 }

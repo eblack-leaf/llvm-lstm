@@ -168,6 +168,27 @@ enum Command {
         val_split: f32,
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
+        #[arg(long, default_value = "128")]
+        d_model: usize,
+        #[arg(long, default_value = "8")]
+        n_heads: usize,
+        #[arg(long, default_value = "4")]
+        n_layers: usize,
+        #[arg(long, default_value = "512")]
+        d_ff: usize,
+        #[arg(long, default_value = "0.1")]
+        dropout: f64,
+        /// Clip target speedups below this value — removes measurement-noise outliers
+        /// while keeping genuinely bad sequences.
+        #[arg(long, default_value = "-3.0")]
+        clip_min: f32,
+        /// Huber loss delta — quadratic within ±delta of target, linear beyond.
+        #[arg(long, default_value = "0.1")]
+        huber_delta: f32,
+        /// Cap total samples by taking this many evenly across all functions.
+        /// Omit to use the full dataset.
+        #[arg(long)]
+        max_samples: Option<usize>,
     },
 }
 
@@ -496,7 +517,26 @@ fn main() {
             learning_rate,
             val_split,
             max_seq_len,
+            d_model,
+            n_heads,
+            n_layers,
+            d_ff,
+            dropout,
+            clip_min,
+            huber_delta,
+            max_samples,
         } => {
+            let config = crate::predictor::model::SpeedupPredictorConfig {
+                num_passes: 29,
+                ir_feature_dim: 40,
+                output_dim: 1,
+                d_model,
+                n_heads,
+                n_layers,
+                d_ff,
+                dropout,
+                max_seq_len,
+            };
             crate::predictor::train::train_predictor(
                 &data,
                 &checkpoint_dir,
@@ -504,7 +544,10 @@ fn main() {
                 batch_size,
                 learning_rate,
                 val_split,
-                max_seq_len,
+                clip_min,
+                huber_delta,
+                max_samples,
+                config,
             ).expect("training failed");
         }
     }
