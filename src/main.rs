@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 #![allow(unused)]
+use std::io::Write;
 use crate::config::{BurnAutoDiff, BurnDevice, Cfg};
 use crate::llvm::Llvm;
 use crate::llvm::functions::Functions;
@@ -20,6 +21,7 @@ mod config;
 mod llvm;
 mod ppo;
 mod train;
+mod predictor;
 
 #[derive(Parser)]
 struct LlvmLstm {
@@ -135,6 +137,37 @@ enum Command {
         iters: usize,
         #[arg(long, default_value = "16")]
         workers: usize,
+    },
+    // Inside Command enum, add:
+    Collect {
+        #[arg(long, default_value = "checkpoints/cache.bin")]
+        cache_file: PathBuf,
+        #[arg(long, default_value = "benchmarks")]
+        functions_dir: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "opt-20")]
+        opt: String,
+        #[arg(long, default_value = "work/collect")]
+        work_dir: PathBuf,
+        #[arg(long, default_value = "dataset.jsonl")]
+        output: PathBuf,
+    },
+    TrainPredictor {
+        #[arg(long, default_value = "dataset.jsonl")]
+        data: PathBuf,
+        #[arg(long, default_value = "predictor_checkpoints")]
+        checkpoint_dir: PathBuf,
+        #[arg(long, default_value = "100")]
+        epochs: usize,
+        #[arg(long, default_value = "4096")]
+        batch_size: usize,
+        #[arg(long, default_value = "1e-3")]
+        learning_rate: f64,
+        #[arg(long, default_value = "0.2")]
+        val_split: f32,
+        #[arg(long, default_value = "40")]
+        max_seq_len: usize,
     },
 }
 
@@ -390,6 +423,89 @@ fn main() {
                 })
                 .collect();
             print_stats("Rayon parallel", workers, solo.mean_ns, &mut rayon_ns);
+        }
+        Command::Collect {
+            cache_file,
+            functions_dir,
+            clang,
+            opt,
+            work_dir,
+            output,
+        } => {
+            use crate::llvm::ir::{Features, Source};
+            use crate::llvm::functions::Functions;
+            use crate::llvm::Llvm;
+            use crate::llvm::pass::Pass;
+            use std::collections::HashMap;
+
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).expect("create output dir");
+            }
+
+            // Load cache
+            let cache_data: Vec<((String, Vec<Pass>), f32)> = {
+                let bytes = std::fs::read(&cache_file).expect("read cache file");
+                bincode::deserialize(&bytes).expect("deserialize cache")
+            };
+
+            println!("loaded cache w/ {} samples", cache_data.len());
+            // Group by func_name
+            let mut func_cache: HashMap<String, Vec<(Vec<Pass>, f32)>> = HashMap::new();
+            for ((func_name, passes), speedup) in cache_data {
+                func_cache.entry(func_name).or_default().push((passes, speedup));
+            }
+
+            // Setup LLVM to compute IR features for each function
+            let llvm = Llvm::new(&clang, &opt, work_dir.clone());
+            let mut functions = Functions::new(&functions_dir);
+            std::fs::create_dir_all(&work_dir).expect("create work dir");
+
+            let mut out_file = std::fs::File::create(&output).expect("create output file");
+            for func in &mut functions.functions {
+                println!("Processing {}...", func.name);
+                let func_llvm = llvm.with_env(work_dir.join(&func.name));
+                std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
+                let ir = func_llvm.ir(&func.source).expect("emit IR");
+                let content = std::fs::read_to_string(ir.file).expect("read IR");
+                let features = Features::from_ll_str(&content).expect("parse features");
+                let ir_features = features.to_vec();
+
+                if let Some(entries) = func_cache.get(&func.name) {
+                    for (passes, speedup) in entries {
+                        // For each prefix length 1..len(passes)
+                        for len in 1..=passes.len() {
+                            let prefix = passes[0..len].to_vec();
+                            let sample = crate::predictor::data::Sample {
+                                ir_features: ir_features.clone(),
+                                passes: prefix,
+                                speedup: *speedup,
+                            };
+                            serde_json::to_writer(&mut out_file, &sample).expect("write sample");
+                            writeln!(&mut out_file).expect("newline");
+                        }
+                    }
+                }
+            }
+            println!("Dataset written to {:?}", output);
+        }
+        Command::TrainPredictor {
+            data,
+            checkpoint_dir,
+            epochs,
+            batch_size,
+            learning_rate,
+            val_split,
+            max_seq_len,
+        } => {
+            crate::predictor::train::train_predictor(
+                &data,
+                &checkpoint_dir,
+                epochs,
+                batch_size,
+                learning_rate,
+                val_split,
+                max_seq_len,
+            ).expect("training failed");
         }
     }
 }

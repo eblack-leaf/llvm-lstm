@@ -238,8 +238,11 @@ impl Ppo {
                 let diff = step_values - chunk_targets;
 
                 // Entropy component
-                let p = log_probs_all.clone().exp();
-                let neg_entropy_per_step = (p * log_probs_all).sum_dim(1).squeeze::<1>(); // [total_steps]
+                let log_probs = log_probs_all.clone();        // already log-softmax
+                let probs = log_probs.clone().exp();          // probabilities
+
+                // Shannon entropy per step: H = -Σ p log p
+                let entropy_per_step = -(probs * log_probs).sum_dim(1).squeeze::<1>(); // [total_steps]
 
                 // ---------- Episode‑wise weighting ----------
                 // Build weight tensor: for each step, weight = 1 / (num_episodes * K_ep)
@@ -264,7 +267,8 @@ impl Ppo {
                 // Weighted losses (sum, because weights already include 1/num_episodes and 1/ep_len)
                 let policy_loss = -(min_surr * step_weights_tensor.clone()).sum();
                 let value_loss = ((diff.clone() * diff) * step_weights_tensor.clone()).sum();
-                let entropy = (-neg_entropy_per_step * step_weights_tensor).sum();
+                // Apply step weights
+                let entropy = (entropy_per_step * step_weights_tensor).sum(); // no extra negation
 
                 let total_loss = policy_loss.clone() + value_loss.clone() * self.value_coef
                     - entropy.clone() * self.entropy_coef;
