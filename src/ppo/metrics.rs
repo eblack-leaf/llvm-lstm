@@ -78,10 +78,13 @@ pub(crate) struct RetAdvStats {
     pub(crate) ret_min: f32,
     pub(crate) ret_max: f32,
     pub(crate) adv_std: f32,
+    pub(crate) adv_min: f32,
+    pub(crate) adv_max: f32,
 }
 
 pub(crate) struct Metrics {
     pub(crate) epoch: usize,
+    ema_alpha: f32,
 
     policy_loss_avg: RunningAvg,
     value_loss_avg: RunningAvg,
@@ -94,6 +97,8 @@ pub(crate) struct Metrics {
     episode_len_avg: RunningAvg,
     final_speedup_avg: RunningAvg,
     func_speedup_avgs: HashMap<String, RunningAvg>,
+    /// Persistent EMA per function — not reset between epochs.
+    func_speedup_ema: HashMap<String, Ema>,
 
     pub(crate) ret_adv: Option<RetAdvStats>,
 
@@ -115,6 +120,7 @@ impl Metrics {
     pub(crate) fn new(ema_alpha: f32, noop_threshold: f32) -> Self {
         Self {
             epoch: 0,
+            ema_alpha,
             policy_loss_avg: RunningAvg::new(),
             value_loss_avg: RunningAvg::new(),
             entropy_avg: RunningAvg::new(),
@@ -124,6 +130,7 @@ impl Metrics {
             episode_len_avg: RunningAvg::new(),
             final_speedup_avg: RunningAvg::new(),
             func_speedup_avgs: HashMap::new(),
+            func_speedup_ema: HashMap::new(),
             ret_adv: None,
             bench_cache_hits: 0,
             bench_cache_misses: 0,
@@ -147,6 +154,10 @@ impl Metrics {
                 .entry(r.func_name.clone())
                 .or_insert_with(RunningAvg::new)
                 .push(r.episode_return);
+            self.func_speedup_ema
+                .entry(r.func_name.clone())
+                .or_insert_with(|| Ema::new(self.ema_alpha))
+                .update(r.episode_return);
             any_speedup = true;
 
             // Count no-op steps: |delta%| < threshold.
@@ -181,13 +192,15 @@ impl Metrics {
         let ret_min = rets.iter().cloned().fold(f32::INFINITY, f32::min);
         let ret_max = rets.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-        let adv_std = if advs.is_empty() {
-            0.0
+        let (adv_std, adv_min, adv_max) = if advs.is_empty() {
+            (0.0, 0.0, 0.0)
         } else {
             let m = advs.len() as f32;
             let mean = advs.iter().sum::<f32>() / m;
             let var = advs.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / m;
-            var.sqrt()
+            let mn = advs.iter().cloned().fold(f32::INFINITY, f32::min);
+            let mx = advs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            (var.sqrt(), mn, mx)
         };
 
         self.ret_adv = Some(RetAdvStats {
@@ -195,6 +208,8 @@ impl Metrics {
             ret_min,
             ret_max,
             adv_std,
+            adv_min,
+            adv_max,
         });
     }
 
@@ -291,6 +306,24 @@ impl Metrics {
             .iter()
             .map(|(k, v)| (k.clone(), v.mean()))
             .collect()
+    }
+
+    /// Per-function (current_epoch_mean, persistent_ema), sorted by current descending.
+    pub(crate) fn func_speedups_current_and_avg(&self) -> Vec<(String, f32, f32)> {
+        let mut v: Vec<(String, f32, f32)> = self
+            .func_speedup_avgs
+            .iter()
+            .map(|(name, avg)| {
+                let ema = self
+                    .func_speedup_ema
+                    .get(name)
+                    .map(|e| e.get())
+                    .unwrap_or(0.0);
+                (name.clone(), avg.mean(), ema)
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
     }
     pub(crate) fn avg_func_ir_ms(&self) -> f32 {
         if self.per_func_ir_ms_count == 0 {

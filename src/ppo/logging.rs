@@ -222,7 +222,7 @@ impl Logger {
 
             if let Some(ra) = &metrics.ret_adv {
                 self.epoch_bar.println(format!(
-                    "         {}  {}{}  {}[{}, {}]  {}{}",
+                    "         {}  {}{}  {}[{}, {}]  {}{}  {}[{}, {}]",
                     g3!("ret"),
                     g3!("mean="),
                     format!("{:+.3}", ra.ret_mean).cyan(),
@@ -231,6 +231,34 @@ impl Logger {
                     format!("{:+.3}", ra.ret_max).cyan(),
                     g3!("adv_std="),
                     format!("{:.3}", ra.adv_std).cyan(),
+                    g3!("adv_range="),
+                    format!("{:+.3}", ra.adv_min).cyan(),
+                    format!("{:+.3}", ra.adv_max).cyan(),
+                ));
+            }
+
+            let func_entries = metrics.func_speedups_current_and_avg();
+            if !func_entries.is_empty() {
+                let parts: Vec<String> = func_entries
+                    .iter()
+                    .map(|(name, cur, avg)| {
+                        let cur_s = if *cur >= 0.0 {
+                            format!("{:+.2}%", cur).green().to_string()
+                        } else {
+                            format!("{:+.2}%", cur).red().to_string()
+                        };
+                        let avg_s = if *avg >= 0.0 {
+                            format!("{:+.2}%", avg).truecolor(100, 200, 100).to_string()
+                        } else {
+                            format!("{:+.2}%", avg).truecolor(200, 100, 100).to_string()
+                        };
+                        format!("{}: {}|{}", g3!(name.as_str()), cur_s, avg_s)
+                    })
+                    .collect();
+                self.epoch_bar.println(format!(
+                    "         {}  [{}]",
+                    g3!("funcs"),
+                    parts.join("  ")
                 ));
             }
         }
