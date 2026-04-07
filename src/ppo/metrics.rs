@@ -322,7 +322,7 @@ impl Metrics {
                 (name.clone(), avg.mean(), ema)
             })
             .collect();
-        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v.sort_by(|a, b| a.0.cmp(&b.0));
         v
     }
     pub(crate) fn avg_func_ir_ms(&self) -> f32 {
