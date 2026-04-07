@@ -78,20 +78,21 @@ impl<B: Backend> MlpHead<B> {
     }
 }
 
-/// Model input: base IR features tiled K times — one row per slot, N episodes in batch.
-/// Slot positions are derived from the sequence dimension inside the forward.
+/// Model input: base IR features for N episodes.
 pub(crate) struct Input<B: Backend> {
-    /// [N, K, input_dim] — same IR features for every slot; N=1 during collection.
-    pub(crate) ir_features: Tensor<B, 3>,
+    /// [N, input_dim] — one feature vector per episode; N=1 during collection.
+    pub(crate) ir_features: Tensor<B, 2>,
 }
 
 impl Input<BurnBackend> {
-    /// Build single-episode input (N=1) for K slots.
-    pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32], k: usize) -> Self {
+    /// Build single-episode input (N=1).
+    pub(crate) fn new_slots(dev: &BurnDevice, ir_features: &[f32], _k: usize) -> Self {
         let dim = ir_features.len();
-        let feat_data: Vec<f32> = ir_features.iter().copied().cycle().take(k * dim).collect();
         Self {
-            ir_features: Tensor::from_data(TensorData::new(feat_data, [1, k, dim]), dev),
+            ir_features: Tensor::from_data(
+                TensorData::new(ir_features.to_vec(), [1, dim]),
+                dev,
+            ),
         }
     }
 }

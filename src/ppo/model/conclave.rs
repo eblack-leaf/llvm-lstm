@@ -80,19 +80,15 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
         }
     }
 
-    fn forward(&self, _cfg: &Cfg, input: Input<B>) -> Output<B> {
+    fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
         let n = input.ir_features.dims()[0]; // batch (episodes)
-        let k = input.ir_features.dims()[1]; // slots per episode
-        let nf = input.ir_features.dims()[2]; // IR feature dim
+        let k = cfg.max_seq_len;             // slots per episode
         let device = input.ir_features.device();
         let np = 29usize; // number of passes (fixed)
         let seq = np + k; // joint sequence length
 
-        // IR embedding: project first slot's features (identical across slots).
-        // [N, nf] → ir_proj → [N, d_model]
-        let ir_emb = self
-            .ir_proj
-            .forward(input.ir_features.narrow(1, 0, 1).reshape([n, nf])); // [N, d_model]
+        // IR embedding: project IR features directly — [N, nf] → [N, d_model]
+        let ir_emb = self.ir_proj.forward(input.ir_features); // [N, d_model]
 
         // Pass nodes: learned pass identity + IR conditioning, broadcast over batch.
         // [1, np] → embed → [1, np, d_model] + ir_emb [N, 1, d_model] → [N, np, d_model]

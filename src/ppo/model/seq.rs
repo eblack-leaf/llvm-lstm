@@ -76,17 +76,14 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
         }
     }
 
-    fn forward(&self, _cfg: &Cfg, input: Input<B>) -> Output<B> {
+    fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B> {
         let n = input.ir_features.dims()[0]; // batch (episodes)
-        let k = input.ir_features.dims()[1]; // slots per episode
-        let nf = input.ir_features.dims()[2]; // IR feature dim
+        let k = cfg.max_seq_len;             // slots per episode
         let device = input.ir_features.device();
         let seq = k + 1; // IR token + K slot tokens
 
-        // IR token: project first slot's features (all slots identical per episode).
-        // [N, 1, nf] → [N, nf] → ir_proj → [N, d_model] → [N, 1, d_model]
-        let ir_feat = input.ir_features.narrow(1, 0, 1).reshape([n, nf]);
-        let ir_emb = self.ir_proj.forward(ir_feat).unsqueeze_dim(1); // [N, 1, d_model]
+        // IR token: project IR features directly — [N, nf] → [N, d_model] → [N, 1, d_model]
+        let ir_emb = self.ir_proj.forward(input.ir_features).unsqueeze_dim(1);
 
         // Slot tokens: embed positions 0..K, broadcast over batch.
         // [1, K] → embed → [1, K, d_model] → repeat N times → [N, K, d_model]

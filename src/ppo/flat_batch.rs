@@ -8,8 +8,8 @@ pub(crate) struct FlatBatch<B: Backend> {
     /// Total number of valid steps across all episodes in this mini‑batch.
     pub total_steps: usize,
 
-    /// IR features padded to max_k, shape [n_episodes, max_k, n_features]
-    pub ir_features: Tensor<B, 3>,
+    /// IR features, shape [n_episodes, n_features]
+    pub ir_features: Tensor<B, 2>,
 
     /// For each valid step, its episode index and position in padded sequence.
     /// Used to gather logits/values from padded output.
@@ -36,15 +36,13 @@ impl<B: Backend> FlatBatch<B> {
         let max_k = episodes.iter().map(|e| e.steps.len()).max().unwrap_or(1);
         let n_features = episodes[0].ir_features.len();
 
-        // Build padded IR features: [n_episodes, max_k, n_features]
-        let mut feat_data: Vec<f32> = Vec::with_capacity(n_episodes * max_k * n_features);
+        // Build IR features: [n_episodes, n_features] — one vector per episode.
+        let mut feat_data: Vec<f32> = Vec::with_capacity(n_episodes * n_features);
         for ep in episodes {
-            for _ in 0..max_k {
-                feat_data.extend(&ep.ir_features);
-            }
+            feat_data.extend(&ep.ir_features);
         }
-        let ir_features = Tensor::<B, 3>::from_data(
-            TensorData::new(feat_data, [n_episodes, max_k, n_features]),
+        let ir_features = Tensor::<B, 2>::from_data(
+            TensorData::new(feat_data, [n_episodes, n_features]),
             device,
         );
 

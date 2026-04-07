@@ -123,8 +123,8 @@ impl Ppo {
 
         // Build flat batch once
         let flat_batch = FlatBatch::from_episodes(&batch.episodes, device);
-        let max_k = flat_batch.ir_features.dims()[1];
-        let n_features = flat_batch.ir_features.dims()[2];
+        let max_k = cfg.max_seq_len;
+        let n_features = flat_batch.ir_features.dims()[1];
 
         // Local helper closures for gathering steps.
         // ep_offset converts global episode indices stored in `gather` to indices
@@ -190,10 +190,9 @@ impl Ppo {
                 let step_end = episode_boundaries[end_ep - 1].1;
                 let chunk_num_steps = step_end - step_start;
 
-                // Slice IR features
+                // Slice IR features: [chunk_size, n_features]
                 let chunk_ir = flat_batch.ir_features.clone().slice([
                     start_ep..end_ep,
-                    0..max_k,
                     0..n_features,
                 ]);
 
