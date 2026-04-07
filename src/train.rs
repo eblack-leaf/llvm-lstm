@@ -159,7 +159,7 @@ impl Trainer {
                     std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
                     // Single forward pass over all K slots simultaneously.
-                    let input = Input::new_slots(&dev, ir_features, k);
+                    let input = Input::new_slots(&dev, ir_features);
                     let output = actor.forward(&self.cfg, input);
 
                     let all_values = output.value_vec();
