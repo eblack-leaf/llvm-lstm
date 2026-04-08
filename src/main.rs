@@ -566,7 +566,7 @@ fn main() {
             work_dir,
             ir_chunks,
         } => {
-            use crate::llvm::ir::{IR_VOCAB_SIZE, chunked_opcode_histogram};
+            use crate::llvm::ir::{IR_CATEGORY_COUNT, IR_CATEGORY_NAMES, chunked_opcode_histogram};
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, &opt, work_dir.clone());
             let mut functions = Functions::new(&directory);
@@ -581,13 +581,15 @@ fn main() {
                 // Print per-chunk top opcode for a quick sanity check.
                 println!("  {}  raw_opcodes={}", func.name, opcodes.len());
                 for c in 0..ir_chunks {
-                    let base = c * IR_VOCAB_SIZE;
-                    let chunk = &hist[base..base + IR_VOCAB_SIZE];
-                    let top = chunk.iter().enumerate()
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                        .map(|(i, v)| (i, v))
-                        .unwrap_or((0, &0.0));
-                    println!("    chunk[{}]  top_bin={}  frac={:.3}", c, top.0, top.1);
+                    let base = c * IR_CATEGORY_COUNT;
+                    let chunk = &hist[base..base + IR_CATEGORY_COUNT];
+                    print!("    chunk[{}] ", c);
+                    for (cat, &v) in chunk.iter().enumerate() {
+                        if v > 0.01 {
+                            print!("  {}={:.2}", IR_CATEGORY_NAMES[cat], v);
+                        }
+                    }
+                    println!();
                 }
                 records.push(serde_json::json!({
                     "name": func.name,

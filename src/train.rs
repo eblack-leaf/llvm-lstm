@@ -86,7 +86,10 @@ impl Trainer {
                     .expect("collect_baselines"),
             );
 
-            func.ir_features = Some(chunked_opcode_histogram(&func.ir.opcode_sequence(), self.cfg.ir_chunks));
+            func.ir_features = Some(chunked_opcode_histogram(
+                &func.ir.opcode_sequence(),
+                self.cfg.ir_chunks,
+            ));
 
             metrics.record_func_ir_ms(t0.elapsed().as_millis() as u64);
             logger.log_baseline_progress(&func.name, t0.elapsed().as_millis() as u64);
@@ -138,7 +141,10 @@ impl Trainer {
                 .zip(actors)
                 .map(|((ep, func), actor)| {
                     let baselines = func.baselines.as_ref().expect("baselines not collected");
-                    let ir_features = func.ir_features.as_ref().expect("ir_features not collected");
+                    let ir_features = func
+                        .ir_features
+                        .as_ref()
+                        .expect("ir_features not collected");
                     let dev = self.device.clone();
                     let cache = bench_cache.clone();
                     let func_name = func.name.clone();

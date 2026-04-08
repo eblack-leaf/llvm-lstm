@@ -1,5 +1,5 @@
 use crate::config::Cfg;
-use crate::llvm::ir::IR_VOCAB_SIZE;
+use crate::llvm::ir::IR_CATEGORY_COUNT;
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
@@ -57,7 +57,7 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
     type Config = ConclaveActorConfig;
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
-        let ir_feature_dim = cfg.ir_chunks * IR_VOCAB_SIZE;
+        let ir_feature_dim = cfg.ir_chunks * IR_CATEGORY_COUNT;
         Self {
             ir_proj: LinearConfig::new(ir_feature_dim, cfg.d_model).init(device),
             pass_embed: EmbeddingConfig::new(cfg.num_passes, cfg.d_model).init(device),
@@ -120,10 +120,10 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
         let d_model = out.dims()[2];
         let slot_out = out.narrow(1, np, k).reshape([n * k, d_model]);
         let policy_flat = self.policy_head.forward(slot_out.clone()); // [N*K, num_passes]
-        let value_flat = self.value_head.forward(slot_out);           // [N*K, 1]
+        let value_flat = self.value_head.forward(slot_out); // [N*K, 1]
         let num_actions = policy_flat.dims()[1];
         let policy = policy_flat.reshape([n, k, num_actions]).unsqueeze_dim(2); // [N, K, 1, num_passes]
-        let value = value_flat.reshape([n, k, 1]);                               // [N, K, 1]
+        let value = value_flat.reshape([n, k, 1]); // [N, K, 1]
 
         Output { policy, value }
     }

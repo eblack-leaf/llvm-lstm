@@ -1,4 +1,4 @@
-use crate::llvm::ir::IR_VOCAB_SIZE;
+use crate::llvm::ir::IR_CATEGORY_COUNT;
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::transformer::{
@@ -37,7 +37,7 @@ pub struct SpeedupPredictorConfig {
 
 impl SpeedupPredictorConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> SpeedupPredictor<B> {
-        let ir_feature_dim = self.ir_chunks * IR_VOCAB_SIZE;
+        let ir_feature_dim = self.ir_chunks * IR_CATEGORY_COUNT;
         let max_positions = self.max_seq_len + 1;
         SpeedupPredictor {
             ir_proj: LinearConfig::new(ir_feature_dim, self.d_model).init(device),
@@ -62,10 +62,10 @@ impl SpeedupPredictorConfig {
 impl<B: Backend> SpeedupPredictor<B> {
     pub fn forward(
         &self,
-        ir_features: Tensor<B, 2>,        // [batch, ir_chunks * IR_VOCAB_SIZE]
-        passes: Tensor<B, 2, Int>,        // [batch, seq_len]
-        mask: Tensor<B, 2, Bool>,         // [batch, seq_len] true = valid
-        step_deltas: Tensor<B, 2>,        // [batch, seq_len]
+        ir_features: Tensor<B, 2>, // [batch, ir_chunks * IR_VOCAB_SIZE]
+        passes: Tensor<B, 2, Int>, // [batch, seq_len]
+        mask: Tensor<B, 2, Bool>,  // [batch, seq_len] true = valid
+        step_deltas: Tensor<B, 2>, // [batch, seq_len]
     ) -> Tensor<B, 2> {
         let batch_size = passes.dims()[0];
         let seq_len = passes.dims()[1];

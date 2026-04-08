@@ -150,25 +150,64 @@ impl Ir {
     }
 }
 
+/// Semantic opcode categories — 12 groups that cover all LLVM opcodes.
+/// Index matches the category order used in `chunked_opcode_histogram`.
+pub(crate) const IR_CATEGORY_NAMES: [&str; 12] = [
+    "memory",      // load, store, alloca, getelementptr
+    "int_arith",   // add, sub, mul, div, rem, shift
+    "float_arith", // fadd, fsub, fmul, fdiv, frem
+    "bitwise",     // and, or, xor
+    "compare",     // icmp, fcmp
+    "cast",        // trunc, zext, sext, fpext, bitcast, …
+    "call",        // call, invoke, callbr
+    "control",     // br, switch, ret, unreachable, indirectbr, resume
+    "phi_select",  // phi, select
+    "vector",      // extractelement, insertelement, shufflevector, extractvalue, insertvalue
+    "block",       // BB_SEP (basic-block boundary marker)
+    "other",       // atomic, freeze, va_arg, exception pads, unknown
+];
+pub(crate) const IR_CATEGORY_COUNT: usize = IR_CATEGORY_NAMES.len(); // 12
+
+/// Map a raw opcode ID (as produced by `opcode_to_id`) to a category index.
+pub(crate) fn opcode_id_to_category(id: u8) -> usize {
+    match id {
+        1 => 10,                                         // block  (BB_SEP)
+        2 | 4 | 6 | 8 | 9 | 11 | 12 | 17 | 18 | 19 => 1, // int_arith
+        3 | 5 | 7 | 10 | 13 => 2,                        // float_arith
+        14 | 15 | 16 => 3,                               // bitwise
+        20 | 21 | 22 | 23 => 0,                          // memory
+        24 | 25 | 26 => 11,                              // atomic → other
+        27..=39 => 5,                                    // cast
+        40 | 41 | 42 | 43 | 45 | 46 => 7,                // control
+        44 | 47 | 50 => 6,                               // call
+        48 | 49 => 8,                                    // phi_select
+        51..=55 => 11,                                   // exception pads → other
+        56 | 57 => 4,                                    // compare
+        58..=62 => 9,                                    // vector/aggregate
+        _ => 11,                                         // unknown / pad
+    }
+}
+
 /// Split `opcodes` into `k` equal positional chunks and return a normalised
-/// frequency histogram per chunk, concatenated into a `k * IR_VOCAB_SIZE` float vector.
-/// Each chunk's histogram sums to 1.0 (or 0.0 if the chunk is empty).
-/// The result captures both *what* opcodes appear and *where* in the function.
+/// frequency histogram per chunk, binned into `IR_CATEGORY_COUNT` semantic groups.
+/// Concatenated output is `k * IR_CATEGORY_COUNT` floats; each chunk sums to 1.0.
+/// Values are in the 0.05–0.6 range for typical IR — no more sparse 0.002 bins.
 pub(crate) fn chunked_opcode_histogram(opcodes: &[u8], k: usize) -> Vec<f32> {
-    let mut hist = vec![0.0f32; k * IR_VOCAB_SIZE];
+    let mut hist = vec![0.0f32; k * IR_CATEGORY_COUNT];
     let n = opcodes.len();
     if n == 0 || k == 0 {
         return hist;
     }
     for (i, &op) in opcodes.iter().enumerate() {
         let chunk = (i * k / n).min(k - 1);
-        hist[chunk * IR_VOCAB_SIZE + op as usize] += 1.0;
+        let cat = opcode_id_to_category(op);
+        hist[chunk * IR_CATEGORY_COUNT + cat] += 1.0;
     }
     for c in 0..k {
-        let base = c * IR_VOCAB_SIZE;
-        let total: f32 = hist[base..base + IR_VOCAB_SIZE].iter().sum();
+        let base = c * IR_CATEGORY_COUNT;
+        let total: f32 = hist[base..base + IR_CATEGORY_COUNT].iter().sum();
         if total > 0.0 {
-            for v in &mut hist[base..base + IR_VOCAB_SIZE] {
+            for v in &mut hist[base..base + IR_CATEGORY_COUNT] {
                 *v /= total;
             }
         }
