@@ -123,12 +123,12 @@ impl Returns for PredictorReturn {
             let delta = pred - prev;
             let instr_before = results.instr_counts.get(t).copied().unwrap_or(1);
             let instr_after = results.instr_counts.get(t + 1).copied().unwrap_or(0);
-            let r = if step_delta(instr_before, instr_after).abs() < self.noop_threshold {
-                0.0
-            } else {
-                delta
-            };
-            returns.push(r * self.scale);
+            // let r = if step_delta(instr_before, instr_after).abs() < self.noop_threshold {
+            //     0.0
+            // } else {
+            //     delta
+            // };
+            returns.push(delta * self.scale);
             prev = pred;
         }
         returns

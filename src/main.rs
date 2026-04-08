@@ -58,13 +58,13 @@ enum Command {
         baseline_iters: usize,
         #[arg(long, default_value = "30")]
         max_seq_len: usize,
-        #[arg(long, default_value = "3e-4")]
+        #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
         #[arg(long, default_value = "0.1")]
         clip_epsilon: f32,
         #[arg(long, default_value = "0.5")]
         value_coef: f32,
-        #[arg(long, default_value = "0.02")]
+        #[arg(long, default_value = "0.01")]
         entropy_coef: f32,
         /// Number of episodes per PPO mini-batch.
         #[arg(long, default_value = "64")]
@@ -83,7 +83,7 @@ enum Command {
         /// Return signal: episode (uniform terminal), proxy (blended instr+terminal),
         /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0),
         /// predictor (per-step marginal from pretrained SpeedupPredictor).
-        #[arg(long, default_value = "weighted")]
+        #[arg(long, default_value = "predictor")]
         returns: String,
         /// Path to predictor checkpoint directory. Required when --returns=predictor.
         #[arg(long)]
@@ -197,7 +197,7 @@ enum Command {
         opt: String,
         #[arg(long, default_value = "work/predictor_ir")]
         work_dir: PathBuf,
-        #[arg(long, default_value = "300")]
+        #[arg(long, default_value = "50")]
         epochs: usize,
         #[arg(long, default_value = "2048")]
         batch_size: usize,
@@ -222,7 +222,7 @@ enum Command {
         dropout: f64,
         #[arg(long, default_value = "-3.0")]
         clip_min: f32,
-        #[arg(long, default_value = "1.0")]
+        #[arg(long, default_value = "2.0")]
         huber_delta: f32,
         #[arg(long)]
         max_samples: Option<usize>,
