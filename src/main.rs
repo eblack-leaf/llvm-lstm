@@ -199,7 +199,7 @@ enum Command {
         work_dir: PathBuf,
         #[arg(long, default_value = "300")]
         epochs: usize,
-        #[arg(long, default_value = "4096")]
+        #[arg(long, default_value = "2048")]
         batch_size: usize,
         #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
@@ -210,7 +210,7 @@ enum Command {
         /// Number of positional chunks for the IR histogram (match the value used during Train).
         #[arg(long, default_value = "4")]
         ir_chunks: usize,
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "256")]
         d_model: usize,
         #[arg(long, default_value = "8")]
         n_heads: usize,
@@ -218,7 +218,7 @@ enum Command {
         n_layers: usize,
         #[arg(long, default_value = "512")]
         d_ff: usize,
-        #[arg(long, default_value = "0.1")]
+        #[arg(long, default_value = "0.3")]
         dropout: f64,
         #[arg(long, default_value = "-3.0")]
         clip_min: f32,
