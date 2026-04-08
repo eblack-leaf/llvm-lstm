@@ -1,6 +1,6 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
 use crate::llvm::functions::Functions;
-use crate::llvm::ir::step_delta;
+use crate::llvm::ir::{chunked_opcode_histogram, step_delta};
 use crate::llvm::pass::Pass;
 use crate::llvm::top_sequences::TopSequences;
 use crate::llvm::{BenchCache, Llvm, load_cache, save_cache};
@@ -86,7 +86,7 @@ impl Trainer {
                     .expect("collect_baselines"),
             );
 
-            func.ir_opcodes = Some(func.ir.opcode_sequence());
+            func.ir_features = Some(chunked_opcode_histogram(&func.ir.opcode_sequence(), self.cfg.ir_chunks));
 
             metrics.record_func_ir_ms(t0.elapsed().as_millis() as u64);
             logger.log_baseline_progress(&func.name, t0.elapsed().as_millis() as u64);
@@ -138,7 +138,7 @@ impl Trainer {
                 .zip(actors)
                 .map(|((ep, func), actor)| {
                     let baselines = func.baselines.as_ref().expect("baselines not collected");
-                    let ir_opcodes = func.ir_opcodes.as_ref().expect("ir_opcodes not collected");
+                    let ir_features = func.ir_features.as_ref().expect("ir_features not collected");
                     let dev = self.device.clone();
                     let cache = bench_cache.clone();
                     let func_name = func.name.clone();
@@ -150,7 +150,7 @@ impl Trainer {
                     std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
                     // Single forward pass over all K slots simultaneously.
-                    let input = Input::new_slots(&dev, ir_opcodes, self.cfg.max_ir_len);
+                    let input = Input::new_slots(&dev, ir_features);
                     let output = actor.forward(&self.cfg, input);
 
                     let all_values = output.value_vec();
@@ -173,12 +173,8 @@ impl Trainer {
                     let mut bench_cache_hits = 0u64;
                     let mut bench_cache_misses = 0u64;
 
-                    // Read base IR once: get instruction count and float features for predictor.
-                    let base_feats = func.ir.features();
-                    let base_instr = base_feats.total_instruction_count as usize;
-                    let ir_features_for_predictor = base_feats.to_vec();
                     let mut instr_counts = Vec::with_capacity(ep_len + 1);
-                    instr_counts.push(base_instr);
+                    instr_counts.push(func.ir.instruction_count());
 
                     for (step, &action) in actions.iter().enumerate() {
                         if action != Pass::Stop {
@@ -222,8 +218,7 @@ impl Trainer {
                         func_name,
                         bench_cache_hits,
                         bench_cache_misses,
-                        ir_features: ir_features_for_predictor,
-                        ir_opcodes: ir_opcodes.clone(),
+                        ir_features: ir_features.clone(),
                         actions,
                         log_probs,
                         ep_len,

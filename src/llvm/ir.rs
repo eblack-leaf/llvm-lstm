@@ -150,6 +150,32 @@ impl Ir {
     }
 }
 
+/// Split `opcodes` into `k` equal positional chunks and return a normalised
+/// frequency histogram per chunk, concatenated into a `k * IR_VOCAB_SIZE` float vector.
+/// Each chunk's histogram sums to 1.0 (or 0.0 if the chunk is empty).
+/// The result captures both *what* opcodes appear and *where* in the function.
+pub(crate) fn chunked_opcode_histogram(opcodes: &[u8], k: usize) -> Vec<f32> {
+    let mut hist = vec![0.0f32; k * IR_VOCAB_SIZE];
+    let n = opcodes.len();
+    if n == 0 || k == 0 {
+        return hist;
+    }
+    for (i, &op) in opcodes.iter().enumerate() {
+        let chunk = (i * k / n).min(k - 1);
+        hist[chunk * IR_VOCAB_SIZE + op as usize] += 1.0;
+    }
+    for c in 0..k {
+        let base = c * IR_VOCAB_SIZE;
+        let total: f32 = hist[base..base + IR_VOCAB_SIZE].iter().sum();
+        if total > 0.0 {
+            for v in &mut hist[base..base + IR_VOCAB_SIZE] {
+                *v /= total;
+            }
+        }
+    }
+    hist
+}
+
 /// tanh-normalised instruction-count reduction between two consecutive IR steps.
 /// Returns tanh((before − after) / before), bounded in (−1, 1).
 /// Positive = instructions removed, ~0 = no-op, negative = bloat.

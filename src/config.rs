@@ -48,11 +48,8 @@ pub(crate) struct Cfg {
     /// Steps with |instr_delta%| < this threshold count as no-ops in metrics (0.0–1.0).
     pub(crate) noop_threshold: f32,
     pub(crate) delta_threshold: f32,
-    /// Maximum number of IR opcode tokens fed to the IR encoder (shorter sequences are padded).
-    /// Must be divisible by ir_conv_stride.
-    pub(crate) max_ir_len: usize,
-    /// Stride of the Conv1D that compresses the opcode sequence before the transformer.
-    /// The transformer sees max_ir_len / ir_conv_stride tokens.
-    /// Kernel size equals stride (non-overlapping windows — learned local pooling).
-    pub(crate) ir_conv_stride: usize,
+    /// Number of positional chunks used for the IR feature vector.
+    /// Each chunk holds a normalised opcode-frequency histogram (IR_VOCAB_SIZE = 64 bins).
+    /// Total IR feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
+    pub(crate) ir_chunks: usize,
 }

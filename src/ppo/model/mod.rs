@@ -3,11 +3,10 @@ pub(crate) mod seq;
 
 use crate::config::Cfg;
 use crate::config::{BurnBackend, BurnDevice};
-use crate::llvm::ir::PAD_OPCODE;
 use crate::llvm::pass::Pass;
 use burn::Tensor;
 use burn::nn::{Linear, LinearConfig};
-use burn::prelude::{Backend, Bool, Int, Module};
+use burn::prelude::{Backend, Module};
 use burn::tensor::TensorData;
 use burn::tensor::activation::{log_softmax, softmax};
 
@@ -80,27 +79,18 @@ impl<B: Backend> MlpHead<B> {
     }
 }
 
-/// Model input: padded IR opcode-ID sequence for N episodes.
+/// Model input: chunked IR opcode histogram for N episodes.
 pub(crate) struct Input<B: Backend> {
-    /// [N, max_ir_len] — opcode IDs, padded with PAD_OPCODE.
-    pub(crate) ir_opcodes: Tensor<B, 2, Int>,
-    /// [N, max_ir_len] — true = PAD position (excluded from attention and mean-pool).
-    pub(crate) ir_padding_mask: Tensor<B, 2, Bool>,
+    /// [N, ir_chunks * IR_VOCAB_SIZE] — pre-computed chunked opcode histogram.
+    pub(crate) ir_features: Tensor<B, 2>,
 }
 
 impl Input<BurnBackend> {
-    /// Build single-episode input (N=1) from a raw unpadded opcode sequence.
-    pub(crate) fn new_slots(dev: &BurnDevice, opcodes: &[u8], max_ir_len: usize) -> Self {
-        let raw_len = opcodes.len().min(max_ir_len);
-        let mut ids: Vec<i64> = vec![PAD_OPCODE as i64; max_ir_len];
-        let mut mask: Vec<bool> = vec![true; max_ir_len];
-        for (i, &op) in opcodes[..raw_len].iter().enumerate() {
-            ids[i] = op as i64;
-            mask[i] = false;
-        }
+    /// Build single-episode input (N=1) from a pre-computed feature vector.
+    pub(crate) fn new_slots(dev: &BurnDevice, features: &[f32]) -> Self {
+        let dim = features.len();
         Self {
-            ir_opcodes: Tensor::from_data(TensorData::new(ids, [1, max_ir_len]), dev),
-            ir_padding_mask: Tensor::from_data(TensorData::new(mask, [1, max_ir_len]), dev),
+            ir_features: Tensor::from_data(TensorData::new(features.to_vec(), [1, dim]), dev),
         }
     }
 }

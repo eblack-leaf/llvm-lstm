@@ -1,4 +1,3 @@
-use crate::llvm::ir::PAD_OPCODE;
 use crate::ppo::episode::Results;
 use crate::ppo::model::ACTIONS;
 use burn::prelude::*;
@@ -8,12 +7,8 @@ pub(crate) struct FlatBatch<B: Backend> {
     /// Total number of valid steps across all episodes in this mini-batch.
     pub total_steps: usize,
 
-    /// Padded opcode-ID sequences, shape [n_episodes, max_ir_len].
-    pub ir_opcodes: Tensor<B, 2, Int>,
-
-    /// Padding mask for the IR encoder, shape [n_episodes, max_ir_len].
-    /// `true` = PAD position (excluded from attention and mean-pool).
-    pub ir_padding_mask: Tensor<B, 2, Bool>,
+    /// Chunked IR histogram, shape [n_episodes, ir_feature_dim].
+    pub ir_features: Tensor<B, 2>,
 
     /// For each valid step, its episode index and position in the episode.
     /// Shape [total_steps, 2] where col 0 = ep_idx (global), col 1 = step_idx.
@@ -33,37 +28,22 @@ pub(crate) struct FlatBatch<B: Backend> {
 }
 
 impl<B: Backend> FlatBatch<B> {
-    /// Build a `FlatBatch` directly from episode results, per-step returns, and advantages.
     pub fn from_results(
         results: &[Results],
         returns: &[Vec<f32>],
         advantages: &[Vec<f32>],
-        max_ir_len: usize,
         device: &B::Device,
     ) -> Self {
         let n_episodes = results.len();
+        let ir_feature_dim = results.first().map(|r| r.ir_features.len()).unwrap_or(0);
 
-        // Opcode sequences: pad each episode's raw sequence to max_ir_len.
-        let mut opcode_data: Vec<i64> = Vec::with_capacity(n_episodes * max_ir_len);
-        let mut mask_data: Vec<bool> = Vec::with_capacity(n_episodes * max_ir_len);
+        // Stack IR feature vectors: one row per episode.
+        let mut feat_data: Vec<f32> = Vec::with_capacity(n_episodes * ir_feature_dim);
         for r in results {
-            let raw_len = r.ir_opcodes.len().min(max_ir_len);
-            for i in 0..max_ir_len {
-                if i < raw_len {
-                    opcode_data.push(r.ir_opcodes[i] as i64);
-                    mask_data.push(false);
-                } else {
-                    opcode_data.push(PAD_OPCODE as i64);
-                    mask_data.push(true);
-                }
-            }
+            feat_data.extend_from_slice(&r.ir_features);
         }
-        let ir_opcodes = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(opcode_data, [n_episodes, max_ir_len]),
-            device,
-        );
-        let ir_padding_mask = Tensor::<B, 2, Bool>::from_data(
-            TensorData::new(mask_data, [n_episodes, max_ir_len]),
+        let ir_features = Tensor::<B, 2>::from_data(
+            TensorData::new(feat_data, [n_episodes, ir_feature_dim]),
             device,
         );
 
@@ -118,8 +98,7 @@ impl<B: Backend> FlatBatch<B> {
 
         FlatBatch {
             total_steps,
-            ir_opcodes,
-            ir_padding_mask,
+            ir_features,
             gather_indices,
             taken_idx,
             old_log_probs,

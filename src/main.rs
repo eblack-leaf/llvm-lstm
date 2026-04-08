@@ -99,16 +99,10 @@ enum Command {
         noop_threshold: f32,
         #[arg(long, default_value = "0.01")]
         delta_threshold: f32,
-        /// Maximum IR opcode tokens fed to the IR encoder. Sequences shorter than this are
-        /// padded; longer sequences are truncated. Adjust based on your functions' IR lengths
-        /// (run export-features to inspect before setting).
-        #[arg(long, default_value = "1024")]
-        max_ir_len: usize,
-        /// Conv1D stride applied to the embedded opcode sequence before the IR encoder.
-        /// The transformer sees max_ir_len / ir_conv_stride tokens. Must divide max_ir_len.
-        /// Stride 4 with max_ir_len 1024 gives 256 tokens (16x cheaper attention).
+        /// Number of positional chunks for the IR opcode histogram.
+        /// Feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
         #[arg(long, default_value = "4")]
-        ir_conv_stride: usize,
+        ir_chunks: usize,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -202,32 +196,17 @@ enum Command {
         work_dir: PathBuf,
         #[arg(long, default_value = "300")]
         epochs: usize,
-        #[arg(long, default_value = "512")]
+        #[arg(long, default_value = "2048")]
         batch_size: usize,
         #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
         #[arg(long, default_value = "0.2")]
         val_split: f32,
-        #[arg(long, default_value = "40")]
+        #[arg(long, default_value = "30")]
         max_seq_len: usize,
-        /// Max IR opcode tokens for the IR encoder (match the value used during collect).
-        #[arg(long, default_value = "1024")]
-        max_ir_len: usize,
-        /// Conv1D stride — same as used during Train so the IR encoding is comparable.
+        /// Number of positional chunks for the IR histogram (match the value used during Train).
         #[arg(long, default_value = "4")]
-        ir_conv_stride: usize,
-        /// IR encoder hidden dim.
-        #[arg(long, default_value = "64")]
-        d_ir: usize,
-        /// IR encoder attention heads (d_ir must be divisible by this).
-        #[arg(long, default_value = "4")]
-        ir_n_heads: usize,
-        /// IR encoder transformer layers.
-        #[arg(long, default_value = "2")]
-        ir_n_layers: usize,
-        /// IR encoder feed-forward dim.
-        #[arg(long, default_value = "128")]
-        ir_d_ff: usize,
+        ir_chunks: usize,
         #[arg(long, default_value = "128")]
         d_model: usize,
         #[arg(long, default_value = "8")]
@@ -296,8 +275,7 @@ fn main() {
             predictor_checkpoint,
             predictor_noop_threshold,
             predictor_scale,
-            max_ir_len,
-            ir_conv_stride,
+            ir_chunks,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -321,8 +299,7 @@ fn main() {
                 cache_file,
                 noop_threshold,
                 delta_threshold,
-                max_ir_len,
-                ir_conv_stride,
+                ir_chunks,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
@@ -619,12 +596,7 @@ fn main() {
             learning_rate,
             val_split,
             max_seq_len,
-            max_ir_len,
-            ir_conv_stride,
-            d_ir,
-            ir_n_heads,
-            ir_n_layers,
-            ir_d_ff,
+            ir_chunks,
             d_model,
             n_heads,
             n_layers,
@@ -636,13 +608,7 @@ fn main() {
         } => {
             let config = crate::predictor::model::SpeedupPredictorConfig {
                 num_passes: 29,
-                ir_vocab_size: crate::llvm::ir::IR_VOCAB_SIZE,
-                d_ir,
-                ir_n_layers,
-                ir_n_heads,
-                ir_d_ff,
-                max_ir_len,
-                ir_conv_stride,
+                ir_chunks,
                 output_dim: 1,
                 d_model,
                 n_heads,

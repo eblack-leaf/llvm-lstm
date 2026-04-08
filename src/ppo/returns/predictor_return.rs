@@ -1,5 +1,5 @@
 use crate::config::{BurnBackend, BurnDevice};
-use crate::llvm::ir::{PAD_OPCODE, step_delta};
+use crate::llvm::ir::{IR_VOCAB_SIZE, step_delta};
 use crate::llvm::pass::Pass;
 use crate::ppo::episode::Results;
 use crate::ppo::returns::Returns;
@@ -22,7 +22,7 @@ pub(crate) struct PredictorReturn {
     model: SpeedupPredictor<BurnBackend>,
     device: BurnDevice,
     max_seq_len: usize,
-    max_ir_len: usize,
+    ir_feature_dim: usize,
     noop_threshold: f32,
     scale: f32,
 }
@@ -45,12 +45,13 @@ impl PredictorReturn {
             .map_err(|e| anyhow::anyhow!("predictor load: {e:?}"))?;
 
         let model = config.init::<BurnBackend>(&device).load_record(record);
+        let ir_feature_dim = config.ir_chunks * IR_VOCAB_SIZE;
 
         Ok(Self {
             model,
             device,
             max_seq_len: config.max_seq_len,
-            max_ir_len: config.max_ir_len,
+            ir_feature_dim,
             noop_threshold,
             scale,
         })
@@ -64,22 +65,15 @@ impl Returns for PredictorReturn {
             return Vec::new();
         }
 
-        // Build batch of ep_len rows: one per prefix length.
-        // IR opcodes are the same for all rows — repeat the padded sequence.
-        let raw_ir_len = results.ir_opcodes.len().min(self.max_ir_len);
-        let mut ir_opcode_data: Vec<i64> = Vec::with_capacity(ep_len * self.max_ir_len);
-        let mut ir_mask_data: Vec<bool> = Vec::with_capacity(ep_len * self.max_ir_len);
+        // Repeat the IR feature vector once per prefix.
+        let mut ir_feat_data: Vec<f32> = Vec::with_capacity(ep_len * self.ir_feature_dim);
         for _ in 0..ep_len {
-            for i in 0..self.max_ir_len {
-                if i < raw_ir_len {
-                    ir_opcode_data.push(results.ir_opcodes[i] as i64);
-                    ir_mask_data.push(false);
-                } else {
-                    ir_opcode_data.push(PAD_OPCODE as i64);
-                    ir_mask_data.push(true);
-                }
-            }
+            ir_feat_data.extend_from_slice(&results.ir_features);
         }
+        let ir_features = Tensor::<BurnBackend, 2>::from_data(
+            TensorData::new(ir_feat_data, [ep_len, self.ir_feature_dim]),
+            &self.device,
+        );
 
         let mut pass_data: Vec<i64> = Vec::with_capacity(ep_len * self.max_seq_len);
         let mut delta_data: Vec<f32> = Vec::with_capacity(ep_len * self.max_seq_len);
@@ -102,14 +96,6 @@ impl Returns for PredictorReturn {
             }
         }
 
-        let ir_opcodes = Tensor::<BurnBackend, 2, Int>::from_data(
-            TensorData::new(ir_opcode_data, [ep_len, self.max_ir_len]),
-            &self.device,
-        );
-        let ir_mask = Tensor::<BurnBackend, 2, Bool>::from_data(
-            TensorData::new(ir_mask_data, [ep_len, self.max_ir_len]),
-            &self.device,
-        );
         let passes = Tensor::<BurnBackend, 2, Int>::from_data(
             TensorData::new(pass_data, [ep_len, self.max_seq_len]),
             &self.device,
@@ -125,7 +111,7 @@ impl Returns for PredictorReturn {
 
         let preds: Vec<f32> = self
             .model
-            .forward(ir_opcodes, ir_mask, passes, mask, deltas)
+            .forward(ir_features, passes, mask, deltas)
             .squeeze::<1>()
             .into_data()
             .to_vec::<f32>()

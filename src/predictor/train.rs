@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-/// A single sample for the predictor, with opcodes resolved at load time.
+/// A single sample for the predictor, with IR features resolved at load time.
 #[derive(Clone)]
 pub struct PredictorSample {
     pub func_name: String,
-    pub ir_opcodes: Vec<u8>,
+    pub ir_features: Vec<f32>,
     pub passes: Vec<crate::llvm::pass::Pass>,
     pub step_deltas: Vec<f32>,
     pub mask: Vec<bool>,
@@ -34,37 +34,24 @@ fn batch_to_tensors<B: Backend>(
     batch: &[PredictorSample],
     device: &B::Device,
     max_seq_len: usize,
-    max_ir_len: usize,
     clip_min: f32,
 ) -> (
-    Tensor<B, 2, burn::tensor::Int>,  // ir_opcodes [batch, max_ir_len]
-    Tensor<B, 2, burn::tensor::Bool>, // ir_padding_mask [batch, max_ir_len]
+    Tensor<B, 2>,                     // ir_features [batch, ir_feature_dim]
     Tensor<B, 2, burn::tensor::Int>,  // passes [batch, max_seq_len]
     Tensor<B, 2, burn::tensor::Bool>, // mask [batch, max_seq_len]
     Tensor<B, 2>,                     // deltas [batch, max_seq_len]
     Tensor<B, 1>,                     // targets [batch]
 ) {
-    use crate::llvm::ir::PAD_OPCODE;
     let batch_size = batch.len();
-    let mut opcode_data: Vec<i64> = Vec::with_capacity(batch_size * max_ir_len);
-    let mut ir_mask_data: Vec<bool> = Vec::with_capacity(batch_size * max_ir_len);
+    let ir_feature_dim = batch.first().map(|s| s.ir_features.len()).unwrap_or(0);
+    let mut feat_data: Vec<f32> = Vec::with_capacity(batch_size * ir_feature_dim);
     let mut pass_data: Vec<i64> = Vec::with_capacity(batch_size * max_seq_len);
     let mut delta_data: Vec<f32> = Vec::with_capacity(batch_size * max_seq_len);
     let mut mask_data: Vec<bool> = Vec::with_capacity(batch_size * max_seq_len);
     let mut target_data: Vec<f32> = Vec::with_capacity(batch_size);
 
     for sample in batch {
-        // Pad/truncate IR opcode sequence.
-        let raw_len = sample.ir_opcodes.len().min(max_ir_len);
-        for i in 0..max_ir_len {
-            if i < raw_len {
-                opcode_data.push(sample.ir_opcodes[i] as i64);
-                ir_mask_data.push(false);
-            } else {
-                opcode_data.push(PAD_OPCODE as i64);
-                ir_mask_data.push(true);
-            }
-        }
+        feat_data.extend_from_slice(&sample.ir_features);
 
         let mut padded_passes = sample.passes.clone();
         padded_passes.resize(max_seq_len, crate::llvm::pass::Pass::Start);
@@ -79,12 +66,8 @@ fn batch_to_tensors<B: Backend>(
         target_data.push(sample.speedup.max(clip_min));
     }
 
-    let ir_opcodes = Tensor::<B, 2, burn::tensor::Int>::from_data(
-        TensorData::new(opcode_data, [batch_size, max_ir_len]),
-        device,
-    );
-    let ir_mask = Tensor::<B, 2, burn::tensor::Bool>::from_data(
-        TensorData::new(ir_mask_data, [batch_size, max_ir_len]),
+    let ir_features = Tensor::<B, 2>::from_data(
+        TensorData::new(feat_data, [batch_size, ir_feature_dim]),
         device,
     );
     let passes = Tensor::from_data(
@@ -100,7 +83,7 @@ fn batch_to_tensors<B: Backend>(
         device,
     );
     let targets = Tensor::from_data(TensorData::new(target_data, [batch_size]), device);
-    (ir_opcodes, ir_mask, passes, mask, deltas, targets)
+    (ir_features, passes, mask, deltas, targets)
 }
 
 /// Huber loss: quadratic for |diff| ≤ delta, linear beyond — robust to outliers.
@@ -182,34 +165,32 @@ pub fn train_predictor(
         anyhow::bail!("No samples found in dataset");
     }
 
-    // Build func_name → opcode sequence map (one IR emit per unique function).
+    // Build func_name → chunked IR histogram (one IR emit per unique function).
+    let ir_chunks = config.ir_chunks;
     let unique_funcs: std::collections::HashSet<&str> =
         all_samples.iter().map(|s| s.func_name.as_str()).collect();
     std::fs::create_dir_all(work_dir)?;
     let llvm = Llvm::new(clang, opt, work_dir.to_path_buf());
     let functions = Functions::new(&functions_dir.to_path_buf());
-    let mut func_opcodes: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut func_features: HashMap<String, Vec<f32>> = HashMap::new();
     for func in &functions.functions {
         if unique_funcs.contains(func.name.as_str()) {
             let func_llvm = llvm.with_env(work_dir.join(&func.name));
             std::fs::create_dir_all(&func_llvm.work_dir)?;
             let ir = func_llvm.ir(&func.source)?;
-            func_opcodes.insert(func.name.clone(), ir.opcode_sequence());
-            println!(
-                "  IR loaded: {}  ({} opcodes)",
-                func.name,
-                func_opcodes[&func.name].len()
-            );
+            let feats = crate::llvm::ir::chunked_opcode_histogram(&ir.opcode_sequence(), ir_chunks);
+            println!("  IR loaded: {}  (feature_dim={})", func.name, feats.len());
+            func_features.insert(func.name.clone(), feats);
         }
     }
 
     let all_predictor_samples: Vec<PredictorSample> = all_samples
         .iter()
         .filter_map(|s| {
-            let opcodes = func_opcodes.get(&s.func_name)?.clone();
+            let feats = func_features.get(&s.func_name)?.clone();
             Some(PredictorSample {
                 func_name: s.func_name.clone(),
-                ir_opcodes: opcodes,
+                ir_features: feats,
                 passes: s.passes.clone(),
                 step_deltas: s.step_deltas.clone(),
                 mask: (0..s.passes.len()).map(|_| true).collect(),
@@ -425,15 +406,10 @@ pub fn train_predictor(
                 .map(|&i| train_samples[i].clone())
                 .collect();
 
-            let (ir_opcodes, ir_mask, passes, mask, deltas, targets) = batch_to_tensors(
-                &batch,
-                &device,
-                config.max_seq_len,
-                config.max_ir_len,
-                clip_min,
-            );
+            let (ir_features, passes, mask, deltas, targets) =
+                batch_to_tensors(&batch, &device, config.max_seq_len, clip_min);
 
-            let output = model.forward(ir_opcodes, ir_mask, passes, mask, deltas); // [B, 1]
+            let output = model.forward(ir_features, passes, mask, deltas); // [B, 1]
             let output_flat = output.squeeze::<1>(); // [B]
 
             // Collect predictions before consuming tensors in the graph
@@ -493,16 +469,15 @@ pub fn train_predictor(
         while batch_start < val_samples.len() {
             let end = (batch_start + batch_size).min(val_samples.len());
             let batch = val_samples[batch_start..end].to_vec();
-            let (ir_opcodes, ir_mask, passes, mask, deltas, targets) =
+            let (ir_features, passes, mask, deltas, targets) =
                 batch_to_tensors::<crate::config::BurnBackend>(
                     &batch,
                     &device,
                     config.max_seq_len,
-                    config.max_ir_len,
                     clip_min,
                 );
 
-            let output = valid_model.forward(ir_opcodes, ir_mask, passes, mask, deltas);
+            let output = valid_model.forward(ir_features, passes, mask, deltas);
             let output_flat = output.squeeze::<1>();
 
             let pred_vec: Vec<f32> = output_flat.clone().into_data().to_vec::<f32>().unwrap();

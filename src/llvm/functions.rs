@@ -28,7 +28,7 @@ impl Functions {
                 source: Source { file: path },
                 ir,
                 baselines: None,
-                ir_opcodes: None,
+                ir_features: None,
             });
         }
         functions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -42,7 +42,7 @@ pub(crate) struct Function {
     pub(crate) ir: Ir,
     /// None until collect_baselines has run; always Some during training.
     pub(crate) baselines: Option<Baselines>,
-    /// Raw opcode-ID sequence for the base IR, unpadded.
+    /// Pre-computed chunked opcode histogram (k * IR_VOCAB_SIZE floats).
     /// Populated during the baseline phase alongside baselines.
-    pub(crate) ir_opcodes: Option<Vec<u8>>,
+    pub(crate) ir_features: Option<Vec<f32>>,
 }

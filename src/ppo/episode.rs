@@ -5,8 +5,8 @@ pub(crate) struct Results {
     pub(crate) func_name: String,
     pub(crate) bench_cache_hits: u64,
     pub(crate) bench_cache_misses: u64,
-    pub(crate) ir_features: Vec<f32>, // kept for PredictorReturn
-    pub(crate) ir_opcodes: Vec<u8>,   // opcode-ID sequence for actor input
+    /// Chunked opcode histogram — k * IR_VOCAB_SIZE floats, used by both the actor and PredictorReturn.
+    pub(crate) ir_features: Vec<f32>,
     /// ep_len actions actually executed (index of first Stop + 1, or K if no Stop).
     /// Parallel to log_probs. Slots past ep_len were never applied or trained.
     pub(crate) actions: Vec<Pass>,
