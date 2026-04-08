@@ -179,6 +179,9 @@ enum Command {
         opt: String,
         #[arg(long, default_value = "work/export_features")]
         work_dir: PathBuf,
+        /// Number of positional chunks — must match the value used in Train.
+        #[arg(long, default_value = "4")]
+        ir_chunks: usize,
     },
     TrainPredictor {
         #[arg(long, default_value = "dataset.jsonl")]
@@ -196,7 +199,7 @@ enum Command {
         work_dir: PathBuf,
         #[arg(long, default_value = "300")]
         epochs: usize,
-        #[arg(long, default_value = "2048")]
+        #[arg(long, default_value = "4096")]
         batch_size: usize,
         #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
@@ -561,7 +564,9 @@ fn main() {
             clang,
             opt,
             work_dir,
+            ir_chunks,
         } => {
+            use crate::llvm::ir::{IR_VOCAB_SIZE, chunked_opcode_histogram};
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, &opt, work_dir.clone());
             let mut functions = Functions::new(&directory);
@@ -572,11 +577,23 @@ fn main() {
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
                 let ir = func_llvm.ir(&func.source).expect("emit IR");
                 let opcodes = ir.opcode_sequence();
-                println!("  {}  seq_len={}", func.name, opcodes.len());
+                let hist = chunked_opcode_histogram(&opcodes, ir_chunks);
+                // Print per-chunk top opcode for a quick sanity check.
+                println!("  {}  raw_opcodes={}", func.name, opcodes.len());
+                for c in 0..ir_chunks {
+                    let base = c * IR_VOCAB_SIZE;
+                    let chunk = &hist[base..base + IR_VOCAB_SIZE];
+                    let top = chunk.iter().enumerate()
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                        .map(|(i, v)| (i, v))
+                        .unwrap_or((0, &0.0));
+                    println!("    chunk[{}]  top_bin={}  frac={:.3}", c, top.0, top.1);
+                }
                 records.push(serde_json::json!({
                     "name": func.name,
-                    "seq_len": opcodes.len(),
-                    "opcodes": opcodes,
+                    "raw_opcodes": opcodes.len(),
+                    "ir_chunks": ir_chunks,
+                    "features": hist,
                 }));
             }
 
