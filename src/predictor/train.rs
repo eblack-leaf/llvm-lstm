@@ -1,5 +1,7 @@
 use crate::config::BurnAutoDiff;
 use crate::config::BurnDevice;
+use crate::llvm::Llvm;
+use crate::llvm::functions::Functions;
 use crate::predictor::data::Sample;
 use crate::predictor::model::{SpeedupPredictor, SpeedupPredictorConfig};
 use anyhow::Result;
@@ -12,25 +14,18 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::Rng;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
 
-/// A single sample for the predictor.
+/// A single sample for the predictor, with opcodes resolved at load time.
 #[derive(Clone)]
 pub struct PredictorSample {
+    pub func_name: String,
     pub ir_opcodes: Vec<u8>,
     pub passes: Vec<crate::llvm::pass::Pass>,
     pub step_deltas: Vec<f32>,
     pub mask: Vec<bool>,
     pub speedup: f32,
-}
-
-/// Stable hash of ir_opcodes to identify which function a sample came from.
-fn ir_features_key(opcodes: &[u8]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    opcodes.hash(&mut h);
-    h.finish()
 }
 
 /// Convert a batch of samples into batched tensors.
@@ -167,6 +162,10 @@ fn compute_metrics<B: Backend<FloatElem = f32>>(
 pub fn train_predictor(
     dataset_path: &Path,
     checkpoint_dir: &Path,
+    functions_dir: &Path,
+    clang: &str,
+    opt: &str,
+    work_dir: &Path,
     epochs: usize,
     batch_size: usize,
     learning_rate: f64,
@@ -183,26 +182,44 @@ pub fn train_predictor(
         anyhow::bail!("No samples found in dataset");
     }
 
+    // Build func_name → opcode sequence map (one IR emit per unique function).
+    let unique_funcs: std::collections::HashSet<&str> =
+        all_samples.iter().map(|s| s.func_name.as_str()).collect();
+    std::fs::create_dir_all(work_dir)?;
+    let llvm = Llvm::new(clang, opt, work_dir.to_path_buf());
+    let functions = Functions::new(&functions_dir.to_path_buf());
+    let mut func_opcodes: HashMap<String, Vec<u8>> = HashMap::new();
+    for func in &functions.functions {
+        if unique_funcs.contains(func.name.as_str()) {
+            let func_llvm = llvm.with_env(work_dir.join(&func.name));
+            std::fs::create_dir_all(&func_llvm.work_dir)?;
+            let ir = func_llvm.ir(&func.source)?;
+            func_opcodes.insert(func.name.clone(), ir.opcode_sequence());
+            println!("  IR loaded: {}  ({} opcodes)", func.name, func_opcodes[&func.name].len());
+        }
+    }
+
     let all_predictor_samples: Vec<PredictorSample> = all_samples
         .iter()
-        .map(|s| PredictorSample {
-            ir_opcodes: s.ir_opcodes.clone(),
-            passes: s.passes.clone(),
-            step_deltas: s.step_deltas.clone(),
-            mask: (0..s.passes.len()).map(|_| true).collect(),
-            speedup: s.speedup,
+        .filter_map(|s| {
+            let opcodes = func_opcodes.get(&s.func_name)?.clone();
+            Some(PredictorSample {
+                func_name: s.func_name.clone(),
+                ir_opcodes: opcodes,
+                passes: s.passes.clone(),
+                step_deltas: s.step_deltas.clone(),
+                mask: (0..s.passes.len()).map(|_| true).collect(),
+                speedup: s.speedup,
+            })
         })
         .collect();
 
     let mut rng = rand::rng();
 
-    // ---- Group samples by function (identical ir_features → same function) ----
-    let mut func_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+    // ---- Group samples by function name ----
+    let mut func_groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, s) in all_predictor_samples.iter().enumerate() {
-        func_groups
-            .entry(ir_features_key(&s.ir_opcodes))
-            .or_default()
-            .push(i);
+        func_groups.entry(s.func_name.clone()).or_default().push(i);
     }
     let n_funcs = func_groups.len();
     let n_total = all_predictor_samples.len();

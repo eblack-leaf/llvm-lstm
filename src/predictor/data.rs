@@ -7,12 +7,12 @@ use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sample {
-    /// Raw opcode-ID sequence for the base IR (unpadded).
-    pub ir_opcodes: Vec<u8>,
+    /// Name of the source function — used to look up the base IR at training time.
+    pub func_name: String,
     pub passes: Vec<Pass>,
     /// Normalised instruction-count delta per step.
-    /// step_deltas[t] = (instr_counts[t] - instr_counts[t+1]) / instr_counts[t].
-    /// Positive = count reduced, ~0 = no-op, negative = bloat.  len == passes.len().
+    /// step_deltas[t] = tanh((instr[t] - instr[t+1]) / instr[t]).
+    /// len == passes.len().
     pub step_deltas: Vec<f32>,
     pub speedup: f32,
 }

@@ -46,7 +46,7 @@ enum Command {
         epochs: usize,
         #[arg(long, default_value = "4")]
         ppo_epochs: usize,
-        #[arg(long, default_value = "256")]
+        #[arg(long, default_value = "128")]
         episodes: usize,
         #[arg(long, default_value = "2")]
         benchmark_runs: usize,
@@ -102,7 +102,7 @@ enum Command {
         /// Maximum IR opcode tokens fed to the IR encoder. Sequences shorter than this are
         /// padded; longer sequences are truncated. Adjust based on your functions' IR lengths
         /// (run export-features to inspect before setting).
-        #[arg(long, default_value = "1986")]
+        #[arg(long, default_value = "1024")]
         max_ir_len: usize,
     },
     Evaluate {
@@ -186,6 +186,15 @@ enum Command {
         data: PathBuf,
         #[arg(long, default_value = "predictor_checkpoints")]
         checkpoint_dir: PathBuf,
+        /// Directory containing the benchmark .c source files (needed to emit IR at load time).
+        #[arg(long, default_value = "benchmarks")]
+        functions_dir: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "opt-20")]
+        opt: String,
+        #[arg(long, default_value = "work/predictor_ir")]
+        work_dir: PathBuf,
         #[arg(long, default_value = "300")]
         epochs: usize,
         #[arg(long, default_value = "2048")]
@@ -197,7 +206,7 @@ enum Command {
         #[arg(long, default_value = "40")]
         max_seq_len: usize,
         /// Max IR opcode tokens for the IR encoder (match the value used during collect).
-        #[arg(long, default_value = "1986")]
+        #[arg(long, default_value = "1024")]
         max_ir_len: usize,
         /// IR encoder hidden dim.
         #[arg(long, default_value = "64")]
@@ -510,7 +519,6 @@ fn main() {
         } => {
             use crate::llvm::Llvm;
             use crate::llvm::functions::Functions;
-            use crate::llvm::ir::extract_opcode_sequence;
             use crate::llvm::pass::Pass;
             use std::collections::HashMap;
 
@@ -542,17 +550,12 @@ fn main() {
             let mut out_file = std::fs::File::create(&output).expect("create output file");
             for func in &mut functions.functions {
                 println!("Processing {}...", func.name);
-                let func_llvm = llvm.with_env(work_dir.join(&func.name));
-                std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
-                let ir = func_llvm.ir(&func.source).expect("emit IR");
-                let content = std::fs::read_to_string(&ir.file).expect("read IR");
-                let ir_opcodes = extract_opcode_sequence(&content);
 
                 if let Some(entries) = func_cache.get(&func.name) {
                     for (passes, speedup, step_deltas) in entries {
                         for len in 1..=passes.len() {
                             let sample = crate::predictor::data::Sample {
-                                ir_opcodes: ir_opcodes.clone(),
+                                func_name: func.name.clone(),
                                 passes: passes[0..len].to_vec(),
                                 step_deltas: step_deltas[0..len].to_vec(),
                                 speedup: *speedup,
@@ -597,6 +600,10 @@ fn main() {
         Command::TrainPredictor {
             data,
             checkpoint_dir,
+            functions_dir,
+            clang,
+            opt,
+            work_dir,
             epochs,
             batch_size,
             learning_rate,
@@ -635,6 +642,10 @@ fn main() {
             crate::predictor::train::train_predictor(
                 &data,
                 &checkpoint_dir,
+                &functions_dir,
+                &clang,
+                &opt,
+                &work_dir,
                 epochs,
                 batch_size,
                 learning_rate,
