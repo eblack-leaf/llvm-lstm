@@ -65,7 +65,8 @@ impl Ppo {
         }
 
         // Build flat batch once directly from results + returns + advantages
-        let flat_batch = FlatBatch::from_results(results, returns, advantages, cfg.max_ir_len, device);
+        let flat_batch =
+            FlatBatch::from_results(results, returns, advantages, cfg.max_ir_len, device);
         let max_k = cfg.max_seq_len;
         let max_ir_len = cfg.max_ir_len;
 

@@ -1,10 +1,10 @@
 use crate::config::Cfg;
 use crate::llvm::ir::IR_VOCAB_SIZE;
 use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
+use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
-use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, Bool, Config, Int, Module};
 use burn::tensor::Tensor;
@@ -79,9 +79,14 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
             ir_conv: Conv1dConfig::new(cfg.d_ir, cfg.d_ir, cfg.ir_conv_stride)
                 .with_stride(cfg.ir_conv_stride)
                 .init(device),
-            ir_encoder: TransformerEncoderConfig::new(cfg.d_ir, cfg.ir_d_ff, cfg.ir_n_heads, cfg.ir_n_layers)
-                .with_dropout(cfg.dropout)
-                .init(device),
+            ir_encoder: TransformerEncoderConfig::new(
+                cfg.d_ir,
+                cfg.ir_d_ff,
+                cfg.ir_n_heads,
+                cfg.ir_n_layers,
+            )
+            .with_dropout(cfg.dropout)
+            .init(device),
             ir_proj: LinearConfig::new(cfg.d_ir, cfg.d_model).init(device),
             slot_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
             transformer: TransformerEncoderConfig::new(
@@ -157,10 +162,10 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
         let d_model = out.dims()[2];
         let slot_out = out.narrow(1, 1, k).reshape([n * k, d_model]);
         let policy_flat = self.policy_head.forward(slot_out.clone()); // [N*K, num_actions]
-        let value_flat = self.value_head.forward(slot_out);           // [N*K, 1]
+        let value_flat = self.value_head.forward(slot_out); // [N*K, 1]
         let num_actions = policy_flat.dims()[1];
         let policy = policy_flat.reshape([n, k, num_actions]).unsqueeze_dim(2); // [N, K, 1, num_actions]
-        let value = value_flat.reshape([n, k, 1]);                               // [N, K, 1]
+        let value = value_flat.reshape([n, k, 1]); // [N, K, 1]
 
         Output { policy, value }
     }

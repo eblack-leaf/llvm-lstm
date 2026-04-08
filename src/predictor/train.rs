@@ -195,7 +195,11 @@ pub fn train_predictor(
             std::fs::create_dir_all(&func_llvm.work_dir)?;
             let ir = func_llvm.ir(&func.source)?;
             func_opcodes.insert(func.name.clone(), ir.opcode_sequence());
-            println!("  IR loaded: {}  ({} opcodes)", func.name, func_opcodes[&func.name].len());
+            println!(
+                "  IR loaded: {}  ({} opcodes)",
+                func.name,
+                func_opcodes[&func.name].len()
+            );
         }
     }
 
@@ -421,8 +425,13 @@ pub fn train_predictor(
                 .map(|&i| train_samples[i].clone())
                 .collect();
 
-            let (ir_opcodes, ir_mask, passes, mask, deltas, targets) =
-                batch_to_tensors(&batch, &device, config.max_seq_len, config.max_ir_len, clip_min);
+            let (ir_opcodes, ir_mask, passes, mask, deltas, targets) = batch_to_tensors(
+                &batch,
+                &device,
+                config.max_seq_len,
+                config.max_ir_len,
+                clip_min,
+            );
 
             let output = model.forward(ir_opcodes, ir_mask, passes, mask, deltas); // [B, 1]
             let output_flat = output.squeeze::<1>(); // [B]

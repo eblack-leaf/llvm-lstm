@@ -1,10 +1,10 @@
 use crate::llvm::ir::IR_VOCAB_SIZE;
 use burn::config::Config;
 use burn::module::Module;
+use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
-use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, Tensor};
 use burn::tensor::Bool;
@@ -96,11 +96,11 @@ impl SpeedupPredictorConfig {
 impl<B: Backend> SpeedupPredictor<B> {
     pub fn forward(
         &self,
-        ir_opcodes: Tensor<B, 2, Int>,    // [batch, max_ir_len]
+        ir_opcodes: Tensor<B, 2, Int>,       // [batch, max_ir_len]
         ir_padding_mask: Tensor<B, 2, Bool>, // [batch, max_ir_len] true=PAD
-        passes: Tensor<B, 2, Int>,        // [batch, seq_len]
-        mask: Tensor<B, 2, Bool>,         // [batch, seq_len] true = valid
-        step_deltas: Tensor<B, 2>,        // [batch, seq_len]
+        passes: Tensor<B, 2, Int>,           // [batch, seq_len]
+        mask: Tensor<B, 2, Bool>,            // [batch, seq_len] true = valid
+        step_deltas: Tensor<B, 2>,           // [batch, seq_len]
     ) -> Tensor<B, 2> {
         let batch_size = passes.dims()[0];
         let seq_len = passes.dims()[1];
@@ -134,7 +134,7 @@ impl<B: Backend> SpeedupPredictor<B> {
         let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1);
         let d_ir = weighted_sum.dims()[2];
         let ir_mean = (weighted_sum / counts).reshape([batch_size, d_ir]); // [batch, d_ir]
-        let ir_token = self.ir_proj.forward(ir_mean).unsqueeze_dim(1);     // [batch, 1, d_model]
+        let ir_token = self.ir_proj.forward(ir_mean).unsqueeze_dim(1); // [batch, 1, d_model]
 
         // Pass embeddings + per-step delta signal.
         let pass_embeds = self.pass_embed.forward(passes);

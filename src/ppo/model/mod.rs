@@ -1,6 +1,7 @@
 pub(crate) mod conclave;
 pub(crate) mod seq;
 
+use crate::config::Cfg;
 use crate::config::{BurnBackend, BurnDevice};
 use crate::llvm::ir::PAD_OPCODE;
 use crate::llvm::pass::Pass;
@@ -9,7 +10,6 @@ use burn::nn::{Linear, LinearConfig};
 use burn::prelude::{Backend, Bool, Int, Module};
 use burn::tensor::TensorData;
 use burn::tensor::activation::{log_softmax, softmax};
-use crate::config::Cfg;
 
 pub(crate) const ACTIONS: [Pass; 29] = [
     Pass::Instcombine,

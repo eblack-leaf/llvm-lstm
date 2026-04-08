@@ -138,10 +138,7 @@ impl Trainer {
                 .zip(actors)
                 .map(|((ep, func), actor)| {
                     let baselines = func.baselines.as_ref().expect("baselines not collected");
-                    let ir_opcodes = func
-                        .ir_opcodes
-                        .as_ref()
-                        .expect("ir_opcodes not collected");
+                    let ir_opcodes = func.ir_opcodes.as_ref().expect("ir_opcodes not collected");
                     let dev = self.device.clone();
                     let cache = bench_cache.clone();
                     let func_name = func.name.clone();
