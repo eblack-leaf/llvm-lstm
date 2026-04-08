@@ -49,7 +49,7 @@ pub(crate) struct Cfg {
     pub(crate) noop_threshold: f32,
     pub(crate) delta_threshold: f32,
     /// Number of positional chunks used for the IR feature vector.
-    /// Each chunk holds a normalised opcode-frequency histogram (IR_VOCAB_SIZE = 64 bins).
+    /// Each chunk holds a normalised opcode-frequency histogram (IR_CATEGORY_COUNT = 12 bins).
     /// Total IR feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
     pub(crate) ir_chunks: usize,
 }

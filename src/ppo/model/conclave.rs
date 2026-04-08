@@ -10,7 +10,7 @@ use burn::tensor::Tensor;
 
 #[derive(Config, Debug)]
 pub(crate) struct ConclaveActorConfig {
-    /// Number of IR histogram chunks — feature dim = ir_chunks * IR_VOCAB_SIZE.
+    /// Number of IR histogram chunks — feature dim = ir_chunks * IR_CATEGORY_COUNT.
     #[config(default = 4)]
     pub(crate) ir_chunks: usize,
     #[config(default = 29)]

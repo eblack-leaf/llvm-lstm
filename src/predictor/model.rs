@@ -23,7 +23,7 @@ pub struct SpeedupPredictor<B: Backend> {
 #[derive(Config, Debug)]
 pub struct SpeedupPredictorConfig {
     pub num_passes: usize,
-    /// Number of positional chunks for the IR histogram — feature dim = ir_chunks * IR_VOCAB_SIZE.
+    /// Number of positional chunks for the IR histogram — feature dim = ir_chunks * IR_CATEGORY_COUNT.
     #[config(default = 4)]
     pub ir_chunks: usize,
     pub output_dim: usize,
@@ -62,7 +62,7 @@ impl SpeedupPredictorConfig {
 impl<B: Backend> SpeedupPredictor<B> {
     pub fn forward(
         &self,
-        ir_features: Tensor<B, 2>, // [batch, ir_chunks * IR_VOCAB_SIZE]
+        ir_features: Tensor<B, 2>, // [batch, ir_chunks * IR_CATEGORY_COUNT]
         passes: Tensor<B, 2, Int>, // [batch, seq_len]
         mask: Tensor<B, 2, Bool>,  // [batch, seq_len] true = valid
         step_deltas: Tensor<B, 2>, // [batch, seq_len]

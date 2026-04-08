@@ -81,7 +81,7 @@ impl<B: Backend> MlpHead<B> {
 
 /// Model input: chunked IR opcode histogram for N episodes.
 pub(crate) struct Input<B: Backend> {
-    /// [N, ir_chunks * IR_VOCAB_SIZE] — pre-computed chunked opcode histogram.
+    /// [N, ir_chunks * IR_CATEGORY_COUNT] — pre-computed chunked opcode histogram.
     pub(crate) ir_features: Tensor<B, 2>,
 }
 

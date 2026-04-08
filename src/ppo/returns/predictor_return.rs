@@ -1,5 +1,5 @@
 use crate::config::{BurnBackend, BurnDevice};
-use crate::llvm::ir::{IR_VOCAB_SIZE, step_delta};
+use crate::llvm::ir::{IR_CATEGORY_COUNT, step_delta};
 use crate::llvm::pass::Pass;
 use crate::ppo::episode::Results;
 use crate::ppo::returns::Returns;
@@ -45,7 +45,7 @@ impl PredictorReturn {
             .map_err(|e| anyhow::anyhow!("predictor load: {e:?}"))?;
 
         let model = config.init::<BurnBackend>(&device).load_record(record);
-        let ir_feature_dim = config.ir_chunks * IR_VOCAB_SIZE;
+        let ir_feature_dim = config.ir_chunks * IR_CATEGORY_COUNT;
 
         Ok(Self {
             model,
