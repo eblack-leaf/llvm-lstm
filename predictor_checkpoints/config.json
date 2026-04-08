@@ -12,5 +12,6 @@
   "ir_n_layers": 2,
   "ir_n_heads": 4,
   "ir_d_ff": 128,
-  "max_ir_len": 1024
+  "max_ir_len": 1024,
+  "ir_conv_stride": 4
 }
