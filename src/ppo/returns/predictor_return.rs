@@ -112,7 +112,7 @@ impl Returns for PredictorReturn {
         let preds: Vec<f32> = self
             .model
             .forward(ir_features, passes, mask, deltas)
-            .squeeze::<1>()
+            .reshape([ep_len])
             .into_data()
             .to_vec::<f32>()
             .unwrap();
