@@ -222,7 +222,7 @@ enum Command {
         dropout: f64,
         #[arg(long, default_value = "-3.0")]
         clip_min: f32,
-        #[arg(long, default_value = "3.0")]
+        #[arg(long, default_value = "1.0")]
         huber_delta: f32,
         #[arg(long)]
         max_samples: Option<usize>,

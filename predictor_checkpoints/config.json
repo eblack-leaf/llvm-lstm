@@ -5,7 +5,7 @@
   "n_heads": 8,
   "n_layers": 4,
   "d_ff": 512,
-  "dropout": 0.1,
+  "dropout": 0.3,
   "max_seq_len": 30,
   "ir_chunks": 4
 }
