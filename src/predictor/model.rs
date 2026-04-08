@@ -4,6 +4,7 @@ use burn::module::Module;
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
+use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, Tensor};
 use burn::tensor::Bool;
@@ -13,6 +14,7 @@ use burn::tensor::TensorData;
 #[derive(Module, Debug)]
 pub struct SpeedupPredictor<B: Backend> {
     ir_opcode_embed: Embedding<B>,
+    ir_conv: Conv1d<B>,
     ir_encoder: TransformerEncoder<B>,
     ir_proj: Linear<B>,
     pass_embed: Embedding<B>,
@@ -43,6 +45,10 @@ pub struct SpeedupPredictorConfig {
     /// Max IR opcode sequence length (shorter sequences are padded).
     #[config(default = 512)]
     pub max_ir_len: usize,
+    /// Conv1D stride that compresses the opcode sequence before the IR encoder.
+    /// The IR encoder sees max_ir_len / ir_conv_stride tokens.
+    #[config(default = 4)]
+    pub ir_conv_stride: usize,
     pub output_dim: usize,
     pub d_model: usize,
     pub n_heads: usize,
@@ -57,6 +63,9 @@ impl SpeedupPredictorConfig {
         let max_positions = self.max_seq_len + 1;
         SpeedupPredictor {
             ir_opcode_embed: EmbeddingConfig::new(self.ir_vocab_size, self.d_ir).init(device),
+            ir_conv: Conv1dConfig::new(self.d_ir, self.d_ir, self.ir_conv_stride)
+                .with_stride(self.ir_conv_stride)
+                .init(device),
             ir_encoder: TransformerEncoderConfig::new(
                 self.d_ir,
                 self.ir_d_ff,
@@ -97,15 +106,32 @@ impl<B: Backend> SpeedupPredictor<B> {
         let seq_len = passes.dims()[1];
         let device = passes.device();
 
-        // --- IR encoder ---
-        let ir_tok = self.ir_opcode_embed.forward(ir_opcodes); // [batch, L, d_ir]
-        let ir_enc_input = TransformerEncoderInput::new(ir_tok).mask_pad(ir_padding_mask.clone());
-        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [batch, L, d_ir]
+        // --- IR encoder with Conv1D downsampling ---
+        let ir_embed = self.ir_opcode_embed.forward(ir_opcodes); // [batch, L, d_ir]
+        let l = ir_embed.dims()[1];
+
+        // Conv1D: [batch, L, d_ir] → [batch, d_ir, L] → conv → [batch, d_ir, L/s] → [batch, L/s, d_ir]
+        let ir_conv_in = ir_embed.swap_dims(1, 2);
+        let ir_conv_out = self.ir_conv.forward(ir_conv_in);
+        let l_pooled = ir_conv_out.dims()[2];
+        let ir_down = ir_conv_out.swap_dims(1, 2); // [batch, L/s, d_ir]
+
+        // Pool padding mask.
+        let stride = l / l_pooled;
+        let not_pad_f = ir_padding_mask.float().neg() + 1.0f32; // [batch, L], 1=real
+        let pooled_mask: Tensor<B, 2, Bool> = not_pad_f
+            .reshape([batch_size, l_pooled, stride])
+            .sum_dim(2)
+            .squeeze_dim(2)
+            .lower_elem(0.5f32); // true=PAD
+
+        let ir_enc_input = TransformerEncoderInput::new(ir_down).mask_pad(pooled_mask.clone());
+        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [batch, L/s, d_ir]
 
         // Masked mean pool.
-        let not_pad = ir_padding_mask.float().neg() + 1.0f32; // [batch, L]
-        let counts = not_pad.clone().sum_dim(1).unsqueeze_dim(2).clamp_min(1.0); // [batch, 1, 1]
-        let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1); // [batch, 1, d_ir]
+        let not_pad = pooled_mask.float().neg() + 1.0f32; // [batch, L/s], 1=real
+        let counts = not_pad.clone().sum_dim(1).unsqueeze_dim(2).clamp_min(1.0);
+        let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1);
         let d_ir = weighted_sum.dims()[2];
         let ir_mean = (weighted_sum / counts).reshape([batch_size, d_ir]); // [batch, d_ir]
         let ir_token = self.ir_proj.forward(ir_mean).unsqueeze_dim(1);     // [batch, 1, d_model]

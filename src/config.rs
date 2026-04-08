@@ -49,5 +49,10 @@ pub(crate) struct Cfg {
     pub(crate) noop_threshold: f32,
     pub(crate) delta_threshold: f32,
     /// Maximum number of IR opcode tokens fed to the IR encoder (shorter sequences are padded).
+    /// Must be divisible by ir_conv_stride.
     pub(crate) max_ir_len: usize,
+    /// Stride of the Conv1D that compresses the opcode sequence before the transformer.
+    /// The transformer sees max_ir_len / ir_conv_stride tokens.
+    /// Kernel size equals stride (non-overlapping windows — learned local pooling).
+    pub(crate) ir_conv_stride: usize,
 }

@@ -104,6 +104,11 @@ enum Command {
         /// (run export-features to inspect before setting).
         #[arg(long, default_value = "1024")]
         max_ir_len: usize,
+        /// Conv1D stride applied to the embedded opcode sequence before the IR encoder.
+        /// The transformer sees max_ir_len / ir_conv_stride tokens. Must divide max_ir_len.
+        /// Stride 4 with max_ir_len 1024 gives 256 tokens (16x cheaper attention).
+        #[arg(long, default_value = "4")]
+        ir_conv_stride: usize,
     },
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
@@ -197,7 +202,7 @@ enum Command {
         work_dir: PathBuf,
         #[arg(long, default_value = "300")]
         epochs: usize,
-        #[arg(long, default_value = "2048")]
+        #[arg(long, default_value = "512")]
         batch_size: usize,
         #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
@@ -208,6 +213,9 @@ enum Command {
         /// Max IR opcode tokens for the IR encoder (match the value used during collect).
         #[arg(long, default_value = "1024")]
         max_ir_len: usize,
+        /// Conv1D stride — same as used during Train so the IR encoding is comparable.
+        #[arg(long, default_value = "4")]
+        ir_conv_stride: usize,
         /// IR encoder hidden dim.
         #[arg(long, default_value = "64")]
         d_ir: usize,
@@ -289,6 +297,7 @@ fn main() {
             predictor_noop_threshold,
             predictor_scale,
             max_ir_len,
+            ir_conv_stride,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -313,6 +322,7 @@ fn main() {
                 noop_threshold,
                 delta_threshold,
                 max_ir_len,
+                ir_conv_stride,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
@@ -610,6 +620,7 @@ fn main() {
             val_split,
             max_seq_len,
             max_ir_len,
+            ir_conv_stride,
             d_ir,
             ir_n_heads,
             ir_n_layers,
@@ -631,6 +642,7 @@ fn main() {
                 ir_n_heads,
                 ir_d_ff,
                 max_ir_len,
+                ir_conv_stride,
                 output_dim: 1,
                 d_model,
                 n_heads,

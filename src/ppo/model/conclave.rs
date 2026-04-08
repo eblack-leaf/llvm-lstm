@@ -4,6 +4,7 @@ use crate::ppo::model::{Actor, Input, MlpHead, MlpHeadConfig, Output};
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
+use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, Bool, Config, Int, Module};
 use burn::tensor::Tensor;
@@ -28,6 +29,11 @@ pub(crate) struct ConclaveActorConfig {
     /// Max IR opcode sequence length (must match Cfg::max_ir_len).
     #[config(default = 512)]
     pub(crate) max_ir_len: usize,
+    /// Conv1D stride used to compress the opcode sequence before the IR encoder.
+    /// The transformer sees max_ir_len / ir_conv_stride tokens.
+    /// Must divide max_ir_len evenly.
+    #[config(default = 4)]
+    pub(crate) ir_conv_stride: usize,
     #[config(default = 29)]
     pub(crate) num_passes: usize,
     #[config(default = 256)]
@@ -61,6 +67,7 @@ pub(crate) struct ConclaveActorConfig {
 #[derive(Module, Debug)]
 pub(crate) struct ConclaveActor<B: Backend> {
     ir_opcode_embed: Embedding<B>,
+    ir_conv: Conv1d<B>,
     ir_encoder: TransformerEncoder<B>,
     ir_proj: Linear<B>,
     pass_embed: Embedding<B>,
@@ -76,6 +83,9 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
         Self {
             ir_opcode_embed: EmbeddingConfig::new(cfg.ir_vocab_size, cfg.d_ir).init(device),
+            ir_conv: Conv1dConfig::new(cfg.d_ir, cfg.d_ir, cfg.ir_conv_stride)
+                .with_stride(cfg.ir_conv_stride)
+                .init(device),
             ir_encoder: TransformerEncoderConfig::new(cfg.d_ir, cfg.ir_d_ff, cfg.ir_n_heads, cfg.ir_n_layers)
                 .with_dropout(cfg.dropout)
                 .init(device),
@@ -104,17 +114,32 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
         let np = 29usize;
         let seq = np + k;
 
-        // --- IR encoder ---
-        // Embed opcode IDs: [N, L] → [N, L, d_ir]
-        let ir_tok = self.ir_opcode_embed.forward(input.ir_opcodes);
-        // Encode with padding mask so PAD positions don't pollute attention.
-        let ir_enc_input = TransformerEncoderInput::new(ir_tok)
-            .mask_pad(input.ir_padding_mask.clone());
-        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [N, L, d_ir]
+        // --- IR encoder with Conv1D downsampling ---
+        // Embed: [N, L] → [N, L, d_ir]
+        let ir_embed = self.ir_opcode_embed.forward(input.ir_opcodes);
+        let l = ir_embed.dims()[1];
 
-        // Masked mean pool: average over real (non-PAD) positions.
-        // ir_padding_mask: true=PAD → float gives 1.0=PAD; invert to get 1.0=real.
-        let not_pad = input.ir_padding_mask.float().neg() + 1.0f32; // [N, L]
+        // Conv1D: [N, L, d_ir] → swap → [N, d_ir, L] → conv → [N, d_ir, L/s] → swap → [N, L/s, d_ir]
+        let ir_conv_in = ir_embed.swap_dims(1, 2);
+        let ir_conv_out = self.ir_conv.forward(ir_conv_in);
+        let l_pooled = ir_conv_out.dims()[2];
+        let ir_down = ir_conv_out.swap_dims(1, 2); // [N, L/s, d_ir]
+
+        // Pool padding mask: a window is PAD only if all its tokens are PAD.
+        let stride = l / l_pooled;
+        let not_pad_f = input.ir_padding_mask.float().neg() + 1.0f32; // [N, L], 1=real
+        let pooled_mask: Tensor<B, 2, Bool> = not_pad_f
+            .reshape([n, l_pooled, stride])
+            .sum_dim(2)
+            .squeeze_dim(2)
+            .lower_elem(0.5f32); // true=PAD (all tokens in window are PAD)
+
+        // IR encoder on downsampled sequence.
+        let ir_enc_input = TransformerEncoderInput::new(ir_down).mask_pad(pooled_mask.clone());
+        let ir_enc = self.ir_encoder.forward(ir_enc_input); // [N, L/s, d_ir]
+
+        // Masked mean pool over real tokens.
+        let not_pad = pooled_mask.float().neg() + 1.0f32; // [N, L/s], 1=real
         let counts = not_pad.clone().sum_dim(1).unsqueeze_dim(2).clamp_min(1.0); // [N, 1, 1]
         let weighted_sum = (ir_enc * not_pad.unsqueeze_dim(2)).sum_dim(1); // [N, 1, d_ir]
         let d_ir = weighted_sum.dims()[2];
@@ -167,6 +192,7 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
         ConclaveActorConfig::new()
             .with_max_seq_len(cfg.max_seq_len)
             .with_max_ir_len(cfg.max_ir_len)
+            .with_ir_conv_stride(cfg.ir_conv_stride)
             .with_ir_vocab_size(IR_VOCAB_SIZE)
     }
 }
