@@ -11,6 +11,7 @@ use crate::ppo::logging::LogMode;
 use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::ppo::returns::instruction_proxy::InstructionProxyReturn;
 use crate::ppo::returns::instruction_weighted_terminal::InstructionWeightedTerminal;
+use crate::ppo::returns::ir_count_return::IrCountReturn;
 use crate::train::Trainer;
 use burn::module::AutodiffModule;
 use clap::{Parser, Subcommand};
@@ -58,7 +59,7 @@ enum Command {
         baseline_iters: usize,
         #[arg(long, default_value = "30")]
         max_seq_len: usize,
-        #[arg(long, default_value = "1e-3")]
+        #[arg(long, default_value = "3e-3")]
         learning_rate: f64,
         #[arg(long, default_value = "0.1")]
         clip_epsilon: f32,
@@ -303,6 +304,7 @@ fn main() {
                 noop_threshold,
                 delta_threshold,
                 ir_chunks,
+                skip_benchmark: returns == "ir",
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
@@ -324,6 +326,7 @@ fn main() {
                         .expect("failed to load predictor checkpoint"),
                     )
                 }
+                "ir" => Box::new(IrCountReturn),
                 _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(

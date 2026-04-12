@@ -52,4 +52,6 @@ pub(crate) struct Cfg {
     /// Each chunk holds a normalised opcode-frequency histogram (IR_CATEGORY_COUNT = 12 bins).
     /// Total IR feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
     pub(crate) ir_chunks: usize,
+    /// When true, skip per-episode benchmarking and use IR-count reduction as `episode_return`.
+    pub(crate) skip_benchmark: bool,
 }

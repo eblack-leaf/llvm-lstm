@@ -1,6 +1,7 @@
 pub(crate) mod episode_return;
 pub(crate) mod instruction_proxy;
 pub(crate) mod instruction_weighted_terminal;
+pub(crate) mod ir_count_return;
 pub(crate) mod predictor_return;
 
 use crate::ppo::episode::Results;

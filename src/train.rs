@@ -204,7 +204,12 @@ impl Trainer {
                         .map(|w| step_delta(w[0], w[1]))
                         .collect();
 
-                    let speedup = if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
+                    let speedup = if self.cfg.skip_benchmark {
+                        // IR-count mode: return = fraction of instructions removed, no binary run.
+                        let base = instr_counts[0].max(1) as f32;
+                        let final_count = *instr_counts.last().unwrap_or(&0) as f32;
+                        (base - final_count) / base
+                    } else if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
                         bench_cache_hits += 1;
                         cached
                     } else {
