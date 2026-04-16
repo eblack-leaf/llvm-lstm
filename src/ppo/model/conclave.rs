@@ -57,7 +57,7 @@ impl<B: Backend> Actor<B> for ConclaveActor<B> {
     type Config = ConclaveActorConfig;
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
-        let ir_feature_dim = cfg.ir_chunks * IR_CATEGORY_COUNT;
+        let ir_feature_dim = crate::llvm::ir::ir_feature_dim(cfg.ir_chunks);
         Self {
             ir_proj: LinearConfig::new(ir_feature_dim, cfg.d_model).init(device),
             pass_embed: EmbeddingConfig::new(cfg.num_passes, cfg.d_model).init(device),

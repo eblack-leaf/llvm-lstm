@@ -37,7 +37,7 @@ pub struct SpeedupPredictorConfig {
 
 impl SpeedupPredictorConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> SpeedupPredictor<B> {
-        let ir_feature_dim = self.ir_chunks * IR_CATEGORY_COUNT;
+        let ir_feature_dim = crate::llvm::ir::ir_feature_dim(self.ir_chunks);
         let max_positions = self.max_seq_len + 1;
         SpeedupPredictor {
             ir_proj: LinearConfig::new(ir_feature_dim, self.d_model).init(device),

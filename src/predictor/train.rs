@@ -178,7 +178,7 @@ pub fn train_predictor(
             let func_llvm = llvm.with_env(work_dir.join(&func.name));
             std::fs::create_dir_all(&func_llvm.work_dir)?;
             let ir = func_llvm.ir(&func.source)?;
-            let feats = crate::llvm::ir::chunked_opcode_histogram(&ir.opcode_sequence(), ir_chunks);
+            let feats = crate::llvm::ir::ir_features(&ir.opcode_sequence(), ir_chunks);
             println!("  IR loaded: {}  (feature_dim={})", func.name, feats.len());
             func_features.insert(func.name.clone(), feats);
         }

@@ -1,6 +1,6 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg, arch_cfg, arch_init};
 use crate::llvm::functions::Functions;
-use crate::llvm::ir::{chunked_opcode_histogram, step_delta};
+use crate::llvm::ir::{ir_features, step_delta};
 use crate::llvm::pass::Pass;
 use crate::llvm::top_sequences::TopSequences;
 use crate::llvm::{BenchCache, Llvm, load_cache, save_cache};
@@ -88,7 +88,7 @@ impl Trainer {
                     .expect("collect_baselines"),
             );
 
-            func.ir_features = Some(chunked_opcode_histogram(
+            func.ir_features = Some(ir_features(
                 &func.ir.opcode_sequence(),
                 self.cfg.ir_chunks,
             ));
@@ -168,7 +168,7 @@ impl Trainer {
                         let mut hidden_state: Option<Vec<f32>> = None;
 
                         for step in 0..k {
-                            let ir_feat = chunked_opcode_histogram(
+                            let ir_feat = ir_features(
                                 &current_ir.opcode_sequence(),
                                 self.cfg.ir_chunks,
                             );
@@ -235,7 +235,7 @@ impl Trainer {
                         col_bar.inc(1);
 
                         // Terminal IR features (for the ir_features field used by some returns).
-                        let terminal_ir_feat = chunked_opcode_histogram(
+                        let terminal_ir_feat = ir_features(
                             &current_ir.opcode_sequence(),
                             self.cfg.ir_chunks,
                         );

@@ -46,7 +46,7 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
     type Config = AutoGruConfig;
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
-        let ir_dim = cfg.ir_chunks * IR_CATEGORY_COUNT;
+        let ir_dim = crate::llvm::ir::ir_feature_dim(cfg.ir_chunks);
         Self {
             ir_init: LinearConfig::new(ir_dim, cfg.d_hidden).init(device),
             ir_proj: LinearConfig::new(ir_dim, cfg.d_model).init(device),

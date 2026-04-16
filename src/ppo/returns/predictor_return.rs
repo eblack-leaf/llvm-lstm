@@ -45,7 +45,7 @@ impl PredictorReturn {
             .map_err(|e| anyhow::anyhow!("predictor load: {e:?}"))?;
 
         let model = config.init::<BurnBackend>(&device).load_record(record);
-        let ir_feature_dim = config.ir_chunks * IR_CATEGORY_COUNT;
+        let ir_feature_dim = crate::llvm::ir::ir_feature_dim(config.ir_chunks);
 
         Ok(Self {
             model,

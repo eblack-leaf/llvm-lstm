@@ -148,6 +148,9 @@ enum Command {
         baseline_runs: usize,
         #[arg(long, default_value = "200")]
         baseline_iters: usize,
+        /// Save results as JSON for plotting (e.g. checkpoints/diagnose.json).
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Measure parallel-worker benchmark timing contention.
     BenchNoise {
@@ -163,6 +166,25 @@ enum Command {
         iters: usize,
         #[arg(long, default_value = "16")]
         workers: usize,
+        /// Save results as JSON for plotting (e.g. checkpoints/bench_noise.json).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    PlotDiagnose {
+        #[arg(long, default_value = "checkpoints/diagnose.json")]
+        results: PathBuf,
+    },
+    PlotDataset {
+        #[arg(long, default_value = "dataset.jsonl")]
+        data: PathBuf,
+    },
+    PlotBenchNoise {
+        #[arg(long, default_value = "checkpoints/bench_noise.json")]
+        results: PathBuf,
+    },
+    PlotFeatures {
+        #[arg(long, default_value = "features.json")]
+        features: PathBuf,
     },
     // Inside Command enum, add:
     Collect {
@@ -211,7 +233,7 @@ enum Command {
         work_dir: PathBuf,
         #[arg(long, default_value = "50")]
         epochs: usize,
-        #[arg(long, default_value = "2048")]
+        #[arg(long, default_value = "1024")]
         batch_size: usize,
         #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
@@ -396,6 +418,7 @@ fn main() {
             iters,
             baseline_runs,
             baseline_iters,
+            output,
         } => {
             use crate::llvm::ir::Source;
 
@@ -433,6 +456,8 @@ fn main() {
                 candidates.len(),
                 runs
             );
+
+            let mut json_records: Vec<serde_json::Value> = Vec::new();
 
             for (rank, entry) in candidates.iter().enumerate() {
                 let func = match functions
@@ -497,6 +522,25 @@ fn main() {
                     speedups[speedups.len() - 1]
                 );
                 println!("       passes: [{}]", pass_strs.join(", "));
+
+                json_records.push(serde_json::json!({
+                    "rank": rank + 1,
+                    "func_name": entry.func_name,
+                    "cached_speedup": entry.speedup,
+                    "passes": pass_strs,
+                    "mean": mean,
+                    "std": std,
+                    "median": med,
+                    "min": speedups[0],
+                    "max": speedups[speedups.len() - 1],
+                    "all_speedups": speedups,
+                }));
+            }
+
+            if let Some(out) = output {
+                let json = serde_json::to_string_pretty(&json_records).expect("serialize");
+                std::fs::write(&out, json).expect("write diagnose json");
+                println!("\nsaved → {:?}", out);
             }
         }
         Command::BenchNoise {
@@ -506,6 +550,7 @@ fn main() {
             runs,
             iters,
             workers,
+            output,
         } => {
             use crate::llvm::Llvm;
             use crate::llvm::ir::Source;
@@ -513,7 +558,7 @@ fn main() {
 
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, "opt-20", work_dir.clone());
-            let src = Source { file: source };
+            let src = Source { file: source.clone() };
 
             println!("Emitting IR...");
             let ir = llvm.ir(&src).expect("emit IR");
@@ -538,6 +583,20 @@ fn main() {
                 })
                 .collect();
             print_stats("Rayon parallel", workers, solo.mean_ns, &mut rayon_ns);
+
+            if let Some(out) = output {
+                let json = serde_json::json!({
+                    "source": source.display().to_string(),
+                    "runs": runs,
+                    "iters": iters,
+                    "workers": workers,
+                    "solo_ns": solo.mean_ns,
+                    "parallel_ns": rayon_ns,
+                });
+                std::fs::write(&out, serde_json::to_string_pretty(&json).unwrap())
+                    .expect("write bench_noise json");
+                println!("\nsaved → {:?}", out);
+            }
         }
         Command::Collect {
             cache_file,
@@ -606,7 +665,9 @@ fn main() {
             work_dir,
             ir_chunks,
         } => {
-            use crate::llvm::ir::{IR_CATEGORY_COUNT, IR_CATEGORY_NAMES, chunked_opcode_histogram};
+            use crate::llvm::ir::{
+                IR_CATEGORY_COUNT, IR_CATEGORY_NAMES, chunked_opcode_histogram, ir_features,
+            };
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, &opt, work_dir.clone());
             let mut functions = Functions::new(&directory);
@@ -617,8 +678,11 @@ fn main() {
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
                 let ir = func_llvm.ir(&func.source).expect("emit IR");
                 let opcodes = ir.opcode_sequence();
-                let hist = chunked_opcode_histogram(&opcodes, ir_chunks);
-                // Print per-chunk top opcode for a quick sanity check.
+                // Histogram for human-readable display only.
+                let hist  = chunked_opcode_histogram(&opcodes, ir_chunks);
+                // Deltas — the actual model input.
+                let feats = ir_features(&opcodes, ir_chunks);
+
                 println!("  {}  raw_opcodes={}", func.name, opcodes.len());
                 for c in 0..ir_chunks {
                     let base = c * IR_CATEGORY_COUNT;
@@ -631,11 +695,24 @@ fn main() {
                     }
                     println!();
                 }
+                for d in 0..ir_chunks.saturating_sub(1) {
+                    let base = d * IR_CATEGORY_COUNT;
+                    let delta = &feats[base..base + IR_CATEGORY_COUNT];
+                    print!("    delta[{}→{}]", d, d + 1);
+                    for (cat, &v) in delta.iter().enumerate() {
+                        if v.abs() > 0.02 {
+                            print!("  {}={:+.2}", IR_CATEGORY_NAMES[cat], v);
+                        }
+                    }
+                    println!();
+                }
+
                 records.push(serde_json::json!({
-                    "name": func.name,
+                    "name":        func.name,
                     "raw_opcodes": opcodes.len(),
-                    "ir_chunks": ir_chunks,
-                    "features": hist,
+                    "ir_chunks":   ir_chunks,
+                    "histogram":   hist,
+                    "deltas":      feats,
                 }));
             }
 
@@ -693,6 +770,62 @@ fn main() {
                 config,
             )
             .expect("training failed");
+        }
+        Command::PlotDiagnose { results } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_diagnose.py");
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--results")
+                .arg(&results)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Command::PlotDataset { data } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_dataset.py");
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--data")
+                .arg(&data)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Command::PlotBenchNoise { results } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_bench_noise.py");
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--results")
+                .arg(&results)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Command::PlotFeatures { features } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_features.py");
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--features")
+                .arg(&features)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
         }
     }
 }

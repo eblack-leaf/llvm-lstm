@@ -51,7 +51,7 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
     type Config = AutoTfxConfig;
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
-        let ir_dim = cfg.ir_chunks * IR_CATEGORY_COUNT;
+        let ir_dim = crate::llvm::ir::ir_feature_dim(cfg.ir_chunks);
         Self {
             ir_proj: LinearConfig::new(ir_dim, cfg.d_model).init(device),
             action_embed: EmbeddingConfig::new(cfg.num_actions, cfg.d_model).init(device),

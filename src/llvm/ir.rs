@@ -188,10 +188,61 @@ pub(crate) fn opcode_id_to_category(id: u8) -> usize {
     }
 }
 
-/// Split `opcodes` into `k` equal positional chunks and return a normalised
-/// frequency histogram per chunk, binned into `IR_CATEGORY_COUNT` semantic groups.
-/// Concatenated output is `k * IR_CATEGORY_COUNT` floats; each chunk sums to 1.0.
-/// Values are in the 0.05–0.6 range for typical IR — no more sparse 0.002 bins.
+/// Total IR feature dimension for a given number of chunks.
+/// Layout: (k-1) consecutive chunk-to-chunk deltas, each IR_CATEGORY_COUNT wide.
+///   chunk_deltas : (k-1) * IR_CATEGORY_COUNT
+pub(crate) fn ir_feature_dim(k: usize) -> usize {
+    k.saturating_sub(1) * IR_CATEGORY_COUNT
+}
+
+/// Build the IR feature vector from a raw opcode sequence.
+///
+/// Computes a normalised per-chunk category histogram then returns the
+/// consecutive differences: `chunk[i+1] - chunk[i]` for i in 0..k-1.
+/// Positive values mean a category grows in that region; negative means it
+/// shrinks.  This captures the *shape* of the code rather than its absolute
+/// composition, and is far more discriminative across functions than the
+/// histogram itself.
+///
+/// Output: `(k-1) * IR_CATEGORY_COUNT` floats in `[-1, 1]`.
+pub(crate) fn ir_features(opcodes: &[u8], k: usize) -> Vec<f32> {
+    let total_dim = ir_feature_dim(k);
+    if opcodes.is_empty() || k <= 1 {
+        return vec![0.0f32; total_dim];
+    }
+    let n = opcodes.len();
+
+    // Build normalised per-chunk histogram.
+    let mut hist = vec![0.0f32; k * IR_CATEGORY_COUNT];
+    for (i, &op) in opcodes.iter().enumerate() {
+        let chunk = (i * k / n).min(k - 1);
+        let cat = opcode_id_to_category(op);
+        hist[chunk * IR_CATEGORY_COUNT + cat] += 1.0;
+    }
+    for c in 0..k {
+        let base = c * IR_CATEGORY_COUNT;
+        let total: f32 = hist[base..base + IR_CATEGORY_COUNT].iter().sum();
+        if total > 0.0 {
+            for v in &mut hist[base..base + IR_CATEGORY_COUNT] {
+                *v /= total;
+            }
+        }
+    }
+
+    // Consecutive deltas: chunk[i+1] - chunk[i].
+    let mut out = Vec::with_capacity(total_dim);
+    for c in 0..k - 1 {
+        let a = c * IR_CATEGORY_COUNT;
+        let b = (c + 1) * IR_CATEGORY_COUNT;
+        for cat in 0..IR_CATEGORY_COUNT {
+            out.push(hist[b + cat] - hist[a + cat]);
+        }
+    }
+    out
+}
+
+/// Returns only the normalised per-chunk histogram (display / export use only,
+/// not fed to the model).
 pub(crate) fn chunked_opcode_histogram(opcodes: &[u8], k: usize) -> Vec<f32> {
     let mut hist = vec![0.0f32; k * IR_CATEGORY_COUNT];
     let n = opcodes.len();
@@ -200,8 +251,7 @@ pub(crate) fn chunked_opcode_histogram(opcodes: &[u8], k: usize) -> Vec<f32> {
     }
     for (i, &op) in opcodes.iter().enumerate() {
         let chunk = (i * k / n).min(k - 1);
-        let cat = opcode_id_to_category(op);
-        hist[chunk * IR_CATEGORY_COUNT + cat] += 1.0;
+        hist[chunk * IR_CATEGORY_COUNT + opcode_id_to_category(op)] += 1.0;
     }
     for c in 0..k {
         let base = c * IR_CATEGORY_COUNT;

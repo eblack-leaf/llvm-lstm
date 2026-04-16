@@ -51,7 +51,7 @@ impl<B: Backend> Actor<B> for SeqActor<B> {
     type Config = SeqActorConfig;
 
     fn init(cfg: Self::Config, device: &B::Device) -> Self {
-        let ir_feature_dim = cfg.ir_chunks * IR_CATEGORY_COUNT;
+        let ir_feature_dim = crate::llvm::ir::ir_feature_dim(cfg.ir_chunks);
         Self {
             ir_proj: LinearConfig::new(ir_feature_dim, cfg.d_model).init(device),
             slot_embed: EmbeddingConfig::new(cfg.max_seq_len, cfg.d_model).init(device),
