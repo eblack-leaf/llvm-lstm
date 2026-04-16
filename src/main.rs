@@ -86,7 +86,7 @@ enum Command {
         /// 1.0 = pure speedup (default), 0.0 = pure instruction-count delta.
         /// Values in (0, 1) blend both signals for denser credit assignment.
         /// Only used when --returns=proxy.
-        #[arg(long, default_value = "1.0")]
+        #[arg(long, default_value = "0.5")]
         proxy_alpha: f32,
         /// Return signal:
         ///   episode  — uniform terminal speedup across all slots
