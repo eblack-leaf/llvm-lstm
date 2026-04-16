@@ -48,7 +48,7 @@ enum Command {
         epochs: usize,
         #[arg(long, default_value = "2")]
         ppo_epochs: usize,
-        #[arg(long, default_value = "32")]
+        #[arg(long, default_value = "64")]
         episodes: usize,
         #[arg(long, default_value = "2")]
         benchmark_runs: usize,
@@ -75,7 +75,7 @@ enum Command {
         #[arg(long, default_value = "0.015")]
         kl_target: f32,
         /// Number of episodes per PPO mini-batch.
-        #[arg(long, default_value = "32")]
+        #[arg(long, default_value = "64")]
         mini_batch_size: usize,
         #[arg(long)]
         cache_file: Option<PathBuf>,
@@ -95,7 +95,7 @@ enum Command {
         ///   predictor — per-step marginal from pretrained SpeedupPredictor
         ///   ir       — terminal IR-count reduction, uniform across slots
         ///   ir-step  — per-step IR-count delta (dense; ideal for --features auto-tfx/gru)
-        #[arg(long, default_value = "ir-step")]
+        #[arg(long, default_value = "weighted")]
         returns: String,
         /// Path to predictor checkpoint directory. Required when --returns=predictor.
         #[arg(long)]
@@ -126,7 +126,7 @@ enum Command {
     },
     /// Re-benchmark the top sequences from training to check if speedups are reproducible.
     Diagnose {
-        #[arg(long, default_value = "checkpoints/top_sequences.bin")]
+        #[arg(long, default_value = "checkpoints/bench-top.bin")]
         sequences: PathBuf,
         #[arg(long, default_value = "benchmarks")]
         directory: PathBuf,
@@ -166,7 +166,7 @@ enum Command {
     },
     // Inside Command enum, add:
     Collect {
-        #[arg(long, default_value = "checkpoints/selected-6.cache")]
+        #[arg(long, default_value = "checkpoints/data.cache")]
         cache_file: PathBuf,
         #[arg(long, default_value = "benchmarks")]
         functions_dir: PathBuf,
@@ -217,7 +217,7 @@ enum Command {
         learning_rate: f64,
         #[arg(long, default_value = "0.2")]
         val_split: f32,
-        #[arg(long, default_value = "30")]
+        #[arg(long, default_value = "20")]
         max_seq_len: usize,
         /// Number of positional chunks for the IR histogram (match the value used during Train).
         #[arg(long, default_value = "4")]
@@ -360,7 +360,30 @@ fn main() {
             let _inference_model = loaded_model.valid();
         }
         Command::PlotTrain { dir } => {
-            // TODO: read dir + run python plotting
+            // Resolve paths relative to the current working directory.
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_training.py");
+
+            if !python.exists() {
+                eprintln!("error: .venv not found — run: python3 -m venv .venv && .venv/bin/pip install seaborn matplotlib pandas");
+                std::process::exit(1);
+            }
+            if !script.exists() {
+                eprintln!("error: scripts/plot_training.py not found");
+                std::process::exit(1);
+            }
+
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--dir")
+                .arg(&dir)
+                .status()
+                .expect("failed to spawn python");
+
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
         }
         Command::Diagnose {
             sequences,
