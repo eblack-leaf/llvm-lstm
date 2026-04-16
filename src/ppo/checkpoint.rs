@@ -1,5 +1,4 @@
-use crate::config::{Arch, ArchConfig, BurnAutoDiff, BurnDevice};
-use crate::ppo::model::Actor;
+use crate::config::{Arch, ArchConfig, BurnAutoDiff, BurnDevice, arch_init};
 use anyhow::Result;
 use burn::module::AutodiffModule;
 use burn::prelude::{Config, Module};
@@ -69,7 +68,7 @@ impl Checkpoint {
             .load(dir.join("model").into(), device)
             .map_err(|e| anyhow::anyhow!("load record: {e:?}"))?;
 
-        let model = <Arch as Actor<BurnAutoDiff>>::init(arch_cfg, device).load_record(record);
+        let model = arch_init(arch_cfg, device).load_record(record);
 
         Ok((model, meta))
     }

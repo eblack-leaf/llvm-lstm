@@ -5,6 +5,10 @@ edition = "2024"
 
 [features]
 conclave = []
+# Autoregressive transformer: step-by-step, sees updated IR at each step.
+auto-tfx = []
+# Autoregressive GRU: recurrent hidden state, sees updated IR at each step.
+auto-gru = []
 # Switch transformer training to the Wgpu GPU backend (Vulkan/Metal/DX12).
 # GRU training remains on CPU NdArray regardless.
 # Usage: cargo build --release --features wgpu

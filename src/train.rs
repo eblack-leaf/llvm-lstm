@@ -1,4 +1,4 @@
-use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg};
+use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg, arch_cfg, arch_init};
 use crate::llvm::functions::Functions;
 use crate::llvm::ir::{chunked_opcode_histogram, step_delta};
 use crate::llvm::pass::Pass;
@@ -10,12 +10,14 @@ use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
 use crate::ppo::episode::Results;
 use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::metrics::{Metrics, explained_variance};
-use crate::ppo::model::{Actor, Input};
+use crate::ppo::model::{Actor, AutoActor, Input, ACTIONS};
 use crate::ppo::returns::Returns;
 use burn::lr_scheduler::LrScheduler;
 use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::module::AutodiffModule;
 use burn::optim::{AdamW, AdamWConfig};
+use burn::tensor::activation::softmax;
+use burn::tensor::{Tensor, TensorData};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use std::path::PathBuf;
@@ -96,7 +98,7 @@ impl Trainer {
         }
         logger.finish_baseline_phase();
 
-        let arch_cfg = Arch::cfg(&self.cfg);
+        let a_cfg = arch_cfg(&self.cfg);
         let checkpoint_dir = self.cfg.checkpoint_dir.join("best");
         let mut best_mean = f32::NEG_INFINITY;
 
@@ -112,7 +114,7 @@ impl Trainer {
             TopSequences::new(50)
         };
 
-        let mut model = Arch::init(arch_cfg.clone(), &self.device);
+        let mut model = arch_init(a_cfg.clone(), &self.device);
         let mut optimizer = AdamWConfig::new().init::<BurnAutoDiff, Arch>();
         let mut scheduler =
             CosineAnnealingLrSchedulerConfig::new(self.cfg.learning_rate, self.cfg.epochs)
@@ -123,6 +125,144 @@ impl Trainer {
             let t_collect = Instant::now();
             let current = model.valid();
 
+            // ── Autoregressive collection ──────────────────────────────────
+            #[cfg(any(feature = "auto-tfx", feature = "auto-gru"))]
+            let results: Vec<Results> = {
+                let tasks: Vec<_> = functions
+                    .functions
+                    .iter()
+                    .flat_map(|func| {
+                        let func = func.clone();
+                        (0..self.cfg.episodes).map(move |ep| (ep, func.clone()))
+                    })
+                    .collect();
+                let total_episodes = tasks.len();
+                let actors: Vec<_> = (0..total_episodes).map(|_| current.clone()).collect();
+                let col_bar = logger.collection_bar(total_episodes as u64);
+
+                let out: Vec<Results> = tasks
+                    .into_par_iter()
+                    .zip(actors)
+                    .map(|((ep, func), actor)| {
+                        let baselines = func.baselines.as_ref().expect("baselines");
+                        let dev = self.device.clone();
+                        let cache = bench_cache.clone();
+                        let func_name = func.name.clone();
+                        let k = self.cfg.max_seq_len;
+
+                        let llvm = self.llvm.with_env(
+                            self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)),
+                        );
+                        std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
+
+                        let mut current_ir = func.ir.clone();
+                        let mut action_history: Vec<usize> = Vec::new();
+                        let mut ir_features_collected: Vec<Vec<f32>> = Vec::new();
+                        let mut log_probs: Vec<f32> = Vec::new();
+                        let mut values: Vec<f32> = Vec::new();
+                        let mut instr_counts = vec![func.ir.instruction_count()];
+                        let mut ep_len = k;
+                        // Opaque hidden state threaded step-to-step.
+                        // GRU: carries serialised h_t (O(K) total).
+                        // TFX: always None (default impl replays from scratch).
+                        let mut hidden_state: Option<Vec<f32>> = None;
+
+                        for step in 0..k {
+                            let ir_feat = chunked_opcode_histogram(
+                                &current_ir.opcode_sequence(),
+                                self.cfg.ir_chunks,
+                            );
+                            ir_features_collected.push(ir_feat);
+
+                            let (logits, value, new_hidden) = actor.infer_step_stateful(
+                                &ir_features_collected,
+                                &action_history,
+                                hidden_state,
+                                &dev,
+                            );
+                            hidden_state = new_hidden;
+                            values.push(value);
+
+                            let (action_idx, lp) = sample_logits(&logits);
+                            let action = ACTIONS[action_idx];
+                            log_probs.push(lp);
+                            action_history.push(action_idx);
+
+                            if action != Pass::Stop {
+                                current_ir = llvm
+                                    .apply_one(&current_ir, action, step)
+                                    .expect("apply_one");
+                            }
+                            instr_counts.push(current_ir.instruction_count());
+
+                            if action == Pass::Stop {
+                                ep_len = step + 1;
+                                break;
+                            }
+                        }
+
+                        let actions: Vec<Pass> =
+                            action_history.iter().map(|&i| ACTIONS[i]).collect();
+                        let seq_key: Vec<Pass> =
+                            actions.iter().copied().filter(|&p| p != Pass::Stop).collect();
+                        let cache_key = (func_name.clone(), seq_key);
+
+                        let step_deltas: Vec<f32> = instr_counts
+                            .windows(2)
+                            .map(|w| step_delta(w[0], w[1]))
+                            .collect();
+
+                        let speedup = if self.cfg.skip_benchmark {
+                            let base = instr_counts[0].max(1) as f32;
+                            let final_count = *instr_counts.last().unwrap_or(&0) as f32;
+                            (base - final_count) / base
+                        } else if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
+                            cached
+                        } else {
+                            let bin = llvm.compile(&current_ir).expect("compile");
+                            let mut bm = llvm
+                                .benchmark(
+                                    &bin,
+                                    self.cfg.benchmark_runs,
+                                    self.cfg.benchmark_iters,
+                                )
+                                .expect("benchmark");
+                            bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
+                            cache.insert(cache_key, (bm.speedup, step_deltas));
+                            bm.speedup
+                        };
+
+                        col_bar.inc(1);
+
+                        // Terminal IR features (for the ir_features field used by some returns).
+                        let terminal_ir_feat = chunked_opcode_histogram(
+                            &current_ir.opcode_sequence(),
+                            self.cfg.ir_chunks,
+                        );
+
+                        Results {
+                            func_name,
+                            bench_cache_hits: 0,
+                            bench_cache_misses: 0,
+                            ir_features: terminal_ir_feat,
+                            actions,
+                            log_probs,
+                            ep_len,
+                            values,
+                            episode_return: speedup,
+                            baselines: baselines.clone(),
+                            instr_counts,
+                            ir_features_per_step: ir_features_collected,
+                        }
+                    })
+                    .collect();
+                col_bar.finish_and_clear();
+                out
+            };
+
+            // ── Parallel collection (all-at-once) ─────────────────────────
+            #[cfg(not(any(feature = "auto-tfx", feature = "auto-gru")))]
+            let results: Vec<Results> = {
             let tasks: Vec<_> = functions
                 .functions
                 .iter()
@@ -136,7 +276,7 @@ impl Trainer {
             let actors: Vec<_> = (0..total_episodes).map(|_| current.clone()).collect();
             let col_bar = logger.collection_bar(total_episodes as u64);
 
-            let results: Vec<Results> = tasks
+            let r: Vec<Results> = tasks
                 .into_par_iter()
                 .zip(actors)
                 .map(|((ep, func), actor)| {
@@ -237,11 +377,14 @@ impl Trainer {
                         episode_return: speedup,
                         baselines: baselines.clone(),
                         instr_counts,
+                        ir_features_per_step: vec![], // parallel path — not used
                     }
                 })
                 .collect();
-
             col_bar.finish_and_clear();
+            r
+            };
+
             metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);
 
             for r in &results {
@@ -276,6 +419,7 @@ impl Trainer {
             let num_chunks = results.len().div_ceil(self.cfg.mini_batch_size);
             let ppo_bar = logger.ppo_bar(self.cfg.ppo_epochs as u64 * num_chunks as u64);
 
+            #[cfg(not(any(feature = "auto-tfx", feature = "auto-gru")))]
             let (new_model, new_optimizer, losses) = self.ppo.update(
                 model,
                 optimizer,
@@ -284,6 +428,17 @@ impl Trainer {
                 &advantages,
                 lr,
                 &self.cfg,
+                &self.device,
+                &ppo_bar,
+            );
+            #[cfg(any(feature = "auto-tfx", feature = "auto-gru"))]
+            let (new_model, new_optimizer, losses) = self.ppo.update_auto(
+                model,
+                optimizer,
+                &results,
+                &all_returns,
+                &advantages,
+                lr,
                 &self.device,
                 &ppo_bar,
             );
@@ -300,7 +455,7 @@ impl Trainer {
                 best_mean = epoch_mean;
                 Checkpoint::save(
                     &model,
-                    &arch_cfg,
+                    &a_cfg,
                     CheckpointMeta {
                         epoch,
                         speedup_mean: best_mean,
@@ -321,4 +476,26 @@ impl Trainer {
 
         logger.finish();
     }
+}
+
+/// Sample an action index from raw logits. Returns (index, log_prob).
+/// Used by the autoregressive collection path.
+fn sample_logits(logits: &[f32]) -> (usize, f32) {
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exp: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
+    let sum: f32 = exp.iter().sum::<f32>().max(f32::EPSILON);
+    let probs: Vec<f32> = exp.iter().map(|&x| x / sum).collect();
+
+    let u: f32 = rand::random();
+    let mut cumsum = 0.0f32;
+    let mut idx = probs.len() - 1;
+    for (i, &p) in probs.iter().enumerate() {
+        cumsum += p;
+        if cumsum > u {
+            idx = i;
+            break;
+        }
+    }
+    let log_prob = probs[idx].max(f32::EPSILON).ln();
+    (idx, log_prob)
 }

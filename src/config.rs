@@ -9,14 +9,58 @@ pub(crate) type BurnBackend = burn::backend::Wgpu;
 #[cfg(feature = "wgpu")]
 pub(crate) type BurnDevice = burn::backend::wgpu::WgpuDevice;
 pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
-#[cfg(not(feature = "conclave"))]
+
+// ── Parallel architectures ────────────────────────────────────────────────────
+#[cfg(not(any(feature = "conclave", feature = "auto-tfx", feature = "auto-gru")))]
 pub(crate) type Arch = crate::ppo::model::seq::SeqActor<BurnAutoDiff>;
-#[cfg(not(feature = "conclave"))]
+#[cfg(not(any(feature = "conclave", feature = "auto-tfx", feature = "auto-gru")))]
 pub(crate) type ArchConfig = crate::ppo::model::seq::SeqActorConfig;
-#[cfg(feature = "conclave")]
+
+#[cfg(all(feature = "conclave", not(any(feature = "auto-tfx", feature = "auto-gru"))))]
 pub(crate) type Arch = crate::ppo::model::conclave::ConclaveActor<BurnAutoDiff>;
-#[cfg(feature = "conclave")]
+#[cfg(all(feature = "conclave", not(any(feature = "auto-tfx", feature = "auto-gru"))))]
 pub(crate) type ArchConfig = crate::ppo::model::conclave::ConclaveActorConfig;
+
+// ── Autoregressive architectures ─────────────────────────────────────────────
+#[cfg(feature = "auto-tfx")]
+pub(crate) type Arch = crate::ppo::model::auto_tfx::AutoTfxActor<BurnAutoDiff>;
+#[cfg(feature = "auto-tfx")]
+pub(crate) type ArchConfig = crate::ppo::model::auto_tfx::AutoTfxConfig;
+
+#[cfg(feature = "auto-gru")]
+pub(crate) type Arch = crate::ppo::model::auto_gru::AutoGruActor<BurnAutoDiff>;
+#[cfg(feature = "auto-gru")]
+pub(crate) type ArchConfig = crate::ppo::model::auto_gru::AutoGruConfig;
+
+// ── Unified init/cfg helpers (called from train.rs and checkpoint.rs) ─────────
+
+/// Initialise the Arch model. Dispatches to the correct trait (Actor vs AutoActor).
+pub(crate) fn arch_init(cfg: ArchConfig, device: &BurnDevice) -> Arch {
+    #[cfg(not(any(feature = "auto-tfx", feature = "auto-gru")))]
+    {
+        use crate::ppo::model::Actor;
+        <Arch as Actor<BurnAutoDiff>>::init(cfg, device)
+    }
+    #[cfg(any(feature = "auto-tfx", feature = "auto-gru"))]
+    {
+        use crate::ppo::model::AutoActor;
+        <Arch as AutoActor<BurnAutoDiff>>::init(cfg, device)
+    }
+}
+
+/// Build the ArchConfig from the training Cfg.
+pub(crate) fn arch_cfg(cfg: &Cfg) -> ArchConfig {
+    #[cfg(not(any(feature = "auto-tfx", feature = "auto-gru")))]
+    {
+        use crate::ppo::model::Actor;
+        <Arch as Actor<BurnAutoDiff>>::cfg(cfg)
+    }
+    #[cfg(any(feature = "auto-tfx", feature = "auto-gru"))]
+    {
+        use crate::ppo::model::AutoActor;
+        <Arch as AutoActor<BurnAutoDiff>>::cfg(cfg)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Cfg {

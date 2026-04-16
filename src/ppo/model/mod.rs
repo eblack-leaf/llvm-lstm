@@ -1,5 +1,9 @@
 pub(crate) mod conclave;
 pub(crate) mod seq;
+#[cfg(feature = "auto-tfx")]
+pub(crate) mod auto_tfx;
+#[cfg(feature = "auto-gru")]
+pub(crate) mod auto_gru;
 
 use crate::config::Cfg;
 use crate::config::{BurnBackend, BurnDevice};
@@ -150,4 +154,78 @@ pub(crate) trait Actor<B: Backend>: Module<B> + Sized {
     fn init(cfg: Self::Config, device: &B::Device) -> Self;
     fn forward(&self, cfg: &Cfg, input: Input<B>) -> Output<B>;
     fn cfg(cfg: &Cfg) -> Self::Config;
+}
+
+/// Autoregressive actor: processes one step at a time, sees the *actual updated IR*
+/// after each applied pass instead of the fixed initial IR histogram.
+///
+/// Collection uses `infer_step_stateful` (O(K) for GRU, O(K²) for TFX — inherent).
+/// PPO update uses `replay_batch` (one batched call per mini-batch for both models).
+pub(crate) trait AutoActor<B: Backend<FloatElem = f32>>: Module<B> + Sized {
+    type Config: Clone;
+    fn init(cfg: Self::Config, device: &B::Device) -> Self;
+    fn cfg(cfg: &Cfg) -> Self::Config;
+
+    /// Stateful single-step inference for O(K) collection.
+    ///
+    /// * `ir_features_so_far` — IR histograms steps 0..=t; `[t]` is current IR.
+    /// * `taken_actions`      — action indices chosen at steps 0..t-1 (length = t).
+    /// * `hidden`             — opaque hidden state from the previous call, `None` at step 0.
+    ///
+    /// Returns `(logits[num_actions], value, new_hidden)`.
+    ///
+    /// Default: delegates to `infer_step` (correct but O(K²) for stateful models).
+    /// GRU overrides with a single recurrent step (O(1)), threading `hidden` as the
+    /// serialised GRU hidden vector.
+    fn infer_step_stateful(
+        &self,
+        ir_features_so_far: &[Vec<f32>],
+        taken_actions: &[usize],
+        hidden: Option<Vec<f32>>,
+        device: &B::Device,
+    ) -> (Vec<f32>, f32, Option<Vec<f32>>) {
+        let (logits, value) = self.infer_step(ir_features_so_far, taken_actions, device);
+        (logits, value, None)
+    }
+
+    /// Single-episode inference (used internally and for debugging).
+    fn infer_step(
+        &self,
+        ir_features_so_far: &[Vec<f32>],
+        taken_actions: &[usize],
+        device: &B::Device,
+    ) -> (Vec<f32>, f32);
+
+    /// Single-episode training replay (used internally by `replay_batch` default impl).
+    fn replay_episode(
+        &self,
+        ir_features_per_step: &[Vec<f32>],
+        taken_actions: &[usize],
+        device: &B::Device,
+    ) -> (Tensor<B, 2>, Tensor<B, 1>);
+
+    /// Batched PPO replay for a full mini-batch.
+    ///
+    /// * `batch_ir_features`   — per-episode IR histograms; `[i][t]` = features before step t.
+    /// * `batch_taken_actions` — per-episode action indices; `[i][t]` = action taken at step t.
+    ///
+    /// Returns `(logits [Σep_len, A], values [Σep_len])` in episode-contiguous flat order.
+    ///
+    /// Default: serial loop over `replay_episode` (correct, but no cross-episode batching).
+    /// Both GRU and TFX override this with efficient batched implementations.
+    fn replay_batch(
+        &self,
+        batch_ir_features: &[&[Vec<f32>]],
+        batch_taken_actions: &[&[usize]],
+        device: &B::Device,
+    ) -> (Tensor<B, 2>, Tensor<B, 1>) {
+        let mut logits_list = Vec::new();
+        let mut values_list = Vec::new();
+        for (&ir, &acts) in batch_ir_features.iter().zip(batch_taken_actions.iter()) {
+            let (l, v) = self.replay_episode(ir, acts, device);
+            logits_list.push(l);
+            values_list.push(v);
+        }
+        (Tensor::cat(logits_list, 0), Tensor::cat(values_list, 0))
+    }
 }

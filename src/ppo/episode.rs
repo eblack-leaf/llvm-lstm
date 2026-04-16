@@ -20,4 +20,7 @@ pub(crate) struct Results {
     /// Instruction count at each step: instr_counts[0] = base IR, instr_counts[t+1] = after step t.
     /// Length = ep_len + 1 (base + one per executed action).
     pub(crate) instr_counts: Vec<usize>,
+    /// Per-step IR feature vectors: ir_features_per_step[t] = chunked histogram of IR *before* step t.
+    /// Populated by the autoregressive collection path; empty vec for the parallel path.
+    pub(crate) ir_features_per_step: Vec<Vec<f32>>,
 }

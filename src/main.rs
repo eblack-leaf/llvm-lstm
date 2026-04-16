@@ -12,6 +12,7 @@ use crate::ppo::returns::episode_return::EpisodeReturn;
 use crate::ppo::returns::instruction_proxy::InstructionProxyReturn;
 use crate::ppo::returns::instruction_weighted_terminal::InstructionWeightedTerminal;
 use crate::ppo::returns::ir_count_return::IrCountReturn;
+use crate::ppo::returns::ir_step_return::IrStepReturn;
 use crate::train::Trainer;
 use burn::module::AutodiffModule;
 use clap::{Parser, Subcommand};
@@ -47,7 +48,7 @@ enum Command {
         epochs: usize,
         #[arg(long, default_value = "4")]
         ppo_epochs: usize,
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "32")]
         episodes: usize,
         #[arg(long, default_value = "2")]
         benchmark_runs: usize,
@@ -68,7 +69,7 @@ enum Command {
         #[arg(long, default_value = "0.01")]
         entropy_coef: f32,
         /// Number of episodes per PPO mini-batch.
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "32")]
         mini_batch_size: usize,
         #[arg(long)]
         cache_file: Option<PathBuf>,
@@ -81,10 +82,14 @@ enum Command {
         /// Only used when --returns=proxy.
         #[arg(long, default_value = "1.0")]
         proxy_alpha: f32,
-        /// Return signal: episode (uniform terminal), proxy (blended instr+terminal),
-        /// weighted (terminal weighted by per-slot instr reduction; no-ops get 0),
-        /// predictor (per-step marginal from pretrained SpeedupPredictor).
-        #[arg(long, default_value = "predictor")]
+        /// Return signal:
+        ///   episode  — uniform terminal speedup across all slots
+        ///   proxy    — blended instr+terminal (see --proxy-alpha)
+        ///   weighted — terminal weighted by per-slot instr reduction; no-ops get 0
+        ///   predictor — per-step marginal from pretrained SpeedupPredictor
+        ///   ir       — terminal IR-count reduction, uniform across slots
+        ///   ir-step  — per-step IR-count delta (dense; ideal for --features auto-tfx/gru)
+        #[arg(long, default_value = "ir-step")]
         returns: String,
         /// Path to predictor checkpoint directory. Required when --returns=predictor.
         #[arg(long)]
@@ -304,7 +309,7 @@ fn main() {
                 noop_threshold,
                 delta_threshold,
                 ir_chunks,
-                skip_benchmark: returns == "ir",
+                skip_benchmark: returns == "ir" || returns == "ir-step",
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
@@ -327,6 +332,7 @@ fn main() {
                     )
                 }
                 "ir" => Box::new(IrCountReturn),
+                "ir-step" => Box::new(IrStepReturn),
                 _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(
