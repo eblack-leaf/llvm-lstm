@@ -46,7 +46,7 @@ enum Command {
         opt: String,
         #[arg(long, default_value = "100")]
         epochs: usize,
-        #[arg(long, default_value = "4")]
+        #[arg(long, default_value = "2")]
         ppo_epochs: usize,
         #[arg(long, default_value = "32")]
         episodes: usize,
@@ -58,16 +58,22 @@ enum Command {
         baseline_runs: usize,
         #[arg(long, default_value = "200")]
         baseline_iters: usize,
-        #[arg(long, default_value = "30")]
+        #[arg(long, default_value = "20")]
         max_seq_len: usize,
-        #[arg(long, default_value = "3e-3")]
+        #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
-        #[arg(long, default_value = "0.1")]
+        #[arg(long, default_value = "0.2")]
         clip_epsilon: f32,
         #[arg(long, default_value = "0.5")]
         value_coef: f32,
-        #[arg(long, default_value = "0.01")]
+        #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
+        /// PPO inner-loop KL early-stop threshold.
+        /// If per-minibatch KL exceeds this after the first inner epoch, the
+        /// remaining inner epochs are skipped.  Prevents entropy collapse from
+        /// a single over-large update.  Set to 0 to disable.
+        #[arg(long, default_value = "0.015")]
+        kl_target: f32,
         /// Number of episodes per PPO mini-batch.
         #[arg(long, default_value = "32")]
         mini_batch_size: usize,
@@ -285,6 +291,7 @@ fn main() {
             predictor_noop_threshold,
             predictor_scale,
             ir_chunks,
+            kl_target,
         } => {
             let cfg = Cfg {
                 functions: directory,
@@ -310,6 +317,7 @@ fn main() {
                 delta_threshold,
                 ir_chunks,
                 skip_benchmark: returns == "ir" || returns == "ir-step",
+                kl_target,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =

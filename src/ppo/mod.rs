@@ -27,6 +27,8 @@ pub(crate) struct Ppo {
     entropy_coef: f32,
     ppo_epochs: usize,
     mini_batch_size: usize,
+    /// Stop remaining inner epochs if per-minibatch KL exceeds this (0 = disabled).
+    kl_target: f32,
 }
 
 impl Ppo {
@@ -37,6 +39,7 @@ impl Ppo {
             entropy_coef: cfg.entropy_coef,
             ppo_epochs: cfg.ppo_epochs,
             mini_batch_size: cfg.mini_batch_size,
+            kl_target: cfg.kl_target,
         }
     }
 
@@ -125,7 +128,8 @@ impl Ppo {
         let mut sum_kl = 0.0_f32;
         let mut total_chunks_processed = 0usize;
 
-        for ppo_ep in 0..self.ppo_epochs {
+        let mut kl_early_stop = false;
+        'outer: for ppo_ep in 0..self.ppo_epochs {
             for chunk_idx in 0..num_chunks {
                 let start_ep = chunk_idx * self.mini_batch_size;
                 let end_ep = (start_ep + self.mini_batch_size).min(num_episodes);
@@ -241,6 +245,16 @@ impl Ppo {
                 sum_kl += kl_metric;
                 total_chunks_processed += 1;
 
+                // KL early stopping: abort remaining inner epochs when exceeded.
+                // Only after the first inner epoch so we always do at least one update.
+                if self.kl_target > 0.0 && kl_metric > self.kl_target && ppo_ep > 0 {
+                    ppo_bar.set_message(format!("KL {kl_metric:.3} > {:.3} — early stop", self.kl_target));
+                    ppo_bar.inc(num_chunks as u64 - chunk_idx as u64 - 1
+                        + (self.ppo_epochs - ppo_ep - 1) as u64 * num_chunks as u64);
+                    kl_early_stop = true;
+                    break 'outer;
+                }
+
                 ppo_bar.set_message(format!(
                     "ep {}/{} mb {}/{} loss={:.4}",
                     ppo_ep + 1,
@@ -298,7 +312,7 @@ impl Ppo {
         let mut sum_kl = 0.0_f32;
         let mut total_chunks = 0usize;
 
-        for ppo_ep in 0..self.ppo_epochs {
+        'outer: for ppo_ep in 0..self.ppo_epochs {
             for chunk_idx in 0..num_chunks {
                 let start = chunk_idx * self.mini_batch_size;
                 let end = (start + self.mini_batch_size).min(num_episodes);
@@ -418,6 +432,13 @@ impl Ppo {
                 sum_entropy += e_m;
                 sum_kl += kl_m;
                 total_chunks += 1;
+
+                if self.kl_target > 0.0 && kl_m > self.kl_target && ppo_ep > 0 {
+                    ppo_bar.set_message(format!("KL {kl_m:.3} > {:.3} — early stop", self.kl_target));
+                    ppo_bar.inc(num_chunks as u64 - chunk_idx as u64 - 1
+                        + (self.ppo_epochs - ppo_ep - 1) as u64 * num_chunks as u64);
+                    break 'outer;
+                }
 
                 ppo_bar.set_message(format!(
                     "ep {}/{} mb {}/{} loss={:.4}",

@@ -98,4 +98,6 @@ pub(crate) struct Cfg {
     pub(crate) ir_chunks: usize,
     /// When true, skip per-episode benchmarking and use IR-count reduction as `episode_return`.
     pub(crate) skip_benchmark: bool,
+    /// PPO inner-loop KL early-stop threshold (0 = disabled).
+    pub(crate) kl_target: f32,
 }
