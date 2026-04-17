@@ -13,6 +13,7 @@ use burn::tensor::{Tensor, TensorData};
 use indicatif::ProgressBar;
 
 pub(crate) mod advantages;
+pub(crate) mod noop;
 pub(crate) mod checkpoint;
 pub(crate) mod episode;
 mod flat_batch;

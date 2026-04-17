@@ -100,17 +100,16 @@ enum Command {
         /// Path to predictor checkpoint directory. Required when --returns=predictor.
         #[arg(long)]
         predictor_checkpoint: Option<PathBuf>,
-        /// Instruction-count delta below which a step is considered a no-op and gets zero return (predictor mode).
-        #[arg(long, default_value = "0.01")]
-        predictor_noop_threshold: f32,
         /// Scale factor applied to all predictor returns.
         #[arg(long, default_value = "1.0")]
         predictor_scale: f32,
-        /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
+        /// |instr_delta| below this is a candidate no-op.
         #[arg(long, default_value = "0.01")]
         noop_threshold: f32,
-        /// Penalty subtracted from no-op steps (|delta| < noop_threshold, action != Stop).
-        /// Teaches the policy to prefer Stop over repeating useless passes. 0 = disabled.
+        /// L1 feature-vector distance below which a step is also structurally a no-op.
+        #[arg(long, default_value = "0.05")]
+        noop_feature_threshold: f32,
+        /// Penalty subtracted when both noop conditions are met and action != Stop.
         #[arg(long, default_value = "0.025")]
         noop_penalty: f32,
         #[arg(long, default_value = "0.01")]
@@ -316,14 +315,19 @@ fn main() {
             proxy_alpha,
             returns,
             noop_threshold,
+            noop_feature_threshold,
             noop_penalty,
             delta_threshold,
             predictor_checkpoint,
-            predictor_noop_threshold,
             predictor_scale,
             ir_chunks,
             kl_target,
         } => {
+            let noop = crate::ppo::noop::NoOp {
+                count_threshold: noop_threshold,
+                feature_threshold: noop_feature_threshold,
+                penalty: noop_penalty,
+            };
             let cfg = Cfg {
                 functions: directory,
                 clang,
@@ -344,7 +348,7 @@ fn main() {
                 entropy_coef,
                 mini_batch_size,
                 cache_file,
-                noop_threshold,
+                noop,
                 delta_threshold,
                 ir_chunks,
                 skip_benchmark: returns == "ir" || returns == "ir-step",
@@ -364,17 +368,14 @@ fn main() {
                     Box::new(
                         crate::ppo::returns::predictor_return::PredictorReturn::load(
                             &ckpt,
-                            predictor_noop_threshold,
+                            noop,
                             predictor_scale,
                         )
                         .expect("failed to load predictor checkpoint"),
                     )
                 }
                 "ir" => Box::new(IrCountReturn),
-                "ir-step" => Box::new(IrStepReturn {
-                    noop_penalty,
-                    noop_threshold,
-                }),
+                "ir-step" => Box::new(IrStepReturn { noop }),
                 _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(

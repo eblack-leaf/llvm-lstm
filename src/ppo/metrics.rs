@@ -108,7 +108,7 @@ pub(crate) struct Metrics {
 
     noop_steps: u64,
     total_steps: u64,
-    noop_threshold: f32,
+    noop: crate::ppo::noop::NoOp,
 
     pub(crate) per_func_ir_ms_total: u64,
     pub(crate) per_func_ir_ms_count: u32,
@@ -118,7 +118,7 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    pub(crate) fn new(ema_alpha: f32, noop_threshold: f32) -> Self {
+    pub(crate) fn new(ema_alpha: f32, noop: crate::ppo::noop::NoOp) -> Self {
         Self {
             epoch: 0,
             ema_alpha,
@@ -137,7 +137,7 @@ impl Metrics {
             bench_cache_misses: 0,
             noop_steps: 0,
             total_steps: 0,
-            noop_threshold,
+            noop,
             per_func_ir_ms_total: 0,
             per_func_ir_ms_count: 0,
             episode_collection_ms: 0,
@@ -161,12 +161,17 @@ impl Metrics {
                 .update(r.episode_return);
             any_speedup = true;
 
-            // Count no-op steps: |step_delta| < threshold.
+            // Count no-op steps using the unified NoOp check.
             for t in 0..r.ep_len {
                 let before = r.instr_counts.get(t).copied().unwrap_or(1);
                 let after = r.instr_counts.get(t + 1).copied().unwrap_or(0);
+                let delta = step_delta(before, after);
                 self.total_steps += 1;
-                if step_delta(before, after).abs() < self.noop_threshold {
+                if self.noop.is_noop(
+                    delta,
+                    r.ir_features_per_step.get(t).map(Vec::as_slice),
+                    r.ir_features_per_step.get(t + 1).map(Vec::as_slice),
+                ) {
                     self.noop_steps += 1;
                 }
             }

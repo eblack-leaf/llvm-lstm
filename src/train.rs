@@ -69,7 +69,7 @@ impl Trainer {
             functions.functions.len() as u64,
         )
         .expect("logger init");
-        let mut metrics = Metrics::new(0.05, self.cfg.noop_threshold);
+        let mut metrics = Metrics::new(0.05, self.cfg.noop);
 
         // Compile IR and collect baselines before the training loop.
         for func in &mut functions.functions {
@@ -312,6 +312,8 @@ impl Trainer {
 
                     let mut instr_counts = Vec::with_capacity(ep_len + 1);
                     instr_counts.push(func.ir.instruction_count());
+                    let mut ir_features_per_step: Vec<Vec<f32>> = Vec::with_capacity(ep_len + 1);
+                    ir_features_per_step.push(func.ir.model_features(self.cfg.ir_chunks));
 
                     for (step, &action) in actions.iter().enumerate() {
                         if action != Pass::Stop {
@@ -320,6 +322,7 @@ impl Trainer {
                                 .expect("apply_one");
                         }
                         instr_counts.push(current_ir.instruction_count());
+                        ir_features_per_step.push(current_ir.model_features(self.cfg.ir_chunks));
                     }
 
                     // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
@@ -368,7 +371,7 @@ impl Trainer {
                         episode_return: speedup,
                         baselines: baselines.clone(),
                         instr_counts,
-                        ir_features_per_step: vec![], // parallel path — not used
+                        ir_features_per_step,
                     }
                 })
                 .collect();

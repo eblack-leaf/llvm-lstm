@@ -23,14 +23,14 @@ pub(crate) struct PredictorReturn {
     device: BurnDevice,
     max_seq_len: usize,
     ir_feature_dim: usize,
-    noop_threshold: f32,
+    noop: crate::ppo::noop::NoOp,
     scale: f32,
 }
 
 impl PredictorReturn {
     pub(crate) fn load(
         checkpoint_dir: &Path,
-        noop_threshold: f32,
+        noop: crate::ppo::noop::NoOp,
         scale: f32,
     ) -> anyhow::Result<Self> {
         let device = BurnDevice::default();
@@ -52,7 +52,7 @@ impl PredictorReturn {
             device,
             max_seq_len: config.max_seq_len,
             ir_feature_dim,
-            noop_threshold,
+            noop,
             scale,
         })
     }
@@ -123,11 +123,12 @@ impl Returns for PredictorReturn {
             let delta = pred - prev;
             let instr_before = results.instr_counts.get(t).copied().unwrap_or(1);
             let instr_after = results.instr_counts.get(t + 1).copied().unwrap_or(0);
-            // let r = if step_delta(instr_before, instr_after).abs() < self.noop_threshold {
-            //     0.0
-            // } else {
-            //     delta
-            // };
+            let instr_delta = crate::llvm::ir::step_delta(instr_before, instr_after);
+            let _is_noop = self.noop.is_noop(
+                instr_delta,
+                results.ir_features_per_step.get(t).map(Vec::as_slice),
+                results.ir_features_per_step.get(t + 1).map(Vec::as_slice),
+            );
             returns.push(delta * self.scale);
             prev = pred;
         }
