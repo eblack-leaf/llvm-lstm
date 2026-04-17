@@ -186,6 +186,10 @@ enum Command {
         #[arg(long, default_value = "features.json")]
         features: PathBuf,
     },
+    PlotPredictor {
+        #[arg(long, default_value = "predictor_checkpoints/train.jsonl")]
+        log: PathBuf,
+    },
     // Inside Command enum, add:
     Collect {
         #[arg(long, default_value = "checkpoints/data.cache")]
@@ -821,6 +825,20 @@ fn main() {
                 .arg(&script)
                 .arg("--features")
                 .arg(&features)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Command::PlotPredictor { log } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_predictor.py");
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--log")
+                .arg(&log)
                 .status()
                 .expect("failed to spawn python");
             if !status.success() {

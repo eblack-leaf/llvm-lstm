@@ -249,7 +249,7 @@ impl Ppo {
                 // Only after the first inner epoch so we always do at least one update.
                 if self.kl_target > 0.0 && kl_metric > self.kl_target && ppo_ep > 0 {
                     ppo_bar.set_message(format!("KL {kl_metric:.3} > {:.3} — early stop", self.kl_target));
-                    ppo_bar.inc(num_chunks as u64 - chunk_idx as u64 - 1
+                    ppo_bar.inc(num_chunks as u64 - chunk_idx as u64
                         + (self.ppo_epochs - ppo_ep - 1) as u64 * num_chunks as u64);
                     kl_early_stop = true;
                     break 'outer;
@@ -435,7 +435,7 @@ impl Ppo {
 
                 if self.kl_target > 0.0 && kl_m > self.kl_target && ppo_ep > 0 {
                     ppo_bar.set_message(format!("KL {kl_m:.3} > {:.3} — early stop", self.kl_target));
-                    ppo_bar.inc(num_chunks as u64 - chunk_idx as u64 - 1
+                    ppo_bar.inc(num_chunks as u64 - chunk_idx as u64
                         + (self.ppo_epochs - ppo_ep - 1) as u64 * num_chunks as u64);
                     break 'outer;
                 }

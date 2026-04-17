@@ -158,6 +158,7 @@ pub fn train_predictor(
     max_samples: Option<usize>,
     config: SpeedupPredictorConfig,
 ) -> Result<()> {
+    let log_path = checkpoint_dir.join("train.jsonl");
     let device = BurnDevice::default();
 
     let all_samples = crate::predictor::data::load_dataset(dataset_path)?;
@@ -534,6 +535,31 @@ pub fn train_predictor(
             gap, best_marker,
         ));
         epoch_pb.inc(1);
+
+        // Append epoch metrics to JSONL log.
+        {
+            let record = serde_json::json!({
+                "epoch":      epoch,
+                "lr":         lr,
+                "tr_rmse":    tr.rmse,
+                "tr_mae":     tr.mae,
+                "tr_r2":      tr.r2,
+                "tr_bias":    tr.bias,
+                "tr_pred_std": tr.pred_std,
+                "va_rmse":    va.rmse,
+                "va_mae":     va.mae,
+                "va_r2":      va.r2,
+                "va_bias":    va.bias,
+                "gap":        gap,
+                "is_best":    is_best,
+            });
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&log_path)
+            {
+                let _ = writeln!(f, "{}", record);
+            }
+        }
     }
 
     epoch_pb.finish_with_message(format!(
