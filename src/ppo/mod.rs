@@ -249,9 +249,7 @@ impl Ppo {
                 // Only after the first inner epoch so we always do at least one update.
                 if self.kl_target > 0.0 && kl_metric > self.kl_target && ppo_ep > 0 {
                     ppo_bar.set_message(format!("KL {kl_metric:.3} > {:.3} — early stop", self.kl_target));
-                    if let Some(len) = ppo_bar.length() {
-                        ppo_bar.set_position(len);
-                    }
+                    ppo_bar.finish_and_clear();
                     kl_early_stop = true;
                     break 'outer;
                 }
@@ -436,9 +434,7 @@ impl Ppo {
 
                 if self.kl_target > 0.0 && kl_m > self.kl_target && ppo_ep > 0 {
                     ppo_bar.set_message(format!("KL {kl_m:.3} > {:.3} — early stop", self.kl_target));
-                    if let Some(len) = ppo_bar.length() {
-                        ppo_bar.set_position(len);
-                    }
+                    ppo_bar.finish_and_clear();
                     break 'outer;
                 }
 

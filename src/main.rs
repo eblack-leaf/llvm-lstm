@@ -48,7 +48,7 @@ enum Command {
         epochs: usize,
         #[arg(long, default_value = "2")]
         ppo_epochs: usize,
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "256")]
         episodes: usize,
         #[arg(long, default_value = "2")]
         benchmark_runs: usize,
@@ -72,10 +72,10 @@ enum Command {
         /// If per-minibatch KL exceeds this after the first inner epoch, the
         /// remaining inner epochs are skipped.  Prevents entropy collapse from
         /// a single over-large update.  Set to 0 to disable.
-        #[arg(long, default_value = "0.015")]
+        #[arg(long, default_value = "0.05")]
         kl_target: f32,
         /// Number of episodes per PPO mini-batch.
-        #[arg(long, default_value = "64")]
+        #[arg(long, default_value = "128")]
         mini_batch_size: usize,
         #[arg(long)]
         cache_file: Option<PathBuf>,
@@ -111,7 +111,7 @@ enum Command {
         noop_threshold: f32,
         /// Penalty subtracted from no-op steps (|delta| < noop_threshold, action != Stop).
         /// Teaches the policy to prefer Stop over repeating useless passes. 0 = disabled.
-        #[arg(long, default_value = "0.05")]
+        #[arg(long, default_value = "0.025")]
         noop_penalty: f32,
         #[arg(long, default_value = "0.01")]
         delta_threshold: f32,
