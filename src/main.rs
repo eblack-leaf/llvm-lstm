@@ -240,7 +240,7 @@ enum Command {
         work_dir: PathBuf,
         #[arg(long, default_value = "50")]
         epochs: usize,
-        #[arg(long, default_value = "1024")]
+        #[arg(long, default_value = "2048")]
         batch_size: usize,
         #[arg(long, default_value = "1e-3")]
         learning_rate: f64,
