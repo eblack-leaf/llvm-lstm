@@ -109,6 +109,10 @@ enum Command {
         /// Steps with |instr_delta| <= this value are reported as no-ops in metrics (default 0 = exact no-op).
         #[arg(long, default_value = "0.01")]
         noop_threshold: f32,
+        /// Penalty subtracted from no-op steps (|delta| < noop_threshold, action != Stop).
+        /// Teaches the policy to prefer Stop over repeating useless passes. 0 = disabled.
+        #[arg(long, default_value = "0.05")]
+        noop_penalty: f32,
         #[arg(long, default_value = "0.01")]
         delta_threshold: f32,
         /// Number of positional chunks for the IR opcode histogram.
@@ -312,6 +316,7 @@ fn main() {
             proxy_alpha,
             returns,
             noop_threshold,
+            noop_penalty,
             delta_threshold,
             predictor_checkpoint,
             predictor_noop_threshold,
@@ -366,7 +371,10 @@ fn main() {
                     )
                 }
                 "ir" => Box::new(IrCountReturn),
-                "ir-step" => Box::new(IrStepReturn),
+                "ir-step" => Box::new(IrStepReturn {
+                    noop_penalty,
+                    noop_threshold,
+                }),
                 _ => Box::new(EpisodeReturn),
             };
             let trainer = Trainer::new(

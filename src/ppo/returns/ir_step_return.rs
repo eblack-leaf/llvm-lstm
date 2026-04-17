@@ -1,3 +1,4 @@
+use crate::llvm::pass::Pass;
 use crate::ppo::episode::Results;
 use crate::ppo::returns::Returns;
 
@@ -6,11 +7,16 @@ use crate::ppo::returns::Returns;
 /// Positive when step t removed instructions. Zero when it had no effect.
 /// Negative when step t *added* instructions.
 ///
-/// This is the densest possible IR-based signal — every step gets its own
-/// reward reflecting its marginal contribution to code size reduction.
-/// Best paired with the autoregressive collection path, but also valid for
-/// the parallel path (same values, different learning dynamics).
-pub(crate) struct IrStepReturn;
+/// `noop_penalty`: subtracted from steps where |delta| < threshold and the
+/// action is not Stop.  This makes Stop strictly preferable to repeating
+/// passes that no longer help, teaching the policy to terminate rather than
+/// run out the sequence.  Set to 0.0 to disable.
+///
+/// `noop_threshold`: |delta| below this is considered a wasted step.
+pub(crate) struct IrStepReturn {
+    pub(crate) noop_penalty: f32,
+    pub(crate) noop_threshold: f32,
+}
 
 impl Returns for IrStepReturn {
     fn compute(&self, results: &Results) -> Vec<f32> {
@@ -19,7 +25,19 @@ impl Returns for IrStepReturn {
             .instr_counts
             .windows(2)
             .take(results.ep_len)
-            .map(|w| (w[0] as f32 - w[1] as f32) / base)
+            .enumerate()
+            .map(|(t, w)| {
+                let delta = (w[0] as f32 - w[1] as f32) / base;
+                let action = results.actions.get(t).copied().unwrap_or(Pass::Stop);
+                if self.noop_penalty > 0.0
+                    && action != Pass::Stop
+                    && delta.abs() < self.noop_threshold
+                {
+                    delta - self.noop_penalty
+                } else {
+                    delta
+                }
+            })
             .collect()
     }
 }
