@@ -1,6 +1,6 @@
 use crate::config::{Arch, BurnAutoDiff, BurnBackend, BurnDevice, Cfg, arch_cfg, arch_init};
 use crate::llvm::functions::Functions;
-use crate::llvm::ir::{ir_features, step_delta};
+use crate::llvm::ir::step_delta;
 use crate::llvm::pass::Pass;
 use crate::llvm::top_sequences::TopSequences;
 use crate::llvm::{BenchCache, Llvm, load_cache, save_cache};
@@ -88,10 +88,7 @@ impl Trainer {
                     .expect("collect_baselines"),
             );
 
-            func.ir_features = Some(ir_features(
-                &func.ir.opcode_sequence(),
-                self.cfg.ir_chunks,
-            ));
+            func.ir_features = Some(func.ir.model_features(self.cfg.ir_chunks));
 
             metrics.record_func_ir_ms(t0.elapsed().as_millis() as u64);
             logger.log_baseline_progress(&func.name, t0.elapsed().as_millis() as u64);
@@ -168,10 +165,7 @@ impl Trainer {
                         let mut hidden_state: Option<Vec<f32>> = None;
 
                         for step in 0..k {
-                            let ir_feat = ir_features(
-                                &current_ir.opcode_sequence(),
-                                self.cfg.ir_chunks,
-                            );
+                            let ir_feat = current_ir.model_features(self.cfg.ir_chunks);
                             ir_features_collected.push(ir_feat);
 
                             let (logits, value, new_hidden) = actor.infer_step_stateful(
@@ -235,10 +229,7 @@ impl Trainer {
                         col_bar.inc(1);
 
                         // Terminal IR features (for the ir_features field used by some returns).
-                        let terminal_ir_feat = ir_features(
-                            &current_ir.opcode_sequence(),
-                            self.cfg.ir_chunks,
-                        );
+                        let terminal_ir_feat = current_ir.model_features(self.cfg.ir_chunks);
 
                         Results {
                             func_name,

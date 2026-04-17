@@ -140,13 +140,36 @@ impl Ir {
     pub(crate) fn features(&self) -> Features {
         Features::from_ll_str(&self.read_content()).unwrap_or_default()
     }
-    /// Total instruction count for this IR file.
+    /// Combined IR size: instructions + metadata node definitions.
+    /// Using both avoids treating metadata-only passes (loop-rotate, licm,
+    /// loop-simplify) as no-ops — they don't change instruction count but
+    /// do create/restructure !llvm.loop and TBAA metadata nodes.
     pub(crate) fn instruction_count(&self) -> usize {
-        self.features().total_instruction_count as usize
+        let f = self.features();
+        f.total_instruction_count as usize + f.metadata_node_count as usize
     }
     /// Raw opcode-ID sequence (unpadded) for this IR file.
     pub(crate) fn opcode_sequence(&self) -> Vec<u8> {
         extract_opcode_sequence(&self.read_content())
+    }
+    /// Full model feature vector (opcode + metadata chunk deltas).
+    pub(crate) fn model_features(&self, k: usize) -> Vec<f32> {
+        ir_features(&self.read_content(), k)
+    }
+}
+
+/// Metadata reference kinds that appear on instruction lines.
+/// Counts per instruction position, used alongside opcode categories in chunk deltas.
+pub(crate) const META_CATEGORY_NAMES: [&str; 4] = ["tbaa", "loop", "alias_scope", "noalias"];
+pub(crate) const META_CATEGORY_COUNT: usize = 4;
+
+fn meta_ref_category(tag: &str) -> Option<usize> {
+    match tag {
+        "tbaa" | "tbaa.struct" => Some(0),
+        "llvm.loop"            => Some(1),
+        "alias.scope"          => Some(2),
+        "noalias"              => Some(3),
+        _                      => None,
     }
 }
 
@@ -189,53 +212,143 @@ pub(crate) fn opcode_id_to_category(id: u8) -> usize {
 }
 
 /// Total IR feature dimension for a given number of chunks.
-/// Layout: (k-1) consecutive chunk-to-chunk deltas, each IR_CATEGORY_COUNT wide.
-///   chunk_deltas : (k-1) * IR_CATEGORY_COUNT
+/// Layout: (k-1) consecutive chunk-to-chunk deltas, each (IR_CATEGORY_COUNT + META_CATEGORY_COUNT) wide.
+///   opcode_deltas : (k-1) * IR_CATEGORY_COUNT
+///   meta_deltas   : (k-1) * META_CATEGORY_COUNT
 pub(crate) fn ir_feature_dim(k: usize) -> usize {
-    k.saturating_sub(1) * IR_CATEGORY_COUNT
+    k.saturating_sub(1) * (IR_CATEGORY_COUNT + META_CATEGORY_COUNT)
 }
 
-/// Build the IR feature vector from a raw opcode sequence.
+/// Build the IR feature vector from raw IR text content.
 ///
-/// Computes a normalised per-chunk category histogram then returns the
-/// consecutive differences: `chunk[i+1] - chunk[i]` for i in 0..k-1.
-/// Positive values mean a category grows in that region; negative means it
-/// shrinks.  This captures the *shape* of the code rather than its absolute
-/// composition, and is far more discriminative across functions than the
-/// histogram itself.
+/// Single pass extracts both:
+///  - Opcode category sequence (12 categories)
+///  - Metadata reference sequence (4 categories: tbaa, loop, alias_scope, noalias)
 ///
-/// Output: `(k-1) * IR_CATEGORY_COUNT` floats in `[-1, 1]`.
-pub(crate) fn ir_features(opcodes: &[u8], k: usize) -> Vec<f32> {
+/// Both are split into k positional chunks, normalised, then differenced
+/// chunk[i+1] - chunk[i] to produce (k-1) delta vectors.  Opcode and
+/// metadata deltas are concatenated: opcode deltas first, then meta deltas.
+///
+/// Output: `(k-1) * (IR_CATEGORY_COUNT + META_CATEGORY_COUNT)` floats.
+pub(crate) fn ir_features(content: &str, k: usize) -> Vec<f32> {
     let total_dim = ir_feature_dim(k);
-    if opcodes.is_empty() || k <= 1 {
+    if content.is_empty() || k <= 1 {
         return vec![0.0f32; total_dim];
     }
-    let n = opcodes.len();
 
-    // Build normalised per-chunk histogram.
-    let mut hist = vec![0.0f32; k * IR_CATEGORY_COUNT];
-    for (i, &op) in opcodes.iter().enumerate() {
-        let chunk = (i * k / n).min(k - 1);
-        let cat = opcode_id_to_category(op);
-        hist[chunk * IR_CATEGORY_COUNT + cat] += 1.0;
+    // ── Single-pass extraction ────────────────────────────────────────────────
+    // Each token: (opcode_category, [meta_counts; 4])
+    let mut tokens: Vec<(usize, [u8; META_CATEGORY_COUNT])> = Vec::new();
+    let mut in_function = false;
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with(';') || t.is_empty() {
+            continue;
+        }
+        if t.starts_with("define ") {
+            in_function = true;
+            tokens.push((opcode_id_to_category(BB_SEP_OPCODE), [0; META_CATEGORY_COUNT]));
+            continue;
+        }
+        if t == "}" {
+            in_function = false;
+            continue;
+        }
+        if !in_function {
+            continue;
+        }
+        // BB label → block boundary token, no metadata refs.
+        if let Some(colon_pos) = t.find(':') {
+            let before = &t[..colon_pos];
+            if !before.is_empty()
+                && !before.contains(' ')
+                && !before.starts_with('%')
+                && !before.starts_with('@')
+                && !before.starts_with('!')
+                && !before.contains('(')
+                && !t.contains(" = ")
+            {
+                tokens.push((opcode_id_to_category(BB_SEP_OPCODE), [0; META_CATEGORY_COUNT]));
+                continue;
+            }
+        }
+        if let Some(op) = extract_opcode(t) {
+            let opcode_cat = opcode_id_to_category(opcode_to_id(op));
+            // Count named metadata references on this instruction line.
+            let mut meta = [0u8; META_CATEGORY_COUNT];
+            let mut rest = t;
+            while let Some(pos) = rest.find('!') {
+                rest = &rest[pos + 1..];
+                // Named ref: starts with a letter (not a digit = numbered node).
+                if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                    let name: &str = rest
+                        .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if let Some(cat) = meta_ref_category(name) {
+                        meta[cat] = meta[cat].saturating_add(1);
+                    }
+                }
+            }
+            tokens.push((opcode_cat, meta));
+        }
     }
+
+    let n = tokens.len();
+    if n == 0 {
+        return vec![0.0f32; total_dim];
+    }
+
+    // ── Per-chunk histograms ──────────────────────────────────────────────────
+    let mut op_hist   = vec![0.0f32; k * IR_CATEGORY_COUNT];
+    let mut meta_hist = vec![0.0f32; k * META_CATEGORY_COUNT];
+    // Also track instruction count per chunk for meta rate normalisation.
+    let mut chunk_instr = vec![0.0f32; k];
+
+    for (i, &(op_cat, ref meta)) in tokens.iter().enumerate() {
+        let c = (i * k / n).min(k - 1);
+        op_hist[c * IR_CATEGORY_COUNT + op_cat] += 1.0;
+        if op_cat != opcode_id_to_category(BB_SEP_OPCODE) {
+            chunk_instr[c] += 1.0;
+            for m in 0..META_CATEGORY_COUNT {
+                meta_hist[c * META_CATEGORY_COUNT + m] += meta[m] as f32;
+            }
+        }
+    }
+
+    // Normalise opcode histogram (each chunk sums to 1).
     for c in 0..k {
         let base = c * IR_CATEGORY_COUNT;
-        let total: f32 = hist[base..base + IR_CATEGORY_COUNT].iter().sum();
+        let total: f32 = op_hist[base..base + IR_CATEGORY_COUNT].iter().sum();
         if total > 0.0 {
-            for v in &mut hist[base..base + IR_CATEGORY_COUNT] {
+            for v in &mut op_hist[base..base + IR_CATEGORY_COUNT] {
                 *v /= total;
             }
         }
     }
 
-    // Consecutive deltas: chunk[i+1] - chunk[i].
+    // Normalise metadata as rate: refs-per-instruction in each chunk.
+    for c in 0..k {
+        let instr = chunk_instr[c].max(1.0);
+        let base = c * META_CATEGORY_COUNT;
+        for v in &mut meta_hist[base..base + META_CATEGORY_COUNT] {
+            *v /= instr;
+        }
+    }
+
+    // ── Consecutive deltas ────────────────────────────────────────────────────
     let mut out = Vec::with_capacity(total_dim);
     for c in 0..k - 1 {
-        let a = c * IR_CATEGORY_COUNT;
-        let b = (c + 1) * IR_CATEGORY_COUNT;
+        let a_op = c * IR_CATEGORY_COUNT;
+        let b_op = (c + 1) * IR_CATEGORY_COUNT;
         for cat in 0..IR_CATEGORY_COUNT {
-            out.push(hist[b + cat] - hist[a + cat]);
+            out.push(op_hist[b_op + cat] - op_hist[a_op + cat]);
+        }
+        let a_m = c * META_CATEGORY_COUNT;
+        let b_m = (c + 1) * META_CATEGORY_COUNT;
+        for cat in 0..META_CATEGORY_COUNT {
+            out.push(meta_hist[b_m + cat] - meta_hist[a_m + cat]);
         }
     }
     out
@@ -320,6 +433,10 @@ pub(crate) struct Features {
     pub nsw_nuw_count: u32,     // instructions carrying nsw/nuw flags — instcombine strength
     pub prof_metadata_count: u32, // !prof branch weights present — jump-threading/licm quality
     pub freeze_count: u32,      // freeze instructions — post-SROA/instcombine marker
+    /// Number of module-level metadata node definitions (`!N = ...`).
+    /// Captures structural changes made by passes like loop-rotate, licm, and
+    /// loop-simplify that reorganise loop/TBAA metadata without touching instructions.
+    pub metadata_node_count: u32,
 }
 impl Features {
     pub fn from_ll_str(content: &str) -> Result<Self> {
@@ -335,6 +452,12 @@ impl Features {
         // Whole-file metadata counts — scan before the per-line loop.
         for line in content.lines() {
             let t = line.trim();
+            // Module-level metadata node: `!N = ...` (N is a digit).
+            if t.starts_with('!')
+                && t.get(1..2).map_or(false, |c| c.chars().next().map_or(false, |c| c.is_ascii_digit()))
+            {
+                f.metadata_node_count += 1;
+            }
             if t.contains("!tbaa") {
                 f.tbaa_count += 1;
             }
@@ -586,6 +709,7 @@ impl Features {
             ln(self.nsw_nuw_count),
             ln(self.prof_metadata_count),
             ln(self.freeze_count),
+            ln(self.metadata_node_count),
         ]
     }
 }

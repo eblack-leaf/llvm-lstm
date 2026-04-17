@@ -678,8 +678,11 @@ fn main() {
             ir_chunks,
         } => {
             use crate::llvm::ir::{
-                IR_CATEGORY_COUNT, IR_CATEGORY_NAMES, chunked_opcode_histogram, ir_features,
+                IR_CATEGORY_COUNT, IR_CATEGORY_NAMES,
+                META_CATEGORY_COUNT, META_CATEGORY_NAMES,
+                chunked_opcode_histogram, ir_feature_dim,
             };
+            let stride = IR_CATEGORY_COUNT + META_CATEGORY_COUNT;
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, &opt, work_dir.clone());
             let mut functions = Functions::new(&directory);
@@ -693,7 +696,7 @@ fn main() {
                 // Histogram for human-readable display only.
                 let hist  = chunked_opcode_histogram(&opcodes, ir_chunks);
                 // Deltas — the actual model input.
-                let feats = ir_features(&opcodes, ir_chunks);
+                let feats = ir.model_features(ir_chunks);
 
                 println!("  {}  raw_opcodes={}", func.name, opcodes.len());
                 for c in 0..ir_chunks {
@@ -708,22 +711,39 @@ fn main() {
                     println!();
                 }
                 for d in 0..ir_chunks.saturating_sub(1) {
-                    let base = d * IR_CATEGORY_COUNT;
-                    let delta = &feats[base..base + IR_CATEGORY_COUNT];
+                    let base = d * stride;
+                    let op_delta   = &feats[base..base + IR_CATEGORY_COUNT];
+                    let meta_delta = &feats[base + IR_CATEGORY_COUNT..base + stride];
                     print!("    delta[{}→{}]", d, d + 1);
-                    for (cat, &v) in delta.iter().enumerate() {
+                    for (cat, &v) in op_delta.iter().enumerate() {
                         if v.abs() > 0.02 {
                             print!("  {}={:+.2}", IR_CATEGORY_NAMES[cat], v);
                         }
                     }
+                    for (cat, &v) in meta_delta.iter().enumerate() {
+                        if v.abs() > 0.005 {
+                            print!("  !{}={:+.3}", META_CATEGORY_NAMES[cat], v);
+                        }
+                    }
                     println!();
                 }
+
+                // Split feats into opcode and meta sections for JSON.
+                let n_deltas = ir_chunks.saturating_sub(1);
+                let op_deltas: Vec<f32> = (0..n_deltas)
+                    .flat_map(|d| feats[d*stride..d*stride+IR_CATEGORY_COUNT].iter().copied())
+                    .collect();
+                let meta_deltas: Vec<f32> = (0..n_deltas)
+                    .flat_map(|d| feats[d*stride+IR_CATEGORY_COUNT..d*stride+stride].iter().copied())
+                    .collect();
 
                 records.push(serde_json::json!({
                     "name":        func.name,
                     "raw_opcodes": opcodes.len(),
                     "ir_chunks":   ir_chunks,
                     "histogram":   hist,
+                    "op_deltas":   op_deltas,
+                    "meta_deltas": meta_deltas,
                     "deltas":      feats,
                 }));
             }
