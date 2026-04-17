@@ -1,48 +1,59 @@
 use crate::ppo::episode::Results;
+use crate::ppo::noop::NoOp;
 use crate::ppo::returns::Returns;
 
-/// Distributes the terminal speedup across slots weighted by each slot's share of total
-/// instruction reduction. No-op slots (delta = 0) get 0 terminal credit; slots that
-/// removed more instructions get proportionally more.
+/// Distributes the terminal speedup across slots weighted by each slot's
+/// share of total instruction reduction, using normalised fractional deltas.
 ///
-/// return[t] = (delta[t] / total_net_delta) * terminal_speedup
+/// return[t] = (frac_delta[t] / total_frac_delta) * terminal_speedup
 ///
-/// where delta[t] = instr[t] - instr[t+1]  (positive = reduced = good)
-/// and   total_net_delta = instr[0] - instr[ep_len]  (net reduction over whole episode)
+/// where frac_delta[t] = (instr[t] - instr[t+1]) / instr[0]
+/// and   total_frac_delta = sum of positive frac_deltas
 ///
-/// If total_net_delta == 0 (no net change), all returns are 0.
-/// If a slot increases instructions (negative delta), it receives negative credit
-/// proportional to how much it undid prior work.
+/// Slots that are structural no-ops (both count and feature unchanged)
+/// receive 0 credit. Slots that increase instructions get negative credit.
 pub(crate) struct InstructionWeightedTerminal {
-    pub(crate) threshold: f32,
+    pub(crate) noop: NoOp,
 }
 
 impl Returns for InstructionWeightedTerminal {
     fn compute(&self, results: &Results) -> Vec<f32> {
         let terminal = results.episode_return;
+        let base = results.instr_counts.first().copied().unwrap_or(1).max(1) as f32;
 
-        // Compute per-slot deltas
-        let deltas: Vec<f32> = (0..results.ep_len)
+        let frac_deltas: Vec<f32> = (0..results.ep_len)
             .map(|t| {
                 let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
-                let after = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
-                before - after
+                let after  = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
+                (before - after) / base
             })
             .collect();
 
-        let num_influenced = deltas.iter().filter(|&&d| d.abs() > self.threshold).count() as f32;
-        if num_influenced == 0.0 {
+        let total_positive: f32 = frac_deltas.iter().filter(|&&d| d > 0.0).sum();
+        if total_positive == 0.0 {
             return vec![0.0; results.ep_len];
         }
 
-        let reward_per_influencer = terminal / num_influenced;
-        deltas
-            .iter()
-            .map(|&d| {
-                if d.abs() > self.threshold {
-                    reward_per_influencer
+        (0..results.ep_len)
+            .map(|t| {
+                let d = frac_deltas[t];
+                let is_noop = self.noop.is_noop(
+                    d,
+                    results.ir_features_per_step.get(t).map(Vec::as_slice),
+                    results.ir_features_per_step.get(t + 1).map(Vec::as_slice),
+                );
+                if is_noop {
+                    if self.noop.penalty > 0.0
+                        && results.actions.get(t).copied()
+                            .unwrap_or(crate::llvm::pass::Pass::Stop)
+                            != crate::llvm::pass::Pass::Stop
+                    {
+                        -self.noop.penalty
+                    } else {
+                        0.0
+                    }
                 } else {
-                    0.0
+                    (d / total_positive) * terminal
                 }
             })
             .collect()

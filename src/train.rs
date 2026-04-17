@@ -159,6 +159,7 @@ impl Trainer {
                         let mut values: Vec<f32> = Vec::new();
                         let mut instr_counts = vec![func.ir.instruction_count()];
                         let mut ep_len = k;
+                        let mut exact_noop_steps = 0u64;
                         // Opaque hidden state threaded step-to-step.
                         // GRU: carries serialised h_t (O(K) total).
                         // TFX: always None (default impl replays from scratch).
@@ -183,9 +184,13 @@ impl Trainer {
                             action_history.push(action_idx);
 
                             if action != Pass::Stop {
+                                let fp_before = current_ir.fingerprint();
                                 current_ir = llvm
                                     .apply_one(&current_ir, action, step)
                                     .expect("apply_one");
+                                if current_ir.fingerprint() == fp_before {
+                                    exact_noop_steps += 1;
+                                }
                             }
                             instr_counts.push(current_ir.instruction_count());
 
@@ -244,6 +249,7 @@ impl Trainer {
                             baselines: baselines.clone(),
                             instr_counts,
                             ir_features_per_step: ir_features_collected,
+                            exact_noop_steps,
                         }
                     })
                     .collect();
@@ -314,12 +320,17 @@ impl Trainer {
                     instr_counts.push(func.ir.instruction_count());
                     let mut ir_features_per_step: Vec<Vec<f32>> = Vec::with_capacity(ep_len + 1);
                     ir_features_per_step.push(func.ir.model_features(self.cfg.ir_chunks));
+                    let mut exact_noop_steps = 0u64;
 
                     for (step, &action) in actions.iter().enumerate() {
                         if action != Pass::Stop {
+                            let fp_before = current_ir.fingerprint();
                             current_ir = llvm
                                 .apply_one(&current_ir, action, step)
                                 .expect("apply_one");
+                            if current_ir.fingerprint() == fp_before {
+                                exact_noop_steps += 1;
+                            }
                         }
                         instr_counts.push(current_ir.instruction_count());
                         ir_features_per_step.push(current_ir.model_features(self.cfg.ir_chunks));
@@ -372,6 +383,7 @@ impl Trainer {
                         baselines: baselines.clone(),
                         instr_counts,
                         ir_features_per_step,
+                        exact_noop_steps,
                     }
                 })
                 .collect();

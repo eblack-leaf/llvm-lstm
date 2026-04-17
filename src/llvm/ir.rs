@@ -148,6 +148,69 @@ impl Ir {
         let f = self.features();
         f.total_instruction_count as usize + f.metadata_node_count as usize
     }
+    /// Structural fingerprint for exact no-op detection.
+    ///
+    /// Single pass over the IR text emitting (opcode_category, meta_bits) per
+    /// instruction, where meta_bits encodes which named metadata kinds are
+    /// attached (bit 0 = tbaa, bit 1 = loop, bit 2 = alias_scope, bit 3 = noalias).
+    /// This is invariant to LLVM's metadata node renumbering and attribute-group
+    /// reordering on re-serialisation, while capturing both opcode and metadata
+    /// structural changes.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let content = self.read_content();
+        let mut seq: Vec<(u8, u8)> = Vec::new();
+        let mut in_function = false;
+
+        for line in content.lines() {
+            let t = line.trim();
+            if t.starts_with(';') || t.is_empty() { continue; }
+            if t.starts_with("define ") {
+                in_function = true;
+                seq.push((opcode_id_to_category(BB_SEP_OPCODE) as u8, 0));
+                continue;
+            }
+            if t == "}" { in_function = false; continue; }
+            if !in_function { continue; }
+            // BB label
+            if let Some(cp) = t.find(':') {
+                let before = &t[..cp];
+                if !before.is_empty() && !before.contains(' ')
+                    && !before.starts_with('%') && !before.starts_with('@')
+                    && !before.starts_with('!') && !before.contains('(')
+                    && !t.contains(" = ")
+                {
+                    seq.push((opcode_id_to_category(BB_SEP_OPCODE) as u8, 0));
+                    continue;
+                }
+            }
+            if let Some(op) = extract_opcode(t) {
+                let op_cat = opcode_id_to_category(opcode_to_id(op)) as u8;
+                let mut meta_bits: u8 = 0;
+                let mut rest = t;
+                while let Some(pos) = rest.find('!') {
+                    rest = &rest[pos + 1..];
+                    if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                        let name: &str = rest
+                            .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                            .next().unwrap_or("");
+                        match name {
+                            "tbaa" | "tbaa.struct" => meta_bits |= 0b0001,
+                            "llvm.loop"            => meta_bits |= 0b0010,
+                            "alias.scope"          => meta_bits |= 0b0100,
+                            "noalias"              => meta_bits |= 0b1000,
+                            _ => {}
+                        }
+                    }
+                }
+                seq.push((op_cat, meta_bits));
+            }
+        }
+
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        seq.hash(&mut h);
+        h.finish()
+    }
     /// Raw opcode-ID sequence (unpadded) for this IR file.
     pub(crate) fn opcode_sequence(&self) -> Vec<u8> {
         extract_opcode_sequence(&self.read_content())

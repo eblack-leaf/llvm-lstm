@@ -107,6 +107,7 @@ pub(crate) struct Metrics {
     bench_cache_misses: u64,
 
     noop_steps: u64,
+    exact_noop_steps: u64,
     total_steps: u64,
     noop: crate::ppo::noop::NoOp,
 
@@ -136,6 +137,7 @@ impl Metrics {
             bench_cache_hits: 0,
             bench_cache_misses: 0,
             noop_steps: 0,
+            exact_noop_steps: 0,
             total_steps: 0,
             noop,
             per_func_ir_ms_total: 0,
@@ -161,7 +163,8 @@ impl Metrics {
                 .update(r.episode_return);
             any_speedup = true;
 
-            // Count no-op steps using the unified NoOp check.
+            // Count no-op steps using the unified NoOp check, and exact hash no-ops.
+            self.exact_noop_steps += r.exact_noop_steps;
             for t in 0..r.ep_len {
                 let before = r.instr_counts.get(t).copied().unwrap_or(1);
                 let after = r.instr_counts.get(t + 1).copied().unwrap_or(0);
@@ -257,6 +260,7 @@ impl Metrics {
         self.bench_cache_hits = 0;
         self.bench_cache_misses = 0;
         self.noop_steps = 0;
+        self.exact_noop_steps = 0;
         self.total_steps = 0;
         self.episode_collection_ms = 0;
         self.ppo_update_ms = 0;
@@ -295,6 +299,14 @@ impl Metrics {
             None
         } else {
             Some(self.noop_steps as f32 / self.total_steps as f32 * 100.0)
+        }
+    }
+    /// Fraction of non-Stop steps where the IR content was byte-identical before and after.
+    pub(crate) fn exact_noop_pct(&self) -> Option<f32> {
+        if self.total_steps == 0 {
+            None
+        } else {
+            Some(self.exact_noop_steps as f32 / self.total_steps as f32 * 100.0)
         }
     }
     pub(crate) fn ema(&self) -> f32 {

@@ -172,10 +172,14 @@ impl Logger {
             let noop_str = metrics
                 .noop_pct()
                 .map(|p| {
+                    let exact = metrics.exact_noop_pct()
+                        .map(|e| format!(" exact={:.1}%", e))
+                        .unwrap_or_default();
                     format!(
-                        "  {}={}",
+                        "  {}={}{}",
                         g2!("noop%"),
-                        format!("{:.1}%", p).truecolor(180, 120, 60).to_string()
+                        format!("{:.1}%", p).truecolor(180, 120, 60).to_string(),
+                        exact.truecolor(140, 100, 60).to_string(),
                     )
                 })
                 .unwrap_or_default();
@@ -283,6 +287,7 @@ impl Logger {
                 "func_speedups":          metrics.func_speedups(),
                 "bench_cache_hit_pct":    metrics.bench_cache_hit_pct(),
                 "noop_pct":               metrics.noop_pct(),
+                "exact_noop_pct":         metrics.exact_noop_pct(),
             });
             let _ = writeln!(f, "{}", record);
             let _ = f.flush();

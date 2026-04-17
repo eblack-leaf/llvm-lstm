@@ -124,12 +124,20 @@ impl Returns for PredictorReturn {
             let instr_before = results.instr_counts.get(t).copied().unwrap_or(1);
             let instr_after = results.instr_counts.get(t + 1).copied().unwrap_or(0);
             let instr_delta = crate::llvm::ir::step_delta(instr_before, instr_after);
-            let _is_noop = self.noop.is_noop(
-                instr_delta,
-                results.ir_features_per_step.get(t).map(Vec::as_slice),
-                results.ir_features_per_step.get(t + 1).map(Vec::as_slice),
-            );
-            returns.push(delta * self.scale);
+            let action = results.actions.get(t).copied()
+                .unwrap_or(crate::llvm::pass::Pass::Stop);
+            let r = if self.noop.penalty > 0.0
+                && action != crate::llvm::pass::Pass::Stop
+                && self.noop.is_noop(
+                    instr_delta,
+                    results.ir_features_per_step.get(t).map(Vec::as_slice),
+                    results.ir_features_per_step.get(t + 1).map(Vec::as_slice),
+                ) {
+                delta * self.scale - self.noop.penalty
+            } else {
+                delta * self.scale
+            };
+            returns.push(r);
             prev = pred;
         }
         returns

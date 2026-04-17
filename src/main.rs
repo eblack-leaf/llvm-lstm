@@ -112,8 +112,6 @@ enum Command {
         /// Penalty subtracted when both noop conditions are met and action != Stop.
         #[arg(long, default_value = "0.025")]
         noop_penalty: f32,
-        #[arg(long, default_value = "0.01")]
-        delta_threshold: f32,
         /// Number of positional chunks for the IR opcode histogram.
         /// Feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
         #[arg(long, default_value = "4")]
@@ -317,7 +315,6 @@ fn main() {
             noop_threshold,
             noop_feature_threshold,
             noop_penalty,
-            delta_threshold,
             predictor_checkpoint,
             predictor_scale,
             ir_chunks,
@@ -349,7 +346,6 @@ fn main() {
                 mini_batch_size,
                 cache_file,
                 noop,
-                delta_threshold,
                 ir_chunks,
                 skip_benchmark: returns == "ir" || returns == "ir-step",
                 kl_target,
@@ -358,10 +354,8 @@ fn main() {
             let seq_path =
                 sequences_file.or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
             let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
-                "proxy" => Box::new(InstructionProxyReturn { alpha: proxy_alpha }),
-                "weighted" => Box::new(InstructionWeightedTerminal {
-                    threshold: delta_threshold,
-                }),
+                "proxy"    => Box::new(InstructionProxyReturn { alpha: proxy_alpha, noop }),
+                "weighted" => Box::new(InstructionWeightedTerminal { noop }),
                 "predictor" => {
                     let ckpt = predictor_checkpoint
                         .expect("--predictor-checkpoint required when --returns=predictor");
