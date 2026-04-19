@@ -11,7 +11,7 @@ declare -A ARCH_FEATURES=(
 )
 ARCH_ORDER=("seq" "auto-tfx" "auto-gru" "conclave")
 
-EPISODES=(64 128)
+EPISODES=(256)
 
 # Returns to sweep:
 #   episode   — uniform terminal speedup
