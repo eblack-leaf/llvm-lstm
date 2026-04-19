@@ -46,7 +46,7 @@ enum Command {
         opt: String,
         #[arg(long, default_value = "100")]
         epochs: usize,
-        #[arg(long, default_value = "2")]
+        #[arg(long, default_value = "4")]
         ppo_epochs: usize,
         #[arg(long, default_value = "256")]
         episodes: usize,
