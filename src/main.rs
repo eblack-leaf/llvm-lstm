@@ -112,6 +112,9 @@ enum Command {
         /// Penalty subtracted when both noop conditions are met and action != Stop.
         #[arg(long, default_value = "0.025")]
         noop_penalty: f32,
+        /// Fixed bonus added to active steps that reduced instructions, subtracted for increases.
+        #[arg(long, default_value = "0.05")]
+        weighted_direction_bonus: f32,
         /// Number of positional chunks for the IR opcode histogram.
         /// Feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
         #[arg(long, default_value = "4")]
@@ -315,6 +318,7 @@ fn main() {
             noop_threshold,
             noop_feature_threshold,
             noop_penalty,
+            weighted_direction_bonus,
             predictor_checkpoint,
             predictor_scale,
             ir_chunks,
@@ -355,7 +359,7 @@ fn main() {
                 sequences_file.or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
             let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
                 "proxy"    => Box::new(InstructionProxyReturn { alpha: proxy_alpha, noop }),
-                "weighted" => Box::new(InstructionWeightedTerminal { noop }),
+                "weighted" => Box::new(InstructionWeightedTerminal { noop, direction_bonus: weighted_direction_bonus }),
                 "predictor" => {
                     let ckpt = predictor_checkpoint
                         .expect("--predictor-checkpoint required when --returns=predictor");
