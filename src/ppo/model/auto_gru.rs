@@ -77,10 +77,8 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
         let ir_feat = &ir_features_so_far[t];
         let feat_dim = ir_feat.len();
 
-        let ir_t = Tensor::<B, 2>::from_data(
-            TensorData::new(ir_feat.clone(), [1, feat_dim]),
-            device,
-        );
+        let ir_t =
+            Tensor::<B, 2>::from_data(TensorData::new(ir_feat.clone(), [1, feat_dim]), device);
 
         // h_prev from the threaded vec, or h_0 computed from the current IR at step 0.
         let h_prev: Tensor<B, 2> = match hidden {
@@ -94,11 +92,9 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
         let prev_action = taken_actions.last().copied().unwrap_or(GRU_START_IDX);
 
         let ir_p = self.ir_proj.forward(ir_t); // [1, d_model]
-        let act_id = Tensor::<B, 1, Int>::from_data(
-            TensorData::new(vec![prev_action as i64], [1]),
-            device,
-        )
-        .unsqueeze_dim(0); // [1, 1]
+        let act_id =
+            Tensor::<B, 1, Int>::from_data(TensorData::new(vec![prev_action as i64], [1]), device)
+                .unsqueeze_dim(0); // [1, 1]
         let act_e = self.action_embed.forward(act_id).squeeze_dim(1); // [1, d_model]
         let input = (ir_p + act_e).unsqueeze_dim(1); // [1, 1, d_model]
 
@@ -164,8 +160,7 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
         for feat in ir_features_per_step {
             ir_flat.extend_from_slice(feat);
         }
-        let ir_all =
-            Tensor::<B, 2>::from_data(TensorData::new(ir_flat, [ep_len, ir_dim]), device);
+        let ir_all = Tensor::<B, 2>::from_data(TensorData::new(ir_flat, [ep_len, ir_dim]), device);
         let ir_proj = self.ir_proj.forward(ir_all); // [ep_len, d_model]
 
         let mut prev_ids: Vec<i64> = Vec::with_capacity(ep_len);
@@ -181,7 +176,9 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
             )
             .squeeze_dim(0); // [ep_len, d_model]
 
-        let gru_out = self.gru.forward((ir_proj + act_emb).unsqueeze_dim(0), Some(h0));
+        let gru_out = self
+            .gru
+            .forward((ir_proj + act_emb).unsqueeze_dim(0), Some(h0));
         // [1, ep_len, d_hidden]
         let out = gru_out.squeeze_dim(0); // [ep_len, d_hidden]
 
@@ -227,12 +224,10 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
                 ir_flat[dst..dst + ir_dim].copy_from_slice(&batch_ir_features[i][t]);
             }
         }
-        let ir_proj =
-            self.ir_proj
-                .forward(Tensor::<B, 2>::from_data(
-                    TensorData::new(ir_flat, [n * max_ep_len, ir_dim]),
-                    device,
-                )); // [n*max_ep_len, d_model]
+        let ir_proj = self.ir_proj.forward(Tensor::<B, 2>::from_data(
+            TensorData::new(ir_flat, [n * max_ep_len, ir_dim]),
+            device,
+        )); // [n*max_ep_len, d_model]
         let d_model = ir_proj.dims()[1];
 
         // ── Padded prev-action ids: [n, max_ep_len] ───────────────────────────
@@ -272,8 +267,20 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoGruActor<B> {
         let mut values_list: Vec<Tensor<B, 1>> = Vec::with_capacity(n);
         for i in 0..n {
             let ep_len = ep_lens[i];
-            logits_list.push(logits_3d.clone().narrow(0, i, 1).narrow(1, 0, ep_len).squeeze_dim(0));
-            values_list.push(values_2d.clone().narrow(0, i, 1).narrow(1, 0, ep_len).flatten::<1>(0, 1));
+            logits_list.push(
+                logits_3d
+                    .clone()
+                    .narrow(0, i, 1)
+                    .narrow(1, 0, ep_len)
+                    .squeeze_dim(0),
+            );
+            values_list.push(
+                values_2d
+                    .clone()
+                    .narrow(0, i, 1)
+                    .narrow(1, 0, ep_len)
+                    .flatten::<1>(0, 1),
+            );
         }
 
         (Tensor::cat(logits_list, 0), Tensor::cat(values_list, 0))

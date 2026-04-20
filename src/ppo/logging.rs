@@ -172,7 +172,8 @@ impl Logger {
             let noop_str = metrics
                 .noop_pct()
                 .map(|p| {
-                    let exact = metrics.exact_noop_pct()
+                    let exact = metrics
+                        .exact_noop_pct()
                         .map(|e| format!(" exact={:.1}%", e))
                         .unwrap_or_default();
                     format!(

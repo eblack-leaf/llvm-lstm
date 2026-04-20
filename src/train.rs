@@ -10,7 +10,7 @@ use crate::ppo::checkpoint::{Checkpoint, CheckpointMeta};
 use crate::ppo::episode::Results;
 use crate::ppo::logging::{LogMode, Logger};
 use crate::ppo::metrics::{Metrics, explained_variance};
-use crate::ppo::model::{Actor, AutoActor, Input, ACTIONS};
+use crate::ppo::model::{ACTIONS, Actor, AutoActor, Input};
 use crate::ppo::returns::Returns;
 use burn::lr_scheduler::LrScheduler;
 use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
@@ -147,9 +147,9 @@ impl Trainer {
                         let func_name = func.name.clone();
                         let k = self.cfg.max_seq_len;
 
-                        let llvm = self.llvm.with_env(
-                            self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)),
-                        );
+                        let llvm = self
+                            .llvm
+                            .with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)));
                         std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
                         let mut current_ir = func.ir.clone();
@@ -202,8 +202,11 @@ impl Trainer {
 
                         let actions: Vec<Pass> =
                             action_history.iter().map(|&i| ACTIONS[i]).collect();
-                        let seq_key: Vec<Pass> =
-                            actions.iter().copied().filter(|&p| p != Pass::Stop).collect();
+                        let seq_key: Vec<Pass> = actions
+                            .iter()
+                            .copied()
+                            .filter(|&p| p != Pass::Stop)
+                            .collect();
                         let cache_key = (func_name.clone(), seq_key);
 
                         let step_deltas: Vec<f32> = instr_counts
@@ -220,11 +223,7 @@ impl Trainer {
                         } else {
                             let bin = llvm.compile(&current_ir).expect("compile");
                             let mut bm = llvm
-                                .benchmark(
-                                    &bin,
-                                    self.cfg.benchmark_runs,
-                                    self.cfg.benchmark_iters,
-                                )
+                                .benchmark(&bin, self.cfg.benchmark_runs, self.cfg.benchmark_iters)
                                 .expect("benchmark");
                             bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
                             cache.insert(cache_key, (bm.speedup, step_deltas));
@@ -260,135 +259,137 @@ impl Trainer {
             // ── Parallel collection (all-at-once) ─────────────────────────
             #[cfg(not(any(feature = "auto-tfx", feature = "auto-gru")))]
             let results: Vec<Results> = {
-            let tasks: Vec<_> = functions
-                .functions
-                .iter()
-                .flat_map(|func| {
-                    let func = func.clone();
-                    (0..self.cfg.episodes).map(move |ep| (ep, func.clone()))
-                })
-                .collect();
+                let tasks: Vec<_> = functions
+                    .functions
+                    .iter()
+                    .flat_map(|func| {
+                        let func = func.clone();
+                        (0..self.cfg.episodes).map(move |ep| (ep, func.clone()))
+                    })
+                    .collect();
 
-            let total_episodes = tasks.len();
-            let actors: Vec<_> = (0..total_episodes).map(|_| current.clone()).collect();
-            let col_bar = logger.collection_bar(total_episodes as u64);
+                let total_episodes = tasks.len();
+                let actors: Vec<_> = (0..total_episodes).map(|_| current.clone()).collect();
+                let col_bar = logger.collection_bar(total_episodes as u64);
 
-            let r: Vec<Results> = tasks
-                .into_par_iter()
-                .zip(actors)
-                .map(|((ep, func), actor)| {
-                    let baselines = func.baselines.as_ref().expect("baselines not collected");
-                    let ir_features = func
-                        .ir_features
-                        .as_ref()
-                        .expect("ir_features not collected");
-                    let dev = self.device.clone();
-                    let cache = bench_cache.clone();
-                    let func_name = func.name.clone();
-                    let k = self.cfg.max_seq_len;
+                let r: Vec<Results> = tasks
+                    .into_par_iter()
+                    .zip(actors)
+                    .map(|((ep, func), actor)| {
+                        let baselines = func.baselines.as_ref().expect("baselines not collected");
+                        let ir_features = func
+                            .ir_features
+                            .as_ref()
+                            .expect("ir_features not collected");
+                        let dev = self.device.clone();
+                        let cache = bench_cache.clone();
+                        let func_name = func.name.clone();
+                        let k = self.cfg.max_seq_len;
 
-                    let llvm = self
-                        .llvm
-                        .with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)));
-                    std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
+                        let llvm = self
+                            .llvm
+                            .with_env(self.cfg.work_dir.join(format!("worker_{}_{ep}", func.name)));
+                        std::fs::create_dir_all(&llvm.work_dir).expect("create worker dir");
 
-                    // Single forward pass over all K slots simultaneously.
-                    let input = Input::new_slots(&dev, ir_features);
-                    let output = actor.forward(&self.cfg, input);
+                        // Single forward pass over all K slots simultaneously.
+                        let input = Input::new_slots(&dev, ir_features);
+                        let output = actor.forward(&self.cfg, input);
 
-                    let all_values = output.value_vec();
-                    let (all_actions, all_lps) = output.sample_sequence();
+                        let all_values = output.value_vec();
+                        let (all_actions, all_lps) = output.sample_sequence();
 
-                    // ep_len = first Stop index + 1, or K if no Stop was chosen.
-                    // Only slots 0..ep_len are executed and trained.
-                    let ep_len = all_actions
-                        .iter()
-                        .position(|&a| a == Pass::Stop)
-                        .map(|t| t + 1)
-                        .unwrap_or(k);
-                    let value = all_values[..ep_len].to_vec();
+                        // ep_len = first Stop index + 1, or K if no Stop was chosen.
+                        // Only slots 0..ep_len are executed and trained.
+                        let ep_len = all_actions
+                            .iter()
+                            .position(|&a| a == Pass::Stop)
+                            .map(|t| t + 1)
+                            .unwrap_or(k);
+                        let value = all_values[..ep_len].to_vec();
 
-                    let actions = all_actions[..ep_len].to_vec();
-                    let log_probs = all_lps[..ep_len].to_vec();
+                        let actions = all_actions[..ep_len].to_vec();
+                        let log_probs = all_lps[..ep_len].to_vec();
 
-                    // Apply non-Stop actions in 0..ep_len to build the terminal IR.
-                    let mut current_ir = func.ir.clone();
-                    let mut bench_cache_hits = 0u64;
-                    let mut bench_cache_misses = 0u64;
+                        // Apply non-Stop actions in 0..ep_len to build the terminal IR.
+                        let mut current_ir = func.ir.clone();
+                        let mut bench_cache_hits = 0u64;
+                        let mut bench_cache_misses = 0u64;
 
-                    let mut instr_counts = Vec::with_capacity(ep_len + 1);
-                    instr_counts.push(func.ir.instruction_count());
-                    let mut ir_features_per_step: Vec<Vec<f32>> = Vec::with_capacity(ep_len + 1);
-                    ir_features_per_step.push(func.ir.model_features(self.cfg.ir_chunks));
-                    let mut exact_noop_steps = 0u64;
+                        let mut instr_counts = Vec::with_capacity(ep_len + 1);
+                        instr_counts.push(func.ir.instruction_count());
+                        let mut ir_features_per_step: Vec<Vec<f32>> =
+                            Vec::with_capacity(ep_len + 1);
+                        ir_features_per_step.push(func.ir.model_features(self.cfg.ir_chunks));
+                        let mut exact_noop_steps = 0u64;
 
-                    for (step, &action) in actions.iter().enumerate() {
-                        if action != Pass::Stop {
-                            let fp_before = current_ir.fingerprint();
-                            current_ir = llvm
-                                .apply_one(&current_ir, action, step)
-                                .expect("apply_one");
-                            if current_ir.fingerprint() == fp_before {
-                                exact_noop_steps += 1;
+                        for (step, &action) in actions.iter().enumerate() {
+                            if action != Pass::Stop {
+                                let fp_before = current_ir.fingerprint();
+                                current_ir = llvm
+                                    .apply_one(&current_ir, action, step)
+                                    .expect("apply_one");
+                                if current_ir.fingerprint() == fp_before {
+                                    exact_noop_steps += 1;
+                                }
                             }
+                            instr_counts.push(current_ir.instruction_count());
+                            ir_features_per_step
+                                .push(current_ir.model_features(self.cfg.ir_chunks));
                         }
-                        instr_counts.push(current_ir.instruction_count());
-                        ir_features_per_step.push(current_ir.model_features(self.cfg.ir_chunks));
-                    }
 
-                    // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
-                    let seq_key: Vec<Pass> = actions
-                        .iter()
-                        .copied()
-                        .filter(|&p| p != Pass::Stop)
-                        .collect();
-                    let cache_key = (func_name.clone(), seq_key);
+                        // Benchmark terminal IR (cache keyed by func + pass sequence, Stop stripped).
+                        let seq_key: Vec<Pass> = actions
+                            .iter()
+                            .copied()
+                            .filter(|&p| p != Pass::Stop)
+                            .collect();
+                        let cache_key = (func_name.clone(), seq_key);
 
-                    let step_deltas: Vec<f32> = instr_counts
-                        .windows(2)
-                        .map(|w| step_delta(w[0], w[1]))
-                        .collect();
+                        let step_deltas: Vec<f32> = instr_counts
+                            .windows(2)
+                            .map(|w| step_delta(w[0], w[1]))
+                            .collect();
 
-                    let speedup = if self.cfg.skip_benchmark {
-                        // IR-count mode: return = fraction of instructions removed, no binary run.
-                        let base = instr_counts[0].max(1) as f32;
-                        let final_count = *instr_counts.last().unwrap_or(&0) as f32;
-                        (base - final_count) / base
-                    } else if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
-                        bench_cache_hits += 1;
-                        cached
-                    } else {
-                        bench_cache_misses += 1;
-                        let bin = llvm.compile(&current_ir).expect("compile");
-                        let mut bm = llvm
-                            .benchmark(&bin, self.cfg.benchmark_runs, self.cfg.benchmark_iters)
-                            .expect("benchmark");
-                        bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
-                        cache.insert(cache_key, (bm.speedup, step_deltas.clone()));
-                        bm.speedup
-                    };
+                        let speedup = if self.cfg.skip_benchmark {
+                            // IR-count mode: return = fraction of instructions removed, no binary run.
+                            let base = instr_counts[0].max(1) as f32;
+                            let final_count = *instr_counts.last().unwrap_or(&0) as f32;
+                            (base - final_count) / base
+                        } else if let Some(cached) = cache.get(&cache_key).map(|v| v.0) {
+                            bench_cache_hits += 1;
+                            cached
+                        } else {
+                            bench_cache_misses += 1;
+                            let bin = llvm.compile(&current_ir).expect("compile");
+                            let mut bm = llvm
+                                .benchmark(&bin, self.cfg.benchmark_runs, self.cfg.benchmark_iters)
+                                .expect("benchmark");
+                            bm.speedup = baselines.speedup_vs_o3_parallel(bm.mean_ns);
+                            cache.insert(cache_key, (bm.speedup, step_deltas.clone()));
+                            bm.speedup
+                        };
 
-                    col_bar.inc(1);
+                        col_bar.inc(1);
 
-                    Results {
-                        func_name,
-                        bench_cache_hits,
-                        bench_cache_misses,
-                        ir_features: ir_features.clone(),
-                        actions,
-                        log_probs,
-                        ep_len,
-                        values: value,
-                        episode_return: speedup,
-                        baselines: baselines.clone(),
-                        instr_counts,
-                        ir_features_per_step,
-                        exact_noop_steps,
-                    }
-                })
-                .collect();
-            col_bar.finish_and_clear();
-            r
+                        Results {
+                            func_name,
+                            bench_cache_hits,
+                            bench_cache_misses,
+                            ir_features: ir_features.clone(),
+                            actions,
+                            log_probs,
+                            ep_len,
+                            values: value,
+                            episode_return: speedup,
+                            baselines: baselines.clone(),
+                            instr_counts,
+                            ir_features_per_step,
+                            exact_noop_steps,
+                        }
+                    })
+                    .collect();
+                col_bar.finish_and_clear();
+                r
             };
 
             metrics.record_collection_ms(t_collect.elapsed().as_millis() as u64);

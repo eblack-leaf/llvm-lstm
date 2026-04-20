@@ -16,9 +16,15 @@ pub(crate) type Arch = crate::ppo::model::seq::SeqActor<BurnAutoDiff>;
 #[cfg(not(any(feature = "conclave", feature = "auto-tfx", feature = "auto-gru")))]
 pub(crate) type ArchConfig = crate::ppo::model::seq::SeqActorConfig;
 
-#[cfg(all(feature = "conclave", not(any(feature = "auto-tfx", feature = "auto-gru"))))]
+#[cfg(all(
+    feature = "conclave",
+    not(any(feature = "auto-tfx", feature = "auto-gru"))
+))]
 pub(crate) type Arch = crate::ppo::model::conclave::ConclaveActor<BurnAutoDiff>;
-#[cfg(all(feature = "conclave", not(any(feature = "auto-tfx", feature = "auto-gru"))))]
+#[cfg(all(
+    feature = "conclave",
+    not(any(feature = "auto-tfx", feature = "auto-gru"))
+))]
 pub(crate) type ArchConfig = crate::ppo::model::conclave::ConclaveActorConfig;
 
 // ── Autoregressive architectures ─────────────────────────────────────────────

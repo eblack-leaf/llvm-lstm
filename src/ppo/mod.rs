@@ -3,7 +3,7 @@ use crate::ppo::advantages::Advantages;
 use crate::ppo::episode::Results;
 use crate::ppo::flat_batch::FlatBatch;
 use crate::ppo::metrics::PpoLosses;
-use crate::ppo::model::{Actor, AutoActor, Input, ACTIONS};
+use crate::ppo::model::{ACTIONS, Actor, AutoActor, Input};
 use burn::backend::Autodiff;
 use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
@@ -13,13 +13,13 @@ use burn::tensor::{Tensor, TensorData};
 use indicatif::ProgressBar;
 
 pub(crate) mod advantages;
-pub(crate) mod noop;
 pub(crate) mod checkpoint;
 pub(crate) mod episode;
 mod flat_batch;
 pub(crate) mod logging;
 pub(crate) mod metrics;
 pub(crate) mod model;
+pub(crate) mod noop;
 pub(crate) mod returns;
 
 pub(crate) struct Ppo {
@@ -249,7 +249,10 @@ impl Ppo {
                 // KL early stopping: abort remaining inner epochs when exceeded.
                 // Only after the first inner epoch so we always do at least one update.
                 if self.kl_target > 0.0 && kl_metric > self.kl_target && ppo_ep > 0 {
-                    ppo_bar.set_message(format!("KL {kl_metric:.3} > {:.3} — early stop", self.kl_target));
+                    ppo_bar.set_message(format!(
+                        "KL {kl_metric:.3} > {:.3} — early stop",
+                        self.kl_target
+                    ));
                     ppo_bar.finish_and_clear();
                     kl_early_stop = true;
                     break 'outer;
@@ -357,13 +360,10 @@ impl Ppo {
                 let batch_ir: Vec<&[Vec<f32>]> = (start..end)
                     .map(|i| results[i].ir_features_per_step.as_slice())
                     .collect();
-                let batch_acts: Vec<&[usize]> = action_idx_vecs
-                    .iter()
-                    .map(|v| v.as_slice())
-                    .collect();
+                let batch_acts: Vec<&[usize]> =
+                    action_idx_vecs.iter().map(|v| v.as_slice()).collect();
 
-                let (logits_flat, values_flat) =
-                    model.replay_batch(&batch_ir, &batch_acts, device);
+                let (logits_flat, values_flat) = model.replay_batch(&batch_ir, &batch_acts, device);
                 // logits_flat: [total_steps, A]   values_flat: [total_steps]
 
                 // ── Build tensors ─────────────────────────────────────────────
@@ -401,20 +401,19 @@ impl Ppo {
                     .clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon);
                 let surr1 = ratio * adv.clone();
                 let surr2 = clipped * adv;
-                let min_surr =
-                    (surr1.clone() + surr2.clone() - (surr1 - surr2).abs()) / 2.0;
+                let min_surr = (surr1.clone() + surr2.clone() - (surr1 - surr2).abs()) / 2.0;
 
                 let diff = values_flat - targets;
-                let entropy_per_step =
-                    -(log_probs_all.clone().exp() * log_probs_all).sum_dim(1).squeeze::<1>();
+                let entropy_per_step = -(log_probs_all.clone().exp() * log_probs_all)
+                    .sum_dim(1)
+                    .squeeze::<1>();
 
                 let policy_loss = -(min_surr * step_weights.clone()).sum();
                 let value_loss = (diff.clone() * diff * step_weights.clone()).sum();
                 let entropy = (entropy_per_step * step_weights).sum();
 
-                let total_loss =
-                    policy_loss.clone() + value_loss.clone() * self.value_coef
-                        - entropy.clone() * self.entropy_coef;
+                let total_loss = policy_loss.clone() + value_loss.clone() * self.value_coef
+                    - entropy.clone() * self.entropy_coef;
 
                 // ── Metrics ───────────────────────────────────────────────────
                 let p_m = policy_loss.clone().into_scalar();
@@ -434,7 +433,8 @@ impl Ppo {
                 total_chunks += 1;
 
                 if self.kl_target > 0.0 && kl_m > self.kl_target && ppo_ep > 0 {
-                    ppo_bar.set_message(format!("KL {kl_m:.3} > {:.3} — early stop", self.kl_target));
+                    ppo_bar
+                        .set_message(format!("KL {kl_m:.3} > {:.3} — early stop", self.kl_target));
                     ppo_bar.finish_and_clear();
                     break 'outer;
                 }

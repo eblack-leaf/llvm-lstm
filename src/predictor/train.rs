@@ -555,7 +555,9 @@ pub fn train_predictor(
             });
             use std::io::Write as _;
             if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true).append(true).open(&log_path)
+                .create(true)
+                .append(true)
+                .open(&log_path)
             {
                 let _ = writeln!(f, "{}", record);
             }

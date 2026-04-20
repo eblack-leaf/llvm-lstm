@@ -1,9 +1,9 @@
-pub(crate) mod conclave;
-pub(crate) mod seq;
-#[cfg(feature = "auto-tfx")]
-pub(crate) mod auto_tfx;
 #[cfg(feature = "auto-gru")]
 pub(crate) mod auto_gru;
+#[cfg(feature = "auto-tfx")]
+pub(crate) mod auto_tfx;
+pub(crate) mod conclave;
+pub(crate) mod seq;
 
 use crate::config::Cfg;
 use crate::config::{BurnBackend, BurnDevice};

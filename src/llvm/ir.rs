@@ -164,20 +164,30 @@ impl Ir {
 
         for line in content.lines() {
             let t = line.trim();
-            if t.starts_with(';') || t.is_empty() { continue; }
+            if t.starts_with(';') || t.is_empty() {
+                continue;
+            }
             if t.starts_with("define ") {
                 in_function = true;
                 seq.push((opcode_id_to_category(BB_SEP_OPCODE) as u8, 0));
                 continue;
             }
-            if t == "}" { in_function = false; continue; }
-            if !in_function { continue; }
+            if t == "}" {
+                in_function = false;
+                continue;
+            }
+            if !in_function {
+                continue;
+            }
             // BB label
             if let Some(cp) = t.find(':') {
                 let before = &t[..cp];
-                if !before.is_empty() && !before.contains(' ')
-                    && !before.starts_with('%') && !before.starts_with('@')
-                    && !before.starts_with('!') && !before.contains('(')
+                if !before.is_empty()
+                    && !before.contains(' ')
+                    && !before.starts_with('%')
+                    && !before.starts_with('@')
+                    && !before.starts_with('!')
+                    && !before.contains('(')
                     && !t.contains(" = ")
                 {
                     seq.push((opcode_id_to_category(BB_SEP_OPCODE) as u8, 0));
@@ -193,12 +203,13 @@ impl Ir {
                     if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
                         let name: &str = rest
                             .split(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
-                            .next().unwrap_or("");
+                            .next()
+                            .unwrap_or("");
                         match name {
                             "tbaa" | "tbaa.struct" => meta_bits |= 0b0001,
-                            "llvm.loop"            => meta_bits |= 0b0010,
-                            "alias.scope"          => meta_bits |= 0b0100,
-                            "noalias"              => meta_bits |= 0b1000,
+                            "llvm.loop" => meta_bits |= 0b0010,
+                            "alias.scope" => meta_bits |= 0b0100,
+                            "noalias" => meta_bits |= 0b1000,
                             _ => {}
                         }
                     }
@@ -229,10 +240,10 @@ pub(crate) const META_CATEGORY_COUNT: usize = 4;
 fn meta_ref_category(tag: &str) -> Option<usize> {
     match tag {
         "tbaa" | "tbaa.struct" => Some(0),
-        "llvm.loop"            => Some(1),
-        "alias.scope"          => Some(2),
-        "noalias"              => Some(3),
-        _                      => None,
+        "llvm.loop" => Some(1),
+        "alias.scope" => Some(2),
+        "noalias" => Some(3),
+        _ => None,
     }
 }
 
@@ -311,7 +322,10 @@ pub(crate) fn ir_features(content: &str, k: usize) -> Vec<f32> {
         }
         if t.starts_with("define ") {
             in_function = true;
-            tokens.push((opcode_id_to_category(BB_SEP_OPCODE), [0; META_CATEGORY_COUNT]));
+            tokens.push((
+                opcode_id_to_category(BB_SEP_OPCODE),
+                [0; META_CATEGORY_COUNT],
+            ));
             continue;
         }
         if t == "}" {
@@ -332,7 +346,10 @@ pub(crate) fn ir_features(content: &str, k: usize) -> Vec<f32> {
                 && !before.contains('(')
                 && !t.contains(" = ")
             {
-                tokens.push((opcode_id_to_category(BB_SEP_OPCODE), [0; META_CATEGORY_COUNT]));
+                tokens.push((
+                    opcode_id_to_category(BB_SEP_OPCODE),
+                    [0; META_CATEGORY_COUNT],
+                ));
                 continue;
             }
         }
@@ -364,7 +381,7 @@ pub(crate) fn ir_features(content: &str, k: usize) -> Vec<f32> {
     }
 
     // ── Per-chunk histograms ──────────────────────────────────────────────────
-    let mut op_hist   = vec![0.0f32; k * IR_CATEGORY_COUNT];
+    let mut op_hist = vec![0.0f32; k * IR_CATEGORY_COUNT];
     let mut meta_hist = vec![0.0f32; k * META_CATEGORY_COUNT];
     // Also track instruction count per chunk for meta rate normalisation.
     let mut chunk_instr = vec![0.0f32; k];
@@ -517,7 +534,9 @@ impl Features {
             let t = line.trim();
             // Module-level metadata node: `!N = ...` (N is a digit).
             if t.starts_with('!')
-                && t.get(1..2).map_or(false, |c| c.chars().next().map_or(false, |c| c.is_ascii_digit()))
+                && t.get(1..2).map_or(false, |c| {
+                    c.chars().next().map_or(false, |c| c.is_ascii_digit())
+                })
             {
                 f.metadata_node_count += 1;
             }

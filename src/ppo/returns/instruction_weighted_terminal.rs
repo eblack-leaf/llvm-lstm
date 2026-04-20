@@ -25,7 +25,7 @@ impl Returns for InstructionWeightedTerminal {
         (0..results.ep_len)
             .map(|t| {
                 let before = results.instr_counts.get(t).copied().unwrap_or(0) as f32;
-                let after  = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
+                let after = results.instr_counts.get(t + 1).copied().unwrap_or(0) as f32;
                 let d = (before - after) / base;
 
                 let is_noop = self.noop.is_noop(
@@ -36,7 +36,10 @@ impl Returns for InstructionWeightedTerminal {
 
                 if is_noop {
                     if self.noop.penalty > 0.0
-                        && results.actions.get(t).copied()
+                        && results
+                            .actions
+                            .get(t)
+                            .copied()
                             .unwrap_or(crate::llvm::pass::Pass::Stop)
                             != crate::llvm::pass::Pass::Stop
                     {

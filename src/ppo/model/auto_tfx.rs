@@ -1,7 +1,9 @@
 use crate::config::Cfg;
 use crate::llvm::ir::IR_CATEGORY_COUNT;
 use crate::ppo::model::{AutoActor, MlpHead, MlpHeadConfig};
-use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::{Backend, Config, Int, Module};
 use burn::tensor::activation::softmax;
@@ -85,10 +87,8 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
         let ir_feat = &ir_features_so_far[t];
         let feat_dim = ir_feat.len();
 
-        let ir_feat_t = Tensor::<B, 2>::from_data(
-            TensorData::new(ir_feat.clone(), [1, feat_dim]),
-            device,
-        );
+        let ir_feat_t =
+            Tensor::<B, 2>::from_data(TensorData::new(ir_feat.clone(), [1, feat_dim]), device);
         let ir_tok = self.ir_proj.forward(ir_feat_t).unsqueeze_dim(1); // [1, 1, d_model]
 
         let tokens = if taken_actions.is_empty() {
@@ -118,11 +118,7 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
         let logits_t = self.policy_head.forward(last); // [1, A]
         let value_t = self.value_head.forward(first).flatten::<1>(0, 1); // [1]
 
-        let logits_vec: Vec<f32> = logits_t
-            .flatten::<1>(0, 1)
-            .into_data()
-            .to_vec()
-            .unwrap();
+        let logits_vec: Vec<f32> = logits_t.flatten::<1>(0, 1).into_data().to_vec().unwrap();
         let value_scalar: f32 = value_t.into_scalar();
 
         (logits_vec, value_scalar)
@@ -210,8 +206,7 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
 
         for t in 0..max_ep_len {
             // Indices of episodes that have a step at position t.
-            let active: Vec<usize> =
-                (0..n).filter(|&i| ep_lens[i] > t).collect();
+            let active: Vec<usize> = (0..n).filter(|&i| ep_lens[i] > t).collect();
             let n_t = active.len();
 
             // Stack IR features for active episodes at step t.
@@ -220,10 +215,8 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
                 .iter()
                 .flat_map(|&i| batch_ir_features[i][t].iter().copied())
                 .collect();
-            let ir_batch = Tensor::<B, 2>::from_data(
-                TensorData::new(ir_flat, [n_t, feat_dim]),
-                device,
-            );
+            let ir_batch =
+                Tensor::<B, 2>::from_data(TensorData::new(ir_flat, [n_t, feat_dim]), device);
             let ir_tok = self.ir_proj.forward(ir_batch).unsqueeze_dim(1); // [n_t, 1, d]
 
             // Build token sequence [n_t, 1+t, d].
@@ -235,10 +228,8 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
                     .iter()
                     .flat_map(|&i| batch_taken_actions[i][..t].iter().map(|&a| a as i64))
                     .collect();
-                let act_ids = Tensor::<B, 2, Int>::from_data(
-                    TensorData::new(act_flat, [n_t, t]),
-                    device,
-                );
+                let act_ids =
+                    Tensor::<B, 2, Int>::from_data(TensorData::new(act_flat, [n_t, t]), device);
                 let act_emb = self.action_embed.forward(act_ids); // [n_t, t, d]
                 Tensor::cat(vec![ir_tok, act_emb], 1) // [n_t, 1+t, d]
             };
@@ -251,10 +242,10 @@ impl<B: Backend<FloatElem = f32>> AutoActor<B> for AutoTfxActor<B> {
             // Policy from last token, value from IR token (position 0).
             let last = out
                 .clone()
-                .narrow(1, t, 1)    // [n_t, 1, d]
+                .narrow(1, t, 1) // [n_t, 1, d]
                 .reshape([n_t, d]);
             let first = out
-                .narrow(1, 0, 1)    // [n_t, 1, d]
+                .narrow(1, 0, 1) // [n_t, 1, d]
                 .reshape([n_t, d]);
 
             let step_logits = self.policy_head.forward(last); // [n_t, A]

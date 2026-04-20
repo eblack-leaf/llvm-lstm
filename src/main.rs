@@ -358,8 +358,14 @@ fn main() {
             let seq_path =
                 sequences_file.or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
             let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
-                "proxy"    => Box::new(InstructionProxyReturn { alpha: proxy_alpha, noop }),
-                "weighted" => Box::new(InstructionWeightedTerminal { noop, direction_bonus: weighted_direction_bonus }),
+                "proxy" => Box::new(InstructionProxyReturn {
+                    alpha: proxy_alpha,
+                    noop,
+                }),
+                "weighted" => Box::new(InstructionWeightedTerminal {
+                    noop,
+                    direction_bonus: weighted_direction_bonus,
+                }),
                 "predictor" => {
                     let ckpt = predictor_checkpoint
                         .expect("--predictor-checkpoint required when --returns=predictor");
@@ -399,7 +405,9 @@ fn main() {
             let script = cwd.join("scripts/plot_training.py");
 
             if !python.exists() {
-                eprintln!("error: .venv not found — run: python3 -m venv .venv && .venv/bin/pip install seaborn matplotlib pandas");
+                eprintln!(
+                    "error: .venv not found — run: python3 -m venv .venv && .venv/bin/pip install seaborn matplotlib pandas"
+                );
                 std::process::exit(1);
             }
             if !script.exists() {
@@ -569,7 +577,9 @@ fn main() {
 
             std::fs::create_dir_all(&work_dir).expect("create work dir");
             let llvm = Llvm::new(&clang, "opt-20", work_dir.clone());
-            let src = Source { file: source.clone() };
+            let src = Source {
+                file: source.clone(),
+            };
 
             println!("Emitting IR...");
             let ir = llvm.ir(&src).expect("emit IR");
@@ -677,8 +687,7 @@ fn main() {
             ir_chunks,
         } => {
             use crate::llvm::ir::{
-                IR_CATEGORY_COUNT, IR_CATEGORY_NAMES,
-                META_CATEGORY_COUNT, META_CATEGORY_NAMES,
+                IR_CATEGORY_COUNT, IR_CATEGORY_NAMES, META_CATEGORY_COUNT, META_CATEGORY_NAMES,
                 chunked_opcode_histogram, ir_feature_dim,
             };
             let stride = IR_CATEGORY_COUNT + META_CATEGORY_COUNT;
@@ -693,7 +702,7 @@ fn main() {
                 let ir = func_llvm.ir(&func.source).expect("emit IR");
                 let opcodes = ir.opcode_sequence();
                 // Histogram for human-readable display only.
-                let hist  = chunked_opcode_histogram(&opcodes, ir_chunks);
+                let hist = chunked_opcode_histogram(&opcodes, ir_chunks);
                 // Deltas — the actual model input.
                 let feats = ir.model_features(ir_chunks);
 
@@ -711,7 +720,7 @@ fn main() {
                 }
                 for d in 0..ir_chunks.saturating_sub(1) {
                     let base = d * stride;
-                    let op_delta   = &feats[base..base + IR_CATEGORY_COUNT];
+                    let op_delta = &feats[base..base + IR_CATEGORY_COUNT];
                     let meta_delta = &feats[base + IR_CATEGORY_COUNT..base + stride];
                     print!("    delta[{}→{}]", d, d + 1);
                     for (cat, &v) in op_delta.iter().enumerate() {
@@ -730,10 +739,18 @@ fn main() {
                 // Split feats into opcode and meta sections for JSON.
                 let n_deltas = ir_chunks.saturating_sub(1);
                 let op_deltas: Vec<f32> = (0..n_deltas)
-                    .flat_map(|d| feats[d*stride..d*stride+IR_CATEGORY_COUNT].iter().copied())
+                    .flat_map(|d| {
+                        feats[d * stride..d * stride + IR_CATEGORY_COUNT]
+                            .iter()
+                            .copied()
+                    })
                     .collect();
                 let meta_deltas: Vec<f32> = (0..n_deltas)
-                    .flat_map(|d| feats[d*stride+IR_CATEGORY_COUNT..d*stride+stride].iter().copied())
+                    .flat_map(|d| {
+                        feats[d * stride + IR_CATEGORY_COUNT..d * stride + stride]
+                            .iter()
+                            .copied()
+                    })
                     .collect();
 
                 records.push(serde_json::json!({
