@@ -129,6 +129,29 @@ enum Command {
     Evaluate {
         #[arg(long, default_value = "checkpoints/best")]
         model: PathBuf,
+        #[arg(long, default_value = "benchmarks")]
+        directory: PathBuf,
+        #[arg(long, default_value = "work/eval")]
+        work_dir: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "opt-20")]
+        opt: String,
+        #[arg(long, default_value = "5")]
+        runs: usize,
+        #[arg(long, default_value = "200")]
+        iters: usize,
+        #[arg(long, default_value = "3")]
+        baseline_runs: usize,
+        #[arg(long, default_value = "200")]
+        baseline_iters: usize,
+        /// Number of random sequences to sample per function for the random baseline.
+        #[arg(long, default_value = "20")]
+        random_sequences: usize,
+        #[arg(long, default_value = "4")]
+        ir_chunks: usize,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     PlotTrain {
         #[arg(long, default_value = "checkpoints")]
@@ -402,11 +425,190 @@ fn main() {
             );
             trainer.train();
         }
-        Command::Evaluate { model } => {
-            let device = BurnDevice::default();
-            let (loaded_model, meta) =
-                Checkpoint::load(&model, &device).expect("failed to load checkpoint");
-            let _inference_model = loaded_model.valid();
+        Command::Evaluate {
+            model,
+            directory,
+            work_dir,
+            clang,
+            opt,
+            runs,
+            iters,
+            baseline_runs,
+            baseline_iters,
+            random_sequences,
+            ir_chunks,
+            output,
+        } => {
+            #[cfg(any(feature = "auto-tfx", feature = "auto-gru"))]
+            {
+                use crate::ppo::model::AutoActor;
+
+                let device = BurnDevice::default();
+                let (loaded_model, meta) =
+                    Checkpoint::load(&model, &device).expect("failed to load checkpoint");
+                let inference_model = loaded_model.valid();
+                let max_seq_len = meta.max_seq_len;
+
+                std::fs::create_dir_all(&work_dir).expect("create work dir");
+                let llvm = Llvm::new(&clang, &opt, work_dir.clone());
+
+                let mut functions = Functions::new(&directory);
+                println!("Collecting baselines...");
+                for func in &mut functions.functions {
+                    let func_llvm = llvm.with_env(work_dir.join(&func.name));
+                    std::fs::create_dir_all(&func_llvm.work_dir).expect("create func dir");
+                    func.ir = func_llvm.ir(&func.source).expect("emit ir");
+                    func.baselines = Some(
+                        func_llvm
+                            .collect_baselines(&func.source, baseline_runs, baseline_iters)
+                            .expect("baselines"),
+                    );
+                    println!(
+                        "  {} O3={} ns",
+                        func.name,
+                        func.baselines.as_ref().unwrap().o3.mean_ns
+                    );
+                }
+
+                println!(
+                    "\n{:<22} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10}",
+                    "function", "O0", "O1", "O2", "rand_mean", "policy", "rand_best"
+                );
+                println!("{}", "-".repeat(82));
+
+                let mut json_records: Vec<serde_json::Value> = Vec::new();
+
+                for func in &functions.functions {
+                    let baselines = func.baselines.as_ref().unwrap();
+                    let func_llvm =
+                        llvm.with_env(work_dir.join(format!("eval_{}", func.name)));
+                    std::fs::create_dir_all(&func_llvm.work_dir).expect("create eval dir");
+
+                    let o0_speedup = baselines.speedup_vs_o3(baselines.o0.mean_ns);
+                    let o1_speedup = baselines.speedup_vs_o3(baselines.o1.mean_ns);
+                    let o2_speedup = baselines.speedup_vs_o3(baselines.o2.mean_ns);
+
+                    // Greedy policy rollout: argmax at every step.
+                    let mut ir_features_so_far: Vec<Vec<f32>> = Vec::new();
+                    let mut action_history: Vec<usize> = Vec::new();
+                    let mut current_ir = func.ir.clone();
+                    let mut hidden: Option<Vec<f32>> = None;
+                    let mut policy_passes: Vec<String> = Vec::new();
+
+                    for step in 0..max_seq_len {
+                        let ir_feat = current_ir.model_features(ir_chunks);
+                        ir_features_so_far.push(ir_feat);
+
+                        let (logits, _value, new_hidden) = inference_model
+                            .infer_step_stateful(
+                                &ir_features_so_far,
+                                &action_history,
+                                hidden,
+                                &device,
+                            );
+                        hidden = new_hidden;
+
+                        let action_idx = logits
+                            .iter()
+                            .enumerate()
+                            .max_by(|a, b| {
+                                a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+
+                        let action = crate::ppo::model::ACTIONS[action_idx];
+                        action_history.push(action_idx);
+
+                        if action == Pass::Stop {
+                            break;
+                        }
+                        policy_passes.push(format!("{action:?}"));
+                        current_ir = func_llvm
+                            .apply_one(&current_ir, action, step)
+                            .expect("apply_one");
+                    }
+
+                    let policy_bin = func_llvm.compile(&current_ir).expect("compile policy");
+                    let policy_bm = func_llvm
+                        .benchmark(&policy_bin, runs, iters)
+                        .expect("benchmark policy");
+                    let policy_speedup = baselines.speedup_vs_o3(policy_bm.mean_ns);
+
+                    // Random sequences.
+                    let mut random_speedups: Vec<f32> = Vec::new();
+                    for rand_i in 0..random_sequences {
+                        let rand_llvm = llvm.with_env(
+                            work_dir.join(format!("eval_{}_r{rand_i}", func.name)),
+                        );
+                        std::fs::create_dir_all(&rand_llvm.work_dir)
+                            .expect("create rand dir");
+                        let mut cur = func.ir.clone();
+                        for step in 0..max_seq_len {
+                            let idx = (rand::random::<f32>()
+                                * crate::ppo::model::ACTIONS.len() as f32)
+                                as usize;
+                            let action = crate::ppo::model::ACTIONS[idx];
+                            if action == Pass::Stop {
+                                break;
+                            }
+                            cur = rand_llvm
+                                .apply_one(&cur, action, step)
+                                .expect("apply rand");
+                        }
+                        let bin = rand_llvm.compile(&cur).expect("compile rand");
+                        let bm =
+                            rand_llvm.benchmark(&bin, runs, iters).expect("benchmark rand");
+                        random_speedups.push(baselines.speedup_vs_o3(bm.mean_ns));
+                    }
+
+                    let rand_mean = random_speedups.iter().sum::<f32>()
+                        / random_speedups.len().max(1) as f32;
+                    let rand_best = random_speedups
+                        .iter()
+                        .cloned()
+                        .fold(f32::NEG_INFINITY, f32::max);
+
+                    println!(
+                        "{:<22} {:>+7.3} {:>+7.3} {:>+7.3} {:>+9.3} {:>+9.3} {:>+9.3}",
+                        func.name,
+                        o0_speedup,
+                        o1_speedup,
+                        o2_speedup,
+                        rand_mean,
+                        policy_speedup,
+                        rand_best,
+                    );
+
+                    json_records.push(serde_json::json!({
+                        "name": func.name,
+                        "o3_ns": baselines.o3.mean_ns,
+                        "o0_speedup": o0_speedup,
+                        "o1_speedup": o1_speedup,
+                        "o2_speedup": o2_speedup,
+                        "policy_ns": policy_bm.mean_ns,
+                        "policy_speedup": policy_speedup,
+                        "policy_passes": policy_passes,
+                        "random_mean_speedup": rand_mean,
+                        "random_best_speedup": rand_best,
+                        "random_speedups": random_speedups,
+                    }));
+                }
+
+                if let Some(out) = output {
+                    std::fs::write(
+                        &out,
+                        serde_json::to_string_pretty(&json_records).unwrap(),
+                    )
+                    .expect("write output");
+                    println!("\nSaved → {}", out.display());
+                }
+            }
+            #[cfg(not(any(feature = "auto-tfx", feature = "auto-gru")))]
+            {
+                eprintln!("evaluate requires --features auto-tfx or auto-gru");
+                std::process::exit(1);
+            }
         }
         Command::PlotTrain { dir } => {
             // Resolve paths relative to the current working directory.
