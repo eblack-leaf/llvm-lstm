@@ -239,7 +239,7 @@ enum Command {
         opt: String,
         #[arg(long, default_value = "work/predictor_ir")]
         work_dir: PathBuf,
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "100")]
         epochs: usize,
         #[arg(long, default_value = "3072")]
         batch_size: usize,

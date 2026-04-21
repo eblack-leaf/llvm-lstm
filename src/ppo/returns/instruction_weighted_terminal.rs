@@ -2,16 +2,14 @@ use crate::ppo::episode::Results;
 use crate::ppo::noop::NoOp;
 use crate::ppo::returns::Returns;
 
-/// Active (non-noop) steps receive the full terminal return, gated by whether
-/// the step had any influence (threshold-based, not magnitude-proportional).
-/// A fixed direction bonus is added for instruction reductions and subtracted
-/// for instruction increases, giving the policy a local signal independent of
-/// the terminal outcome.
+/// All steps receive the terminal as a base return so the value function
+/// learns episode quality uniformly. A fixed differential is then added on top
+/// so advantages reflect step-level contribution regardless of terminal sign:
 ///
-///   is_noop         → 0  (or -noop.penalty if penalty > 0 and action != Stop)
 ///   d > 0 (reduce)  → terminal + direction_bonus
 ///   d < 0 (increase)→ terminal - direction_bonus
-///   d == 0, active  → terminal  (feature-only change, no directional signal)
+///   d == 0, active  → terminal
+///   is_noop         → terminal - noop.penalty  (always worse than active steps)
 pub(crate) struct InstructionWeightedTerminal {
     pub(crate) noop: NoOp,
     pub(crate) direction_bonus: f32,
@@ -35,7 +33,7 @@ impl Returns for InstructionWeightedTerminal {
                 );
 
                 if is_noop {
-                    if self.noop.penalty > 0.0
+                    let penalty = if self.noop.penalty > 0.0
                         && results
                             .actions
                             .get(t)
@@ -43,10 +41,11 @@ impl Returns for InstructionWeightedTerminal {
                             .unwrap_or(crate::llvm::pass::Pass::Stop)
                             != crate::llvm::pass::Pass::Stop
                     {
-                        -self.noop.penalty
+                        self.noop.penalty
                     } else {
                         0.0
-                    }
+                    };
+                    terminal - penalty
                 } else if d > 0.0 {
                     terminal + self.direction_bonus
                 } else if d < 0.0 {
