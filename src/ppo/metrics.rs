@@ -9,6 +9,8 @@ pub(crate) struct PpoLosses {
     pub(crate) value_loss: f32,
     pub(crate) entropy: f32,
     pub(crate) kl_div: f32,
+    /// Fraction of steps where the probability ratio was outside [1-eps, 1+eps].
+    pub(crate) clip_frac: f32,
 }
 impl PpoLosses {
     pub(crate) fn zero() -> Self {
@@ -17,6 +19,7 @@ impl PpoLosses {
             value_loss: 0.0,
             entropy: 0.0,
             kl_div: 0.0,
+            clip_frac: 0.0,
         }
     }
 }
@@ -91,6 +94,7 @@ pub(crate) struct Metrics {
     value_loss_avg: RunningAvg,
     entropy_avg: RunningAvg,
     kl_div_avg: RunningAvg,
+    clip_frac_avg: RunningAvg,
     explained_var_avg: RunningAvg,
 
     speedup_ema: Ema,
@@ -127,6 +131,7 @@ impl Metrics {
             value_loss_avg: RunningAvg::new(),
             entropy_avg: RunningAvg::new(),
             kl_div_avg: RunningAvg::new(),
+            clip_frac_avg: RunningAvg::new(),
             explained_var_avg: RunningAvg::new(),
             speedup_ema: Ema::new(ema_alpha),
             episode_len_avg: RunningAvg::new(),
@@ -226,6 +231,7 @@ impl Metrics {
         self.value_loss_avg.push(losses.value_loss);
         self.entropy_avg.push(losses.entropy);
         self.kl_div_avg.push(losses.kl_div);
+        self.clip_frac_avg.push(losses.clip_frac);
     }
 
     pub(crate) fn record_func_ir_ms(&mut self, ms: u64) {
@@ -252,6 +258,7 @@ impl Metrics {
         self.value_loss_avg.reset();
         self.entropy_avg.reset();
         self.kl_div_avg.reset();
+        self.clip_frac_avg.reset();
         self.explained_var_avg.reset();
         self.episode_len_avg.reset();
         self.final_speedup_avg.reset();
@@ -281,6 +288,9 @@ impl Metrics {
     }
     pub(crate) fn kl_div(&self) -> f32 {
         self.kl_div_avg.mean()
+    }
+    pub(crate) fn clip_frac(&self) -> f32 {
+        self.clip_frac_avg.mean()
     }
     pub(crate) fn explained_variance(&self) -> f32 {
         self.explained_var_avg.mean()

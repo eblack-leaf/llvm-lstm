@@ -163,6 +163,14 @@ enum Command {
         #[arg(long, default_value = "checkpoints")]
         dir: PathBuf,
     },
+    PlotEval {
+        /// Path to the eval JSON produced by the evaluate command.
+        #[arg(long)]
+        input: PathBuf,
+        /// Output PNG path (defaults to <input>.png).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Re-benchmark the top sequences from training to check if speedups are reproducible.
     Diagnose {
         #[arg(long, default_value = "checkpoints/bench-top.bin")]
@@ -736,6 +744,29 @@ fn main() {
             {
                 eprintln!("evaluate requires --features auto-tfx or auto-gru");
                 std::process::exit(1);
+            }
+        }
+        Command::PlotEval { input, output } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_eval.py");
+            if !python.exists() {
+                eprintln!("error: .venv not found");
+                std::process::exit(1);
+            }
+            if !script.exists() {
+                eprintln!("error: scripts/plot_eval.py not found");
+                std::process::exit(1);
+            }
+            let out = output.unwrap_or_else(|| input.with_extension("png"));
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--input").arg(&input)
+                .arg("--output").arg(&out)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
             }
         }
         Command::PlotTrain { dir } => {

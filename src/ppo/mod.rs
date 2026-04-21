@@ -127,6 +127,7 @@ impl Ppo {
         let mut sum_value = 0.0_f32;
         let mut sum_entropy = 0.0_f32;
         let mut sum_kl = 0.0_f32;
+        let mut sum_clip_frac = 0.0_f32;
         let mut total_chunks_processed = 0usize;
 
         let mut kl_early_stop = false;
@@ -184,9 +185,19 @@ impl Ppo {
                 let clipped_ratio = ratio
                     .clone()
                     .clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon);
-                let surr1 = ratio * chunk_adv.clone();
+                let surr1 = ratio.clone() * chunk_adv.clone();
                 let surr2 = clipped_ratio * chunk_adv;
                 let min_surr = (surr1.clone() + surr2.clone() - (surr1 - surr2).abs()) / 2.0;
+
+                // Clip fraction: fraction of steps where ratio was outside [1-eps, 1+eps].
+                let lo = 1.0_f32 - self.clip_epsilon;
+                let hi = 1.0_f32 + self.clip_epsilon;
+                let clip_frac_chunk = ratio
+                    .detach()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .map(|v| v.iter().filter(|&&r| r < lo || r > hi).count() as f32 / v.len().max(1) as f32)
+                    .unwrap_or(0.0);
 
                 // Value loss component
                 let diff = step_values - chunk_targets;
@@ -244,6 +255,7 @@ impl Ppo {
                 sum_value += value_metric * self.value_coef;
                 sum_entropy += entropy_metric;
                 sum_kl += kl_metric;
+                sum_clip_frac += clip_frac_chunk;
                 total_chunks_processed += 1;
 
                 // KL early stopping: abort remaining inner epochs when exceeded.
@@ -277,6 +289,7 @@ impl Ppo {
             value_loss: sum_value / n,
             entropy: sum_entropy / n,
             kl_div: sum_kl / n,
+            clip_frac: sum_clip_frac / n,
         };
         (model, optimizer, losses)
     }
@@ -313,6 +326,7 @@ impl Ppo {
         let mut sum_value = 0.0_f32;
         let mut sum_entropy = 0.0_f32;
         let mut sum_kl = 0.0_f32;
+        let mut sum_clip_frac = 0.0_f32;
         let mut total_chunks = 0usize;
 
         'outer: for ppo_ep in 0..self.ppo_epochs {
@@ -399,9 +413,18 @@ impl Ppo {
                 let clipped = ratio
                     .clone()
                     .clamp(1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon);
-                let surr1 = ratio * adv.clone();
+                let surr1 = ratio.clone() * adv.clone();
                 let surr2 = clipped * adv;
                 let min_surr = (surr1.clone() + surr2.clone() - (surr1 - surr2).abs()) / 2.0;
+
+                let lo = 1.0_f32 - self.clip_epsilon;
+                let hi = 1.0_f32 + self.clip_epsilon;
+                let chunk_clip_frac = ratio
+                    .detach()
+                    .into_data()
+                    .to_vec::<f32>()
+                    .map(|v| v.iter().filter(|&&r| r < lo || r > hi).count() as f32 / v.len().max(1) as f32)
+                    .unwrap_or(0.0);
 
                 let diff = values_flat - targets;
                 let entropy_per_step = -(log_probs_all.clone().exp() * log_probs_all)
@@ -430,6 +453,7 @@ impl Ppo {
                 sum_value += v_m;
                 sum_entropy += e_m;
                 sum_kl += kl_m;
+                sum_clip_frac += chunk_clip_frac;
                 total_chunks += 1;
 
                 if self.kl_target > 0.0 && kl_m > self.kl_target && ppo_ep > 0 {
@@ -460,6 +484,7 @@ impl Ppo {
                 value_loss: sum_value / n,
                 entropy: sum_entropy / n,
                 kl_div: sum_kl / n,
+                clip_frac: sum_clip_frac / n,
             },
         )
     }

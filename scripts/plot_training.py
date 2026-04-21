@@ -142,13 +142,22 @@ ax.axhline(0.02, color=TEXT, linewidth=0.7, linestyle=":", alpha=0.5, label="tar
 ax.legend(loc="upper right")
 style_ax(ax, "KL Divergence", "KL")
 
-# 6. Losses ────────────────────────────────────────────────────────────────────
+# 6. Losses + clip fraction ───────────────────────────────────────────────────
 ax = axes["losses"]
 ax.plot(ep, df["policy_loss"], color=ACCENT, label="policy")
 ax.plot(ep, df["value_loss"],  color=EMA_C,  label="value")
 ax.axhline(0, color=WARN_C, linewidth=0.6, linestyle=":")
-ax.legend()
-style_ax(ax, "Losses", "loss")
+if "clip_frac" in df.columns:
+    ax2 = ax.twinx()
+    ax2.plot(ep, df["clip_frac"] * 100, color=WARN_C, linestyle="--",
+             linewidth=1.2, alpha=0.7, label="clip %")
+    ax2.set_ylabel("clip %", color=WARN_C, fontsize=8)
+    ax2.tick_params(colors=WARN_C)
+    ax2.spines["right"].set_color(GRID)
+    ax2.set_ylim(0, 100)
+    ax2.legend(loc="upper left", fontsize=7)
+ax.legend(loc="upper right")
+style_ax(ax, "Losses + Clip %", "loss")
 
 # 7. Noop % ────────────────────────────────────────────────────────────────────
 ax = axes["noop"]

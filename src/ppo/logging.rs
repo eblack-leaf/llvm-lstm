@@ -207,7 +207,7 @@ impl Logger {
             );
 
             self.epoch_bar.println(format!(
-                "         {}  {}{}  {}{}  {}{}  {}{}  {}{}",
+                "         {}  {}{}  {}{}  {}{}  {}{}  {}{}  {}{}",
                 g2!("losses"),
                 g2!("policy="),
                 format!("{:+.4}", metrics.policy_loss()).yellow(),
@@ -217,6 +217,10 @@ impl Logger {
                 format!("{:.1}%", metrics.entropy_pct()).yellow(),
                 g2!("kl="),
                 format!("{:.4}", metrics.kl_div())
+                    .truecolor(200, 160, 80)
+                    .to_string(),
+                g2!("clip="),
+                format!("{:.1}%", metrics.clip_frac() * 100.0)
                     .truecolor(200, 160, 80)
                     .to_string(),
                 g2!("ev="),
@@ -276,6 +280,7 @@ impl Logger {
                 "entropy":                metrics.entropy(),
                 "entropy_pct":            metrics.entropy_pct(),
                 "kl_div":                 metrics.kl_div(),
+                "clip_frac":              metrics.clip_frac(),
                 "explained_variance":     metrics.explained_variance(),
                 "ema":                    metrics.ema(),
                 "avg_final_speedup":      metrics.avg_final_speedup(),

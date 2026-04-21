@@ -1,0 +1,35 @@
+% Weighted return assignment diagram
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw, rounded corners=3pt, minimum width=3.4cm, minimum height=0.6cm,
+              align=center},
+  arr/.style={-Stealth, thick},
+  cond/.style={font=\footnotesize\itshape, gray},
+]
+
+% Terminal return at top
+\node[box, fill=blue!15] (term) at (0,0) {Terminal return $r_\text{term}$};
+
+% Four branches
+\node[box, fill=green!20]  (red)    at (-4.5,-1.8) {$r_\text{term} + \delta$};
+\node[box, fill=yellow!20] (act)    at (-1.5,-1.8) {$r_\text{term}$};
+\node[box, fill=orange!20] (inc)    at ( 1.5,-1.8) {$r_\text{term} - \delta$};
+\node[box, fill=red!20]    (noop)   at ( 4.5,-1.8) {$r_\text{term} - \rho$};
+
+% Arrows
+\draw[arr] (term.south) -- (red.north)
+    node[midway, left=1.6cm, cond] {$\Delta_t > \tau$\\(reduces IR)};
+\draw[arr] (term.south) -- (act.north)
+    node[midway, left=0.0cm, cond] {$|\Delta_t| \le \tau$\\(active)};
+\draw[arr] (term.south) -- (inc.north)
+    node[midway, right=0.1cm, cond] {$\Delta_t < -\tau$\\(inflates IR)};
+\draw[arr] (term.south) -- (noop.north)
+    node[midway, right=1.6cm, cond] {no-op\\detected};
+
+% Labels under boxes
+\node[font=\footnotesize, green!60!black]  at (-4.5,-2.5) {direction bonus};
+\node[font=\footnotesize, gray]            at (-1.5,-2.5) {neutral};
+\node[font=\footnotesize, orange!80!black] at ( 1.5,-2.5) {direction penalty};
+\node[font=\footnotesize, red!70!black]    at ( 4.5,-2.5) {noop penalty};
+
+\end{tikzpicture}
