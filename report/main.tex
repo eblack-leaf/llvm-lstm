@@ -1,179 +1,19 @@
-\documentclass[conference]{IEEEtran}
-\IEEEoverridecommandlockouts
-
-\usepackage{cite}
-\usepackage{amsmath,amssymb,amsfonts}
-\usepackage{graphicx}
-\usepackage{textcomp}
-\usepackage{xcolor}
-\usepackage{booktabs}
-\usepackage{multirow}
-\usepackage{tikz}
-\usetikzlibrary{arrows.meta, positioning}
-\usepackage{hyperref}
-
-\newcommand{\opt}[1]{\texttt{-O#1}}
-\newcommand{\pass}[1]{\texttt{#1}}
-
-% ─────────────────────────────────────────────────────────────────────────────
-\begin{document}
-
-\title{Learning LLVM Pass Sequences via Reinforcement Learning\\
-with an Autoregressive Transformer Policy}
-
-\author{
-  \IEEEauthorblockN{Evan Black}
-  \IEEEauthorblockA{
-    \textit{Department of Modeling \& Simulation}\\
-    \textit{Old Dominion University}\\
-    eblac013@odu.edu
-  }
-}
-
-\maketitle
-
-% ─────────────────────────────────────────────────────────────────────────────
-\begin{abstract}
-% FILL: 4–6 sentences. Problem, method (auto-tfx + GRPO), key result numbers.
-\end{abstract}
-
-\begin{IEEEkeywords}
-reinforcement learning, compiler optimization, LLVM, pass ordering,
-proximal policy optimization, GRPO, transformer
-\end{IEEEkeywords}
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Introduction}
-
-\subsection{Background and Motivation}
-% FILL: Phase ordering problem, why fixed pipelines fall short, why RL.
-
-\subsection{Problem Statement}
-% FILL: MDP framing — given IR, learn a pass sequence that beats O3.
-
-\subsection{Related Work}
-% FILL: AutoPhase, CompilerGym, MLGO, MILEPOST. 1–2 sentences each.
-% NOTE: midterm already has this written — can lift and update.
-
-\subsection{Dataset Description}
-% FILL: 38 benchmarks, 950k random sequences, benchmarking harness (trimmed mean, CLOCK_MONOTONIC).
-% NOTE: pulled from midterm Section I.C and II.
-
-\subsection{Modeling Approach and Objectives}
-% FILL: Brief overview of what changed from midterm GRU → transformer,
-%       why GRPO was adopted, and what we are trying to demonstrate.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Data Preprocessing and Exploratory Data Analysis}
-
-\subsection{Pass Menu Curation}
-% FILL: 28-pass primary menu, selection criteria.
-% NOTE: midterm Section II.A covers this in full — lift directly.
-
-\subsection{IR Feature Extraction}
-% FILL: Describe the midterm 18-dim static features, then explain why they
-%       were replaced with 48-dim chunked opcode frequency.
-%       Key motivation: spatial distribution of instruction types varies
-%       through the function; global counts lose that signal.
-
-\subsection{Baseline Landscape}
-% FILL: Table of O0/O2/O3 times and random-search ceiling for the 6 training benchmarks.
-% FIGURE/TABLE: reuse midterm Table II (random-search results for 6 functions).
-
-\subsection{Pass Impact Analysis}
-% FILL: Enrichment and geometric-mean speedup analysis from midterm.
-% FIGURE: reuse midterm Fig 3 (enrichment) and Fig 4 (per-pass geo-mean speedup).
-%         Export these from the midterm PDF.
-
-\subsection{Sequence Length Analysis}
-% FILL: Best sequences cluster at 17–18 steps; Stop action validated.
-% FIGURE: dataset.png — sequence length distribution.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Methodology and Model Development}
-
-\subsection{Architecture}
-% FILL: Describe Auto-TFX — token 0 = IR features → value head,
-%       last action token → policy head. Contrast with GRU approach.
-% FIGURE: arch.tikz (already drafted in figures/).
-
-\subsection{Reward Design}
-% FILL: Terminal speedup vs O3 as primary signal. Why we moved away from
-%       the midterm tiered reward.
-
-\subsection{Weighted Per-Step Returns}
-% FILL: Eq. for r_t — terminal as base + direction bonus/penalty + noop penalty.
-%       Explain why terminal-in-all-branches was needed (perverse incentive
-%       when terminal is negative).
-% FIGURE: returns.tikz (already drafted in figures/).
-
-\subsection{No-op Detection}
-% FILL: Dual threshold — instruction-count delta AND L1 feature distance.
-
-\subsection{Group Relative Policy Optimisation}
-% FILL: Why value baseline failed (negative EV throughout early runs).
-%       GRPO formula. Group = function name. Value head kept but coef = 0.
-
-\subsection{Training Setup}
-% FILL: Episodes per epoch, PPO inner epochs, KL early stopping,
-%       AdamW + cosine LR, Rust + Burn framework, wgpu backend.
-
-\subsection{Hyperparameters}
-% TABLE: fill once decided — model dim, layers, heads, clip eps,
-%        entropy coef, direction bonus, noop threshold, noop penalty, LR schedule.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Results and Evaluation}
-
-\subsection{Evaluation Protocol}
-% FILL: Greedy decoding. Compare against: O0/O1/O2/O3, random mean,
-%       random best, policy samples best.
-%       DECISION: which runs / configs to compare (multiple evals from sweep).
-
-\subsection{Comparison Against Baselines}
-% TABLE: per-function speedup vs O3 for each compared config + baselines.
-%        DECISION: columns = which methods you are comparing.
-
-\subsection{Performance Summary}
-% FILL: Beats-O2 count, mean speedup, standout functions, problem functions.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Visualization of Results}
-
-% FIGURE: evaluation bar chart (plot-eval --output eval.png).
-%         DECISION: one chart per config, or overlay?
-
-% FIGURE: training curves from GRPO run (train_plots.png from checkpoint).
-%         Shows speedup, entropy, policy loss, clip fraction over epochs.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Discussion}
-
-\subsection{Why GRPO Over a Value Baseline}
-% FILL: Negative explained variance in baseline runs. GRPO group-mean as
-%       stable, unbiased alternative. Reference EV vs training epoch data.
-
-\subsection{Weighted Returns vs Terminal-Only}
-% FILL: Earlier runs with terminal-only pessimized. Explain failed
-%       intermediate attempts and what broke them.
-
-\subsection{Policy Loss Sign Change}
-% FILL: Positive policy loss after epoch ~39 — clip fraction rising,
-%       speedup still improving. What this tells us.
-
-\subsection{Limitations}
-% FILL: In-distribution only, benchmark noise, beam search worse than greedy,
-%       pass parameterisation not covered.
-
-\subsection{Unexpected Findings}
-% FILL: Anything surprising from training or eval.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\section{Conclusion}
-% FILL: Method recap, key result numbers, future work.
-
-% ─────────────────────────────────────────────────────────────────────────────
-\bibliographystyle{IEEEtran}
-\bibliography{refs}
-
-\end{document}
+// Start with background about LLVM
+// What passes are + Why passes matter + Pass ordering problem
+// model vs fixed pipeline passes of 03
+// previous work referenced (Compiler Gym), but we do speedup not IR reduction
+// our 38 funcs as pool + how we will explore data first -> collect random pass sequences + bench + analyze ( we have figures from previous work that are not present here where we collected ~1 million samples 25000 for the 38 benches to see what happens at them. i no longer have that code here, but i have some figures about it and should reference it as starting point)
+// motivation for selecting 6 to focus on based on EDA metrics (the 6 in benchmarks dir were pulled from pool for beating 03 capability + good range of learning)
+// we have concerns about collecting in parallel as timing is precise and doing many at once is only way to reasonably collect this many runs, so we make bench-noise path which does solo vs 16 rayon threads and compares difference (measurements are )
+// how we structured the IR at first (18 dim of counts non-ordered but they were too similar and it lacked order info) vs now (chunk deltas of frequency to have order)[we really just changed it until the vectors were distinguished enough cosine similarity but its still kinda close]
+// now that we have IR differences to condition on, we try to get PPO returns + adv settled. We start with naive episode return + baseline adv with auto-tfx + auto-gru
+// we see from that how it promotes all steps with terminal even though it might not have affected it right way so learning is scattered and EV is random (we still need to run this experiment now, just know it will probably do that based on math and previous runs before this formal experiment run)
+// then we try weighted by how much IR changes with weighted return on both those arches (will add comparison after we see how it does)
+// we try predictor which uses the collected bench-cache to generate dataset that ties step to terminal speedup as value predictor so it can estimate the return for partial steps from the ground truth of what actually benching that run does
+// mention about training rmse and huber loss reasoning? im not sure about that, but also reference dataset.png to show whats the landscape of our training as well, bench-cache just happens to have good uses as training data + exploration of whats happening during training
+// we try that but it hasnt shown best correlation (from test runs, still need to make formal run for this, but im sure it will not be that good)
+// we try parallel models (seq, conclave) too see if the model can resemble the compiler and compare passes when deciding all at once (we need to do a few runs with this but since only episode return can work as they are not auto and dont have steps to attribute, also did not see much gains when i did test runs on this)
+// since the IR reduction has been done before, we try that out since its easy to adapt our pipeline to it, and see what happens (will do run to have results later, but EV in these gets near 1, so our pipeline works but IR is not our real goal)
+// we finally see that maybe we cant value the steps, too many no-ops, too little reward possibility as most runs are negative, hard correlations between attribution of credit to steps, so we explore GRPO to avoid the value prop all together
+// talk about runs there, + successes (we have that run already and its good)
+// we then evaluate the grpo one as it showed best results (we have eval command which tests against random, greedy, best of sample, ...)
