@@ -1,12 +1,9 @@
-cargo run --release --features wgpu,auto-tfx -- train --returns weighted --episodes 16 --mini-batch-size 16 --cache-file checkpoints/data.cache --sequences-file checkpoints/bench-top.bin --checkpoint-dir checkpoints/auto-tfx-weighted-256ep
-cargo run -- plot-train --dir checkpoints/auto-tfx-weighted-256ep
-cp checkpoints/auto-tfx-weighted-256ep/train_plots.png checkpoints/auto-tfx-weighted-256ep.png
+cargo run --release --features wgpu,auto-tfx -- train --returns episode --advantages grpo --episodes 256 --mini-batch-size 256 --cache-file checkpoints/data.cache --sequences-file checkpoints/bench-top.bin --checkpoint-dir checkpoints/auto-tfx-grpo-256ep
+cargo run -- plot-train --dir checkpoints/auto-tfx-grpo-256ep
+cp checkpoints/auto-tfx-grpo-256ep/train_plots.png checkpoints/auto-tfx-grpo-256ep.png
 
-cargo run --release --features wgpu,auto-tfx -- train --returns predictor --predictor-checkpoint predictor_checkpoints --episodes 16 --mini-batch-size 16 --cache-file checkpoints/data.cache --sequences-file checkpoints/bench-top.bin --checkpoint-dir checkpoints/auto-tfx-predictor-256ep
-cargo run -- plot-train --dir checkpoints/auto-tfx-predictor-256ep
-cp checkpoints/auto-tfx-predictor-256ep/train_plots.png checkpoints/auto-tfx-predictor-256ep.png
+cargo run --release --features wgpu,auto-tfx -- train --returns episode --advantages baseline --episodes 256 --mini-batch-size 256 --cache-file checkpoints/data.cache --sequences-file checkpoints/bench-top.bin --checkpoint-dir checkpoints/auto-tfx-episode-256ep
+cargo run -- plot-train --dir checkpoints/auto-tfx-episode-256ep
+cp checkpoints/auto-tfx-episode-256ep/train_plots.png checkpoints/auto-tfx-episode-256ep.png
 
-cargo run --release --features wgpu,auto-tfx -- train --returns ir-step --episodes 16 --mini-batch-size 16 --cache-file checkpoints/data-ir.cache --sequences-file checkpoints/bench-top-ir.bin --checkpoint-dir checkpoints/auto-tfx-ir-step-256ep
-cargo run -- plot-train --dir checkpoints/auto-tfx-ir-step-256ep
-cp checkpoints/auto-tfx-ir-step-256ep/train_plots.png checkpoints/auto-tfx-ir-step-256ep.png
 

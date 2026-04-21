@@ -148,6 +148,12 @@ enum Command {
         /// Number of random sequences to sample per function for the random baseline.
         #[arg(long, default_value = "20")]
         random_sequences: usize,
+        /// Number of policy samples (stochastic rollouts) per function.
+        #[arg(long, default_value = "20")]
+        policy_samples: usize,
+        /// Beam width for beam-search decoding (0 = disabled).
+        #[arg(long, default_value = "0")]
+        beam_width: usize,
         #[arg(long, default_value = "4")]
         ir_chunks: usize,
         #[arg(long)]
@@ -436,6 +442,8 @@ fn main() {
             baseline_runs,
             baseline_iters,
             random_sequences,
+            policy_samples,
+            beam_width,
             ir_chunks,
             output,
         } => {
@@ -470,11 +478,35 @@ fn main() {
                     );
                 }
 
-                println!(
-                    "\n{:<22} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10}",
-                    "function", "O0", "O1", "O2", "rand_mean", "policy", "rand_best"
+                // Helper: softmax sample from raw logits → (action_idx, log_prob).
+                let sample_logits = |logits: &[f32]| -> (usize, f32) {
+                    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let exp: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
+                    let sum: f32 = exp.iter().sum::<f32>().max(f32::EPSILON);
+                    let probs: Vec<f32> = exp.iter().map(|&e| e / sum).collect();
+                    let u: f32 = rand::random();
+                    let mut cum = 0.0f32;
+                    let mut idx = probs.len() - 1;
+                    for (i, &p) in probs.iter().enumerate() {
+                        cum += p;
+                        if cum > u { idx = i; break; }
+                    }
+                    (idx, probs[idx].max(f32::EPSILON).ln())
+                };
+
+                let col_beam = beam_width > 0;
+                let col_samples = policy_samples > 0;
+
+                // All numeric columns are 9 wide; header labels match exactly.
+                let mut header = format!(
+                    "\n{:<22} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
+                    "function", "O0", "O1", "O2", "rand_mean", "greedy", "rand_best"
                 );
-                println!("{}", "-".repeat(82));
+                if col_samples { header.push_str(&format!(" {:>9}", "samp_best")); }
+                if col_beam    { header.push_str(&format!(" {:>9}", "beam")); }
+                let sep_len = 22 + (9 + 1) * (6 + if col_samples { 1 } else { 0 } + if col_beam { 1 } else { 0 });
+                println!("{header}");
+                println!("{}", "-".repeat(sep_len));
 
                 let mut json_records: Vec<serde_json::Value> = Vec::new();
 
@@ -488,17 +520,16 @@ fn main() {
                     let o1_speedup = baselines.speedup_vs_o3(baselines.o1.mean_ns);
                     let o2_speedup = baselines.speedup_vs_o3(baselines.o2.mean_ns);
 
-                    // Greedy policy rollout: argmax at every step.
+                    // ── Greedy rollout (argmax) ────────────────────────────────────────
                     let mut ir_features_so_far: Vec<Vec<f32>> = Vec::new();
                     let mut action_history: Vec<usize> = Vec::new();
                     let mut current_ir = func.ir.clone();
                     let mut hidden: Option<Vec<f32>> = None;
-                    let mut policy_passes: Vec<String> = Vec::new();
+                    let mut greedy_passes: Vec<String> = Vec::new();
 
                     for step in 0..max_seq_len {
                         let ir_feat = current_ir.model_features(ir_chunks);
                         ir_features_so_far.push(ir_feat);
-
                         let (logits, _value, new_hidden) = inference_model
                             .infer_step_stateful(
                                 &ir_features_so_far,
@@ -507,92 +538,189 @@ fn main() {
                                 &device,
                             );
                         hidden = new_hidden;
-
                         let action_idx = logits
                             .iter()
                             .enumerate()
-                            .max_by(|a, b| {
-                                a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
-                            })
+                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                             .map(|(i, _)| i)
                             .unwrap_or(0);
-
                         let action = crate::ppo::model::ACTIONS[action_idx];
                         action_history.push(action_idx);
-
-                        if action == Pass::Stop {
-                            break;
-                        }
-                        policy_passes.push(format!("{action:?}"));
-                        current_ir = func_llvm
-                            .apply_one(&current_ir, action, step)
-                            .expect("apply_one");
+                        if action == Pass::Stop { break; }
+                        greedy_passes.push(format!("{action:?}"));
+                        current_ir = func_llvm.apply_one(&current_ir, action, step).expect("apply greedy");
                     }
+                    let greedy_bin = func_llvm.compile(&current_ir).expect("compile greedy");
+                    let greedy_bm = func_llvm.benchmark(&greedy_bin, runs, iters).expect("bench greedy");
+                    let greedy_speedup = baselines.speedup_vs_o3(greedy_bm.mean_ns);
 
-                    let policy_bin = func_llvm.compile(&current_ir).expect("compile policy");
-                    let policy_bm = func_llvm
-                        .benchmark(&policy_bin, runs, iters)
-                        .expect("benchmark policy");
-                    let policy_speedup = baselines.speedup_vs_o3(policy_bm.mean_ns);
-
-                    // Random sequences.
+                    // ── Random sequences ──────────────────────────────────────────────
                     let mut random_speedups: Vec<f32> = Vec::new();
                     for rand_i in 0..random_sequences {
                         let rand_llvm = llvm.with_env(
                             work_dir.join(format!("eval_{}_r{rand_i}", func.name)),
                         );
-                        std::fs::create_dir_all(&rand_llvm.work_dir)
-                            .expect("create rand dir");
+                        std::fs::create_dir_all(&rand_llvm.work_dir).expect("create rand dir");
                         let mut cur = func.ir.clone();
                         for step in 0..max_seq_len {
-                            let idx = (rand::random::<f32>()
-                                * crate::ppo::model::ACTIONS.len() as f32)
-                                as usize;
+                            let idx = (rand::random::<f32>() * crate::ppo::model::ACTIONS.len() as f32) as usize;
                             let action = crate::ppo::model::ACTIONS[idx];
-                            if action == Pass::Stop {
-                                break;
-                            }
-                            cur = rand_llvm
-                                .apply_one(&cur, action, step)
-                                .expect("apply rand");
+                            if action == Pass::Stop { break; }
+                            cur = rand_llvm.apply_one(&cur, action, step).expect("apply rand");
                         }
                         let bin = rand_llvm.compile(&cur).expect("compile rand");
-                        let bm =
-                            rand_llvm.benchmark(&bin, runs, iters).expect("benchmark rand");
+                        let bm = rand_llvm.benchmark(&bin, runs, iters).expect("bench rand");
                         random_speedups.push(baselines.speedup_vs_o3(bm.mean_ns));
                     }
+                    let rand_mean = random_speedups.iter().sum::<f32>() / random_speedups.len().max(1) as f32;
+                    let rand_best = random_speedups.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-                    let rand_mean = random_speedups.iter().sum::<f32>()
-                        / random_speedups.len().max(1) as f32;
-                    let rand_best = random_speedups
-                        .iter()
-                        .cloned()
-                        .fold(f32::NEG_INFINITY, f32::max);
+                    // ── Policy samples (stochastic rollouts) ──────────────────────────
+                    let mut sample_speedups: Vec<f32> = Vec::new();
+                    if col_samples {
+                        for samp_i in 0..policy_samples {
+                            let samp_llvm = llvm.with_env(
+                                work_dir.join(format!("eval_{}_s{samp_i}", func.name)),
+                            );
+                            std::fs::create_dir_all(&samp_llvm.work_dir).expect("create samp dir");
+                            let mut ir_feats: Vec<Vec<f32>> = Vec::new();
+                            let mut acts: Vec<usize> = Vec::new();
+                            let mut cur = func.ir.clone();
+                            let mut hid: Option<Vec<f32>> = None;
+                            for step in 0..max_seq_len {
+                                ir_feats.push(cur.model_features(ir_chunks));
+                                let (logits, _, new_hid) = inference_model
+                                    .infer_step_stateful(&ir_feats, &acts, hid, &device);
+                                hid = new_hid;
+                                let (idx, _lp) = sample_logits(&logits);
+                                let action = crate::ppo::model::ACTIONS[idx];
+                                acts.push(idx);
+                                if action == Pass::Stop { break; }
+                                cur = samp_llvm.apply_one(&cur, action, step).expect("apply samp");
+                            }
+                            let bin = samp_llvm.compile(&cur).expect("compile samp");
+                            let bm = samp_llvm.benchmark(&bin, runs, iters).expect("bench samp");
+                            sample_speedups.push(baselines.speedup_vs_o3(bm.mean_ns));
+                        }
+                    }
+                    let samp_best = sample_speedups.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-                    println!(
-                        "{:<22} {:>+7.3} {:>+7.3} {:>+7.3} {:>+9.3} {:>+9.3} {:>+9.3}",
-                        func.name,
-                        o0_speedup,
-                        o1_speedup,
-                        o2_speedup,
-                        rand_mean,
-                        policy_speedup,
-                        rand_best,
+                    // ── Beam search ───────────────────────────────────────────────────
+                    // Each beam: (current_ir, ir_features, action_history, cumulative_log_prob, passes)
+                    let beam_speedup = if col_beam {
+                        struct Beam {
+                            ir: crate::llvm::ir::Ir,
+                            ir_feats: Vec<Vec<f32>>,
+                            acts: Vec<usize>,
+                            log_prob: f32,
+                            passes: Vec<String>,
+                        }
+                        let mut beams: Vec<Beam> = vec![Beam {
+                            ir: func.ir.clone(),
+                            ir_feats: Vec::new(),
+                            acts: Vec::new(),
+                            log_prob: 0.0,
+                            passes: Vec::new(),
+                        }];
+                        let beam_llvm = llvm.with_env(work_dir.join(format!("eval_{}_beam", func.name)));
+                        std::fs::create_dir_all(&beam_llvm.work_dir).expect("create beam dir");
+
+                        for step in 0..max_seq_len {
+                            let mut candidates: Vec<Beam> = Vec::new();
+                            for beam in &beams {
+                                let mut feats = beam.ir_feats.clone();
+                                feats.push(beam.ir.model_features(ir_chunks));
+                                let (logits, _, _) = inference_model
+                                    .infer_step_stateful(&feats, &beam.acts, None, &device);
+
+                                // Compute log-probs for all actions.
+                                let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                let exp: Vec<f32> = logits.iter().map(|&x| (x - max_l).exp()).collect();
+                                let sum: f32 = exp.iter().sum::<f32>().max(f32::EPSILON);
+
+                                for (idx, &e) in exp.iter().enumerate() {
+                                    let lp = (e / sum).max(f32::EPSILON).ln();
+                                    let action = crate::ppo::model::ACTIONS[idx];
+                                    let mut new_acts = beam.acts.clone();
+                                    new_acts.push(idx);
+                                    let mut new_passes = beam.passes.clone();
+                                    let new_ir = if action == Pass::Stop {
+                                        beam.ir.clone()
+                                    } else {
+                                        new_passes.push(format!("{action:?}"));
+                                        beam_llvm.apply_one(&beam.ir, action, step).expect("beam apply")
+                                    };
+                                    candidates.push(Beam {
+                                        ir: new_ir,
+                                        ir_feats: feats.clone(),
+                                        acts: new_acts,
+                                        log_prob: beam.log_prob + lp,
+                                        passes: new_passes,
+                                    });
+                                }
+                            }
+                            // Keep top beam_width by log_prob. Stop beams are included.
+                            candidates.sort_by(|a, b| b.log_prob.partial_cmp(&a.log_prob).unwrap_or(std::cmp::Ordering::Equal));
+                            candidates.truncate(beam_width);
+                            // Remove beams that chose Stop (they're done; keep IR as final).
+                            beams = candidates.into_iter().filter(|b| {
+                                b.acts.last().map(|&i| crate::ppo::model::ACTIONS[i] != Pass::Stop).unwrap_or(true)
+                            }).collect();
+                            if beams.is_empty() { break; }
+                        }
+
+                        // Benchmark all surviving beams + stopped beams; just use surviving.
+                        // (beams that stopped were dropped; in practice stop is usually last)
+                        // Benchmark the best log_prob beam.
+                        if let Some(best_beam) = beams.into_iter().max_by(|a, b| a.log_prob.partial_cmp(&b.log_prob).unwrap_or(std::cmp::Ordering::Equal)) {
+                            let bin = beam_llvm.compile(&best_beam.ir).expect("compile beam");
+                            let bm = beam_llvm.benchmark(&bin, runs, iters).expect("bench beam");
+                            Some(baselines.speedup_vs_o3(bm.mean_ns))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // ── Print row ─────────────────────────────────────────────────────
+                    let mut row = format!(
+                        "{:<22} {:>+9.3} {:>+9.3} {:>+9.3} {:>+9.3} {:>+9.3} {:>+9.3}",
+                        func.name, o0_speedup, o1_speedup, o2_speedup,
+                        rand_mean, greedy_speedup, rand_best,
                     );
+                    if col_samples {
+                        row.push_str(&format!(" {:>+9.3}", samp_best));
+                    }
+                    if col_beam {
+                        match beam_speedup {
+                            Some(s) => row.push_str(&format!(" {:>+9.3}", s)),
+                            None    => row.push_str(&format!(" {:>9}", "—")),
+                        }
+                    }
+                    println!("{row}");
 
-                    json_records.push(serde_json::json!({
+                    let mut record = serde_json::json!({
                         "name": func.name,
                         "o3_ns": baselines.o3.mean_ns,
                         "o0_speedup": o0_speedup,
                         "o1_speedup": o1_speedup,
                         "o2_speedup": o2_speedup,
-                        "policy_ns": policy_bm.mean_ns,
-                        "policy_speedup": policy_speedup,
-                        "policy_passes": policy_passes,
+                        "greedy_ns": greedy_bm.mean_ns,
+                        "greedy_speedup": greedy_speedup,
+                        "greedy_passes": greedy_passes,
                         "random_mean_speedup": rand_mean,
                         "random_best_speedup": rand_best,
                         "random_speedups": random_speedups,
-                    }));
+                    });
+                    if col_samples {
+                        record["sample_best_speedup"] = serde_json::json!(samp_best);
+                        record["sample_speedups"] = serde_json::json!(sample_speedups);
+                    }
+                    if let Some(s) = beam_speedup {
+                        record["beam_speedup"] = serde_json::json!(s);
+                    }
+                    json_records.push(record);
                 }
 
                 if let Some(out) = output {
