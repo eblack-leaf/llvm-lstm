@@ -6,6 +6,7 @@ use crate::llvm::functions::Functions;
 use crate::llvm::pass::Pass;
 use crate::llvm::top_sequences::TopSequences;
 use crate::ppo::advantages::baseline::BaselineAdvantage;
+use crate::ppo::advantages::group_relative::GroupRelativeAdvantage;
 use crate::ppo::checkpoint::Checkpoint;
 use crate::ppo::logging::LogMode;
 use crate::ppo::returns::episode_return::EpisodeReturn;
@@ -115,8 +116,13 @@ enum Command {
         /// Fixed bonus added to active steps that reduced instructions, subtracted for increases.
         #[arg(long, default_value = "0.05")]
         weighted_direction_bonus: f32,
+        /// Advantage estimator:
+        ///   baseline — return minus learned value (standard PPO)
+        ///   grpo     — group-relative: normalise by per-function mean/std, no value head
+        #[arg(long, default_value = "baseline")]
+        advantages: String,
         /// Number of positional chunks for the IR opcode histogram.
-        /// Feature dim = ir_chunks * 64.  Default 4 → 256-dim vector.
+        /// Feature dim = (ir_chunks - 1) * 16.  Default 4 → 48-dim vector.
         #[arg(long, default_value = "4")]
         ir_chunks: usize,
     },
@@ -319,6 +325,7 @@ fn main() {
             noop_feature_threshold,
             noop_penalty,
             weighted_direction_bonus,
+            advantages,
             predictor_checkpoint,
             predictor_scale,
             ir_chunks,
@@ -385,7 +392,10 @@ fn main() {
             let trainer = Trainer::new(
                 cfg,
                 returns_impl,
-                Box::new(BaselineAdvantage),
+                match advantages.as_str() {
+                    "grpo" => Box::new(GroupRelativeAdvantage) as Box<dyn crate::ppo::advantages::Advantages>,
+                    _ => Box::new(BaselineAdvantage),
+                },
                 LogMode::FileAndStdout,
                 Some(log_path),
                 seq_path,

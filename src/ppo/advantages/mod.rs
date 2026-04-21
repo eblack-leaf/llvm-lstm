@@ -1,4 +1,5 @@
 pub(crate) mod baseline;
+pub(crate) mod group_relative;
 
 use crate::ppo::episode::Results;
 
