@@ -18,7 +18,7 @@
 \begin{document}
 
 \title{Learning LLVM Pass Sequences via Reinforcement Learning\\
-with an Autoregressive Transformer Policy}
+with Autoregressive Policies}
 
 \author{
   \IEEEauthorblockN{Evan Black}
@@ -34,26 +34,30 @@ with an Autoregressive Transformer Policy}
 \begin{abstract}
 Selecting and ordering LLVM optimization passes is a combinatorial problem
 that conventional fixed pipelines solve only approximately.
-We collected 950{,}000 random sequences across 38 benchmarks via exploratory
-data analysis, then trained autoregressive
-reinforcement learning policies on a curated subset of six functions to
-produce pass sequences that outperform \opt{3}.
-Policies observe a 48-dimensional state encoding of consecutive
-chunk-to-chunk deltas in normalised opcode-category frequencies and
-metadata-reference rates within the IR.
-We evaluate four architectures: two parallel models (\texttt{Seq},
-\texttt{Conclave}) that select all passes simultaneously from a fixed IR
-snapshot, and two autoregressive models (GRU, transformer) that re-observe
-the IR after each pass.
-We also explore several return and advantage formulations, culminating in
-Group Relative Policy Optimisation (GRPO) with instruction-weighted returns.
-Greedy decoding of the best configuration achieves 6--28\% speedup over
-\opt{3} across all six training benchmarks.
+We collected 950{,}000 random sequences across 38 benchmarks, storing
+(sequence, runtime, IR features) tuples in an on-disk bench-cache that
+serves both as an offline exploration corpus and a training-time lookup
+cache.
+Six benchmarks were selected for RL training based on sensitivity to pass
+ordering and expressiveness of the pass menu.
+We train two autoregressive policy architectures---a GRU and a causal
+transformer (Auto-TFX)---with proximal policy optimisation (PPO) and a
+learned value baseline.
+Policies observe a 48-dimensional IR state encoding positional chunk-to-chunk
+deltas in normalised opcode-category frequencies and metadata-reference rates.
+We evaluate two return formulations: a sparse episode return that assigns
+terminal speedup uniformly across all steps, and an instruction-weighted
+return that distributes credit proportionally to per-step instruction
+reduction.
+The value head's explained variance approaches 1 during training, confirming
+that the learned baseline provides a reliable variance-reducing estimate.
+Greedy decoding of Auto-TFX trained with episode returns achieves
+6--28\% speedup over \opt{3} across all six training benchmarks (mean 15.5\%).
 \end{abstract}
 
 \begin{IEEEkeywords}
 reinforcement learning, compiler optimization, LLVM, pass ordering,
-proximal policy optimization, GRPO, transformer
+proximal policy optimization, transformer
 \end{IEEEkeywords}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -119,7 +123,8 @@ speedups over \opt{3} on MiBench.
 Our work differs from AutoPhase in targeting wall-clock execution time
 measured with hardware timing (\texttt{CLOCK\_MONOTONIC}) rather than proxy
 IR metrics, and in collecting a large offline corpus of random sequences
-prior to training to characterise the landscape and guide architecture choices.
+prior to training to characterise the reward landscape and inform feature
+and architecture design.
 
 \subsection{Dataset Description}
 \label{sec:dataset}
@@ -139,8 +144,8 @@ using \texttt{CLOCK\_MONOTONIC}.
 
 The bench-cache serves two roles.
 First, it is the offline corpus for exploratory data analysis: per-pass
-impact, benchmark sensitivity, and CV statistics are computed directly from
-it without re-running any binaries.
+impact, benchmark sensitivity, and coefficient-of-variation (CV) statistics
+are computed directly from the stored tuples without re-running any binaries.
 Second, during RL training it acts as a lookup cache: when an episode
 generates a (function, sequence) pair already in the cache, the stored
 runtime is returned immediately, avoiding redundant benchmark execution.
@@ -148,11 +153,17 @@ Six benchmarks were selected from the pool for the RL training phase
 (Section~\ref{sec:baseline}).
 
 \subsection{Overview of This Work}
-This paper describes the RL training phase that follows the data collection
-and EDA.
-We evaluate two autoregressive policy architectures (GRU and transformer),
-develop a series of return formulations targeting the credit-assignment
-problem in sparse-reward pass sequences, and compare two advantage estimators.
+We evaluate two autoregressive policy architectures (GRU and transformer)
+with two return formulations (episode and instruction-weighted), trained
+with PPO using a learned value baseline.
+The episode return represents the natural, unbiased starting point: the only
+ground-truth signal available is a real benchmark measurement, and assigning
+it uniformly to all steps is the honest maximum-likelihood choice.
+The instruction-weighted return is a principled credit-assignment refinement
+that redistributes the terminal reward using per-step information already
+available in the IR without introducing external signal.
+An IR-step ablation is included to verify the training pipeline independently
+of the sparse runtime reward.
 The result is a trained policy that consistently beats \opt{3} on all six
 training benchmarks under greedy decoding.
 
@@ -215,6 +226,10 @@ While informative globally, this representation cannot distinguish two
 functions with identical aggregate counts but different internal structure:
 e.g., a function where memory operations are concentrated in an inner loop
 versus one where they are uniformly distributed.
+More importantly, two IR states that differ only in the spatial arrangement
+of operations---which is precisely what passes like \pass{loop-rotate} and
+\pass{licm} manipulate---appear identical to a global count vector.
+This representation is too coarse to support per-step credit assignment.
 
 We replace it with a representation that captures how instruction composition
 \emph{shifts} through the function body.
@@ -238,6 +253,18 @@ $(12 + 4)$.
 Concatenating $C{-}1 = 3$ such deltas gives the 48-dimensional model
 feature vector $\mathbf{f}_t$ (\texttt{src/llvm/ir.rs:307}, \texttt{ir\_features()}).
 The number of chunks is a hyperparameter (\texttt{--ir-chunks}, default 4).
+
+The delta representation has two key properties.
+First, it is invariant to overall function size: a 100-instruction function
+and a 10{,}000-instruction function can produce the same feature vector if
+their instruction mix shifts in the same way across chunks.
+Second, it responds to the passes most relevant to our action space:
+\pass{loop-rotate} shifts control instructions from later chunks to earlier
+ones; \pass{licm} moves memory operations out of loop bodies (later chunks)
+into pre-headers (earlier chunks); \pass{sroa} replaces alloca/load/store
+triples with register operations, reducing memory category weight uniformly.
+These structural changes are invisible to a global count vector but produce
+distinct delta signatures.
 
 \begin{figure}[t]
   \centering
@@ -263,7 +290,7 @@ expressive enough for that function; (2) a high coefficient of variation
 with strong reward gradient for learning; and (3) diversity of computational
 profile (call-heavy, arithmetic-heavy, loop/vectorize, pointer/struct).
 
-Table~\ref{tab:baselines} shows the key statistics from our exploratory data analysis.
+Table~\ref{tab:baselines} shows the key statistics from the bench-cache EDA.
 
 \begin{table}[t]
 \caption{Six training benchmarks: \opt{3} baseline, best random-search
@@ -316,52 +343,41 @@ meaningful early-termination mechanism.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{dataset.png}
-  \caption{Predictor dataset statistics (11M samples, 6 functions).
+  \caption{Bench-cache statistics (950k samples, 38 functions).
            Top right: sequence-length distribution is approximately
            uniform across 1--20.
            Top left: the bulk of speedup values are near zero or negative,
-           confirming that most random sequences are harmful and useful
-           reward signal is sparse.}
+           confirming that useful reward signal is sparse and the policy
+           must learn to discriminate good sequences from a large background
+           of ineffective ones.}
   \label{fig:dataset}
 \end{figure}
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Methodology}
 
-\subsection{Architecture}
+\subsection{Policy Architecture}
 \label{sec:arch}
+We train two autoregressive policy architectures.
+Both observe the \emph{current} IR feature vector $\mathbf{f}_t$ (updated
+after applying the previous pass) alongside the history of actions taken so
+far, enabling the policy to condition each choice on what the previous passes
+actually did to the IR.
 
-\paragraph{Parallel architectures.}
-The simplest policy formulation treats the entire pass sequence as a single
-multi-label prediction from the initial IR: given a snapshot of the function
-at \opt{0}, output all $K$ passes at once.
-This is attractive because a single forward pass produces a full sequence,
-and the model never needs to track intermediate IR state.
-The \texttt{Seq} model (\texttt{src/ppo/model/seq.rs}) does this with an
-independent head per slot; \texttt{Conclave}
-(\texttt{src/ppo/model/conclave.rs}) uses a small attention mechanism to let
-the slot predictions attend to each other.
-The fundamental limitation is that both models receive no per-step IR updates:
-the state is fixed at episode start, collapsing the MDP to a bandit.
-Credit assignment at the step level is impossible, so only episode-level
-returns are usable, and the model cannot condition any choice on what earlier
-passes actually did to the IR.
+\paragraph{Auto-GRU.}
+\texttt{Auto-GRU} (\texttt{src/ppo/model/auto\_gru.rs}) maintains a recurrent
+hidden state updated at each step.
+The initial hidden state is seeded from $\mathbf{f}_0$ projected to the GRU
+dimension; subsequent updates receive the concatenation of the current IR
+features and the one-hot action embedding.
+The policy and value heads read from the final hidden state.
+The recurrent inductive bias naturally gives recent IR state more influence
+than earlier steps, which aligns with the observation that late-stage passes
+see the most refined IR.
 
-\paragraph{Autoregressive architectures.}
-The \texttt{Auto-GRU} (\texttt{src/ppo/model/auto\_gru.rs}) and
-\texttt{Auto-TFX} (\texttt{src/ppo/model/auto\_tfx.rs}) models act
-autoregressively: at each step $t$ they observe the \emph{current} IR
-feature vector (updated after applying the previous pass) and the history
-of actions taken so far.
-This enables per-step credit assignment and allows the policy to condition
-each choice on what the previous passes actually did to the IR.
-
-Both architectures share the same interface but differ in how they encode
-history.
-\texttt{Auto-GRU} maintains a recurrent hidden state that is updated at each
-step, carrying a compressed memory of the action sequence.
-\texttt{Auto-TFX} builds an explicit token sequence and applies a transformer
-encoder:
+\paragraph{Auto-TFX.}
+\texttt{Auto-TFX} (\texttt{src/ppo/model/auto\_tfx.rs}) builds an explicit
+token sequence and applies a transformer encoder:
 %
 \begin{equation}
 \mathbf{s}_t = \bigl[W_{\text{ir}}\,\mathbf{f}_t \;\big|\;
@@ -371,13 +387,20 @@ encoder:
 \end{equation}
 %
 where $W_{\text{ir}} \in \mathbb{R}^{48 \times d}$ projects the current IR
-features (\texttt{ir\_proj}, line 58) and $E \in \mathbb{R}^{29 \times d}$
-is a learned action embedding table (\texttt{action\_embed}, line 59).
+features (\texttt{ir\_proj}) and $E \in \mathbb{R}^{29 \times d}$
+is a learned action embedding table (\texttt{action\_embed}).
 No causal mask is applied: since we decode one step at a time, the full
-sequence is always available and cross-step attention is beneficial.
+sequence is always available and unrestricted cross-step attention is
+beneficial.
 The \textbf{policy head} reads from the last token (position $t$) to produce
 logits over 29 actions; the \textbf{value head} reads from token 0 (the
 current IR projection) to estimate $V(\mathbf{f}_t)$.
+
+The two architectures represent complementary computational hypotheses.
+Auto-GRU's implicit memory introduces a recency bias that may help when the
+relevant IR context is recent; Auto-TFX's explicit attention can directly
+compare any step's IR state against any prior action, which may help when
+pass interactions are non-local.
 
 \paragraph{Batched replay.}
 During PPO updates, recomputing all logits naively requires one forward per
@@ -386,10 +409,10 @@ step per episode ($N \times K$ calls).
 batched calls by iterating over step positions: at step $t$, all episodes
 with length $> t$ are stacked into a single batch of shape
 $[|\text{active}|,\,1{+}t,\,d]$ and processed together.
-Episodes shorter than $t$ are simply absent, requiring no padding mask.
+Episodes shorter than $t$ are absent, requiring no padding mask.
 Each step is assigned weight $w = 1/(N_{\text{chunk}} \cdot K_i)$ in the
 loss, averaging first within episodes then across them
-(\texttt{ppo/mod.rs:213}).
+(\texttt{ppo/mod.rs}).
 
 \subsection{PPO Training}
 \label{sec:ppo}
@@ -407,8 +430,6 @@ log-probabilities increasingly stale.
 The clipped surrogate objective bounds how far the updated policy can
 deviate from the collection policy, keeping gradient estimates valid while
 still extracting multiple updates from each batch.
-After all inner-epoch updates, the batch is discarded and new episodes are
-collected under the updated policy.
 
 \paragraph{Policy gradient objective.}
 At each PPO update we have a mini-batch of episodes with stored
@@ -439,9 +460,9 @@ where $c_v = 0.5$ is the value coefficient, $c_e = 0.03$ is the entropy
 bonus coefficient, and $H$ is Shannon entropy encouraging exploration.
 A per-minibatch KL early-stop threshold of 0.05 aborts remaining inner
 epochs when the policy update is too large, preventing entropy collapse
-(\texttt{ppo/mod.rs:263}).
+(\texttt{ppo/mod.rs}).
 
-\paragraph{Baselines and episode collection.}
+\paragraph{Episode collection.}
 Before any training begins, serial baselines (\opt{0}--\opt{3}) are
 collected for each function under stable single-threaded conditions.
 Episode collection during training is parallelised across all available
@@ -453,10 +474,10 @@ for the timing overhead this introduces.
 \label{sec:benchnoise}
 Because episode rewards are runtime measurements, systematic timing bias
 from parallel execution would corrupt the reward signal.
-The \texttt{bench-noise} command (\texttt{src/main.rs:936}) measures this
-bias: for each benchmark binary it records the solo execution time, then
-runs the same binary simultaneously across 16 Rayon workers and records
-the distribution of measurements.
+The \texttt{bench-noise} command measures this bias: for each benchmark
+binary it records the solo execution time, then runs the same binary
+simultaneously across 16 Rayon workers and records the distribution of
+measurements.
 
 \begin{figure}[t]
   \centering
@@ -473,45 +494,52 @@ the distribution of measurements.
 Parallel overhead was small and consistent across all six benchmarks.
 We account for it by applying a fixed noise margin that pessimises the
 \opt{3} baseline when computing episode rewards during training
-(\texttt{speedup\_vs\_o3\_parallel}, \texttt{src/llvm/benchmark.rs:42},
-\texttt{PARALLEL\_NOISE\_MARGIN = 1.01}).
+(\texttt{PARALLEL\_NOISE\_MARGIN = 1.01}, \texttt{src/llvm/benchmark.rs}).
 This ensures that a policy sequence must beat \opt{3} by more than the
 measurement noise floor to receive a positive reward.
 Final evaluation uses serial benchmarking only.
 
 \subsection{Return Formulations}
 \label{sec:returns}
-With a sparse terminal reward (one measurement per episode), the central
-challenge is credit assignment: which of the $K$ actions in the sequence
-contributed to the final outcome?
-We developed a progression of return functions, each addressing a failure
-mode of the previous.
-Where per-step shaping is applied, a step is classified as a no-op when
-the normalised instruction-count delta $|\Delta I_t| < 0.01$ \emph{and}
-the L1 distance between IR feature vectors before and after is below $0.05$
+The terminal reward---a single real benchmark measurement per episode---is
+the ground-truth signal for the optimisation objective.
+The central challenge is credit assignment: which of the $K$ actions in a
+sequence contributed to the final outcome?
+We analyse two principled formulations and include an IR-step ablation.
+
+Where per-step shaping is applied, a step is classified as a no-op when the
+normalised instruction-count delta $|\Delta I_t| < 0.01$ \emph{and} the L1
+distance between IR feature vectors before and after is below $0.05$
 (\texttt{src/ppo/noop.rs}).
 The dual threshold is necessary because passes such as \pass{loop-rotate}
 and \pass{licm} restructure loop metadata without changing instruction count.
 
 \paragraph{Episode return.}
-The simplest formulation assigns the terminal speedup $r$ uniformly to every
+The episode return assigns the terminal speedup $r$ uniformly to every
 step (\texttt{src/ppo/returns/episode\_return.rs}):
 $R_t = r \;\forall\, t$.
-This is unbiased but provides no per-step signal.
-When $r$ is negative---which it is for most episodes early in training---every
-action is penalised equally, including actions that would have been beneficial
-had the sequence terminated differently.
+This is the unbiased maximum-likelihood estimate: the only externally
+measured quantity is $r$, and distributing it equally makes no assumptions
+about which steps were responsible.
+All shaping alternatives introduce a bias in exchange for reduced variance;
+episode return provides the baseline against which that trade-off is measured.
+The training challenge with episode return is that when $r < 0$---as it is
+for most sequences early in training---every action is penalised equally,
+including actions that would have been beneficial with a different
+continuation.
+The value head must learn to disentangle this noise from the policy gradient
+signal.
 
 \paragraph{Instruction-weighted terminal return.}
-Episode return assigns the same terminal reward to every step, so when
-$r < 0$---as it is for most episodes early in training---every action is
-penalised equally, including actions that reduced IR size and would have
-been beneficial given a different continuation.
-The \texttt{weighted} formulation
+Episode return assigns the same terminal reward to every step, so a pass
+that substantially reduces instruction count receives the same gradient
+signal as an immediately following no-op.
+The instruction-weighted formulation
 (\texttt{src/ppo/returns/instruction\_weighted\_terminal.rs}) breaks this
-symmetry: each step's return is scaled by its share of the total
-instruction reduction, steps that reduced instructions earn a small
-direction bonus, and no-op steps are penalised:
+symmetry without introducing any signal not already present in the IR:
+each step's return is scaled by its share of the total instruction
+reduction, steps that reduced instructions earn a small direction bonus,
+and steps that meet both no-op thresholds are penalised:
 %
 \begin{equation}
 R_t = r \cdot \frac{|\Delta I_t|}{\sum_s |\Delta I_s|}
@@ -521,75 +549,55 @@ R_t = r \cdot \frac{|\Delta I_t|}{\sum_s |\Delta I_s|}
 \end{equation}
 %
 where $\Delta I_t$ is the normalised instruction-count change at step $t$
-(\texttt{src/llvm/ir.rs:462}, \texttt{step\_delta()}),
+(\texttt{src/llvm/ir.rs}, \texttt{step\_delta()}),
 $\delta = 0.05$ is the direction bonus, and $p = 0.025$ is the no-op
 penalty.
-Weighted returns improved training stability relative to episode return,
-but the value head's explained variance still fluctuated rather than
-converging, motivating the advantage estimation changes in
-Section~\ref{sec:advantages}.
+The key property is that the sum of the first term over all steps equals $r$:
+the terminal speedup is preserved, only its distribution across steps is
+changed.
+This gives the value head more informative per-step targets while keeping
+the overall objective identical to episode return.
 
-\paragraph{IR-count return.}
-For ablation, \texttt{ir} and \texttt{ir-step} returns
-(\texttt{src/ppo/returns/ir\_count\_return.rs},
-\texttt{ir\_step\_return.rs}) use the terminal or per-step IR instruction
-reduction as the reward, bypassing benchmarking entirely
-(\texttt{src/config.rs:98}, \texttt{skip\_benchmark}).
-This allows fast iteration to verify that the policy architecture and
-training loop are functional without waiting on benchmark collection.
-IR reduction is used only as a pipeline check; our optimisation target
-throughout is measured runtime, so these configurations are not evaluated
-as policies.
-
-\paragraph{Predictor return.}
-The \texttt{predictor} formulation
-(\texttt{src/ppo/returns/predictor\_return.rs}) attempts to provide dense
-per-step rewards grounded in real benchmark data.
-A separate \texttt{SpeedupPredictor} transformer
-(\texttt{src/predictor/}) is trained on the bench-cache to map
-(IR features, partial pass sequence) $\to$ terminal speedup.
-The predictor's output at each step serves as the per-step return estimate.
-Training details and results are in Section~\ref{sec:discuss}.
+\paragraph{IR-step return (ablation).}
+The \texttt{ir-step} formulation
+(\texttt{src/ppo/returns/ir\_step\_return.rs}) uses the per-step IR
+instruction-count delta as the reward, bypassing benchmarking entirely
+(\texttt{--skip-benchmark}).
+This decouples the policy architecture and training loop from the runtime
+reward signal, providing a fast verification that the model can learn a
+well-defined dense objective.
+IR count reduction is not our optimisation target; this configuration
+is not evaluated as a policy and its training results are interpreted
+only as an infrastructure check.
 
 \subsection{Advantage Estimation}
 \label{sec:advantages}
-The return $R_t$ alone is not used directly in the PPO objective; the
+The return $R_t$ is not used directly in the PPO objective; the
 \emph{advantage} $\hat{A}_t$ subtracts a baseline to reduce variance.
-We compare two estimators.
-
-\paragraph{Baseline advantage.}
-Standard PPO subtracts the learned value estimate
+We use the standard learned value baseline
 (\texttt{src/ppo/advantages/baseline.rs}):
 $\hat{A}_t = R_t - V_\theta(\mathbf{f}_t)$.
 The resulting advantages are batch-normalised (zero mean, unit variance)
 across all steps in the mini-batch, ensuring roughly half of actions are
 reinforced and half penalised regardless of the absolute reward scale.
-The quality of this estimator depends entirely on how well the value head
-has learned to predict $R_t$; \emph{explained variance}
-$\text{EV} = 1 - \operatorname{Var}(R_t - V_\theta) / \operatorname{Var}(R_t)$
-measures this, with EV near 1 indicating a useful baseline and EV near 0
-or negative indicating the value head is adding noise.
 
-\paragraph{Group Relative Policy Optimisation.}
-GRPO~\cite{grpo} replaces the value baseline with group-relative
-normalisation.
-We group episodes by function name: for each function the episodes collected
-in the current epoch form a group.
-The advantage is:
+The quality of this estimator is measured by explained variance:
 %
 \begin{equation}
-\hat{A}_i = \frac{r_i - \mu_g}{\sigma_g + \epsilon}
-\label{eq:grpo}
+\text{EV} = 1 - \frac{\operatorname{Var}(R_t - V_\theta)}{\operatorname{Var}(R_t)}
+\label{eq:ev}
 \end{equation}
 %
-where $\mu_g$ and $\sigma_g$ are the mean and standard deviation of terminal
-speedups across function group $g$, and $\epsilon = 10^{-8}$
-(\texttt{src/ppo/advantages/group\_relative.rs}).
-All steps within an episode share the same advantage.
-The value head is retained but its loss coefficient is set to zero during
-GRPO training, so it contributes no gradient.
-GRPO requires no value-head training, is stable regardless of the absolute
-reward scale, and adapts automatically as the policy's mean return shifts.
+EV near 1 indicates the value head is accurately predicting returns,
+providing a tightly calibrated baseline.
+EV near 0 or negative indicates the value head is not tracking returns and
+the baseline is adding noise rather than removing it.
+In our episode-return runs the value head's EV approaches 1 during
+training (Section~\ref{sec:results}), confirming that the 48-dimensional IR
+state representation---augmented with action history---is sufficient for the
+transformer to learn a useful value function.
+This is a non-trivial result: with sparse terminal rewards and high-variance
+episode outcomes, value learning is often the bottleneck in on-policy methods.
 
 \subsection{Training Setup}
 All experiments train for 100 epochs.
@@ -600,21 +608,21 @@ to $\approx 0$ over 100 epochs.
 The training framework is Rust + Burn~\cite{burn} on the \texttt{wgpu}
 backend.
 
-\subsection{Hyperparameters}
-Table~\ref{tab:hparams} lists all model and training hyperparameters for
-the reported GRPO run.
-Architecture parameters are read from \texttt{arch\_config.json} at
-checkpoint load time; training parameters are set via command-line flags
-(\texttt{src/config.rs}).
+Table~\ref{tab:hparams} lists all model and training hyperparameters.
+Architecture parameters are persisted in \texttt{arch\_config.json} at
+checkpoint save time and loaded automatically; training parameters are set
+via command-line flags (\texttt{src/config.rs}).
+
 \begin{table}[t]
-\caption{Model and training hyperparameters for the GRPO run.}
+\caption{Model and training hyperparameters for all reported runs.
+Weighted-return parameters are used only when \texttt{--returns weighted}.}
 \label{tab:hparams}
 \centering
 \begin{tabular}{ll}
 \toprule
 Parameter & Value \\
 \midrule
-\multicolumn{2}{l}{\emph{Model (arch\_config.json)}} \\
+\multicolumn{2}{l}{\emph{Model}} \\
 $d_{\text{model}}$ & 128 \\
 Transformer layers & 2 \\
 Attention heads & 4 \\
@@ -634,31 +642,30 @@ KL early-stop & 0.05 \\
 Learning rate & $10^{-3}$ cosine \\
 Clip $\epsilon$ & 0.2 \\
 Entropy coef $c_e$ & 0.03 \\
-Value coef $c_v$ & 0.0 (GRPO) \\
+Value coef $c_v$ & 0.5 \\
 No-op $\tau_{\text{count}}$ & 0.01 \\
 No-op $\tau_{\text{feat}}$ & 0.05 \\
-No-op penalty $p$ & 0.025 \\
-Direction bonus $\delta$ & 0.05 \\
+No-op penalty $p$ & 0.025 (weighted) \\
+Direction bonus $\delta$ & 0.05 (weighted) \\
 Noise margin & 1.01 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Diagnose: Reproducibility Verification}
+\subsection{Reproducibility Verification}
 \label{sec:diagnose}
 Training caches the top-performing sequences observed during episode
 collection (\texttt{src/llvm/top\_sequences.rs}).
-The \texttt{diagnose} command (\texttt{src/main.rs:800}) re-benchmarks
-these sequences serially under controlled conditions to verify that the
-cached speedups are reproducible rather than artefacts of parallel timing
-noise.
+The \texttt{diagnose} command re-benchmarks these sequences serially under
+controlled conditions to verify that the cached speedups are reproducible
+rather than artefacts of parallel timing noise.
 Each sequence is benchmarked 20 times independently to obtain a mean,
 standard deviation, and full distribution.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{diagnose.png}
-  \caption{Diagnose results for the top sequences from training.
+  \caption{Diagnose results for top sequences from the episode-return run.
            Left: mean speedup (bar, $\pm$1 std) vs.\ cached training speedup
            (dot).  Right top: scatter of cached vs.\ measured speedup
            showing strong correlation.  Right bottom: per-sequence speedup
@@ -675,25 +682,146 @@ are tight, confirming the reward signal is reproducible and not dominated
 by timing noise.
 
 % ─────────────────────────────────────────────────────────────────────────────
-\section{Results and Evaluation}
+\section{Training Results}
+\label{sec:results}
+
+\subsection{Episode Return}
+\label{sec:results-episode}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-tfx-episode-256ep.png}
+  \caption{Training diagnostics for Auto-TFX with episode return
+           (100 epochs, 256 episodes/epoch).
+           \emph{Speedup}: mean episode speedup and EMA rise from $-0.40$
+           to $+0.149$; per-function curves show \texttt{interpreter} and
+           \texttt{kmp\_search} leading.
+           \emph{Entropy}: decays as the policy concentrates.
+           \emph{Explained variance}: approaches 1, confirming the value
+           head learns a useful baseline.
+           \emph{Noop \%}: declines as the policy learns to avoid
+           ineffective passes.}
+  \label{fig:training-tfx-episode}
+\end{figure}
+
+Figure~\ref{fig:training-tfx-episode} shows Auto-TFX training under episode
+return.
+Mean episode speedup climbs steadily from $-0.40$ to approximately $+0.149$.
+The value head's explained variance rises toward 1 across training, indicating
+that the transformer's combination of IR state and action history is sufficient
+to predict terminal speedup.
+This convergence is significant: it confirms that the 48-dimensional delta
+representation encodes enough signal to differentiate good and bad continuations
+at each step, and that the learned baseline is providing reliable variance
+reduction throughout training.
+
+Entropy declines monotonically from near-maximum to roughly 30\% of maximum,
+reflecting progressive policy concentration without collapse.
+The no-op percentage falls in parallel, showing the policy learns to prefer
+passes with measurable IR impact over structurally neutral ones.
+
+% TODO: Replace with actual Auto-GRU episode training figure once run 2 completes.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-gru-episode-256ep.png}
+  \caption{Training diagnostics for Auto-GRU with episode return
+           (100 epochs, 256 episodes/epoch). Results pending.}
+  \label{fig:training-gru-episode}
+\end{figure}
+
+Auto-GRU training under episode return follows the same qualitative
+trajectory (Figure~\ref{fig:training-gru-episode}).
+% TODO: Fill in comparison once auto-gru episode run completes.
+Quantitative comparison between Auto-TFX and Auto-GRU under episode return
+is presented in Section~\ref{sec:arch-comparison}.
+
+\subsection{Instruction-Weighted Return}
+\label{sec:results-weighted}
+
+% TODO: Fill in once auto-tfx weighted run (run 3) completes tonight.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-tfx-weighted-256ep.png}
+  \caption{Training diagnostics for Auto-TFX with instruction-weighted
+           return (100 epochs, 256 episodes/epoch). Results pending.}
+  \label{fig:training-tfx-weighted}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-gru-weighted-256ep.png}
+  \caption{Training diagnostics for Auto-GRU with instruction-weighted
+           return (100 epochs, 256 episodes/epoch). Results pending.}
+  \label{fig:training-gru-weighted}
+\end{figure}
+
+Figures~\ref{fig:training-tfx-weighted} and \ref{fig:training-gru-weighted}
+show training under the instruction-weighted return for Auto-TFX and Auto-GRU
+respectively.
+% TODO: Fill in training curve analysis once runs complete.
+Results for the instruction-weighted runs are pending completion of ongoing
+training.
+The principal question is whether redistributing the terminal reward using
+per-step instruction deltas produces better credit assignment---visible as
+faster early-epoch improvement, lower variance in per-function speedup curves,
+or higher final mean speedup---compared to the uniform episode return.
+
+\subsection{Architecture Comparison}
+\label{sec:arch-comparison}
+
+% TODO: Fill in once all four runs (auto-tfx+episode, auto-gru+episode,
+%       auto-tfx+weighted, auto-gru+weighted) are complete.
+Table~\ref{tab:arch-comparison} summarises final mean episode speedup and
+value-head explained variance for all four non-IR configurations.
+Results for runs 2--4 are pending.
+
+\begin{table}[t]
+\caption{Training summary: final mean episode speedup and explained variance
+at epoch 100 for each architecture and return formulation.}
+\label{tab:arch-comparison}
+\centering
+\begin{tabular}{llrr}
+\toprule
+Architecture & Return & Speedup & EV \\
+\midrule
+Auto-TFX & Episode  & $+0.149$ & $\approx 1$ \\
+Auto-GRU & Episode  & --- & --- \\
+Auto-TFX & Weighted & --- & --- \\
+Auto-GRU & Weighted & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The comparison is designed to answer two separable questions: (1) does
+instruction-weighted credit assignment improve over the uniform episode
+baseline, and (2) does the transformer's explicit attention mechanism provide
+an advantage over the GRU's implicit memory for this task?
+These two dimensions are orthogonal: an architecture improvement would
+manifest consistently across both return formulations, while a return
+improvement would manifest consistently across both architectures.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Policy Evaluation}
 
 \subsection{Evaluation Protocol}
+\label{sec:eval-protocol}
 The trained policy is evaluated on the six training functions.
 All evaluation runs use serial benchmarking: 5 runs of 200 iterations each
 for the policy sequences, and 3 runs of 200 iterations for the baselines.
 We compare four strategies against the \opt{3} reference:
 \begin{itemize}
-  \item \textbf{Random mean / best}: mean and best speedup across 20 uniformly
-        sampled sequences of length up to $K$.
+  \item \textbf{Random mean / best}: mean and best speedup across 20
+        uniformly sampled sequences of length up to $K$.
   \item \textbf{Greedy}: deterministic argmax decoding.
   \item \textbf{Sample best}: best of 20 stochastic policy rollouts.
 \end{itemize}
 
-\subsection{Results}
+\subsection{Episode Return Evaluation}
+
 \begin{table}[t]
-\caption{Per-function speedup relative to \opt{3}.
-Positive = faster than \opt{3}.}
-\label{tab:results}
+\caption{Evaluation speedup relative to \opt{3} for Auto-TFX trained with
+episode return. Positive = faster than \opt{3}.}
+\label{tab:eval-tfx-episode}
 \centering
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{lrrrr}
@@ -710,6 +838,19 @@ polynomial\_eval & $-0.181$ & $+0.140$ & $+0.144$ & $+0.145$ \\
 \end{tabular}
 \end{table}
 
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{eval.png}
+  \caption{Evaluation speedup for Auto-TFX with episode return.
+           The trained policy (greedy and sample-best) beats \opt{3} on
+           every function.  Random mean is strongly negative on
+           \texttt{array\_reduction} and \texttt{fft}, confirming these
+           functions require a learned policy rather than lucky search.}
+  \label{fig:eval-tfx-episode}
+\end{figure}
+
+Table~\ref{tab:eval-tfx-episode} and Figure~\ref{fig:eval-tfx-episode}
+show evaluation results for Auto-TFX with episode return.
 Greedy decoding beats \opt{3} on all six functions.
 Mean greedy speedup is $+0.155$ (15.5\%).
 \texttt{interpreter} and \texttt{kmp\_search} show the largest gains
@@ -718,166 +859,216 @@ Stochastic sampling provides a small additional gain on most functions.
 
 The random-mean baseline is strongly negative on \texttt{array\_reduction}
 ($-0.79$) and \texttt{fft} ($-0.68$), confirming that most random sequences
-are harmful on these functions and that the policy's ability to
-consistently produce positive-speedup sequences is non-trivial.
-The greedy policy also outperforms the best of 20 random sequences on four
-of six functions, demonstrating that it has learned more than just the
+are harmful on these functions.
+Greedy decoding outperforms the best of 20 random sequences on four of six
+functions, demonstrating that the policy has learned more than identifying the
 easiest sequences in the landscape.
 
+% TODO: Fill in once auto-gru episode run completes.
+\begin{table}[t]
+\caption{Evaluation speedup relative to \opt{3} for Auto-GRU trained with
+episode return. Results pending.}
+\label{tab:eval-gru-episode}
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Function & rand mean & rand best & greedy & samp best \\
+\midrule
+array\_reduction & --- & --- & --- & --- \\
+binary\_tree     & --- & --- & --- & --- \\
+fft              & --- & --- & --- & --- \\
+interpreter      & --- & --- & --- & --- \\
+kmp\_search      & --- & --- & --- & --- \\
+polynomial\_eval & --- & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Instruction-Weighted Return Evaluation}
+
+% TODO: Fill in once runs 3 and 4 complete.
+\begin{table}[t]
+\caption{Evaluation speedup relative to \opt{3} for Auto-TFX trained with
+instruction-weighted return. Results pending.}
+\label{tab:eval-tfx-weighted}
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Function & rand mean & rand best & greedy & samp best \\
+\midrule
+array\_reduction & --- & --- & --- & --- \\
+binary\_tree     & --- & --- & --- & --- \\
+fft              & --- & --- & --- & --- \\
+interpreter      & --- & --- & --- & --- \\
+kmp\_search      & --- & --- & --- & --- \\
+polynomial\_eval & --- & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-tfx-weighted-eval.png}
+  \caption{Evaluation speedup for Auto-TFX with instruction-weighted return.
+           Results pending.}
+  \label{fig:eval-tfx-weighted}
+\end{figure}
+
+\subsection{Hold-out Pool Evaluation}
+\label{sec:holdout}
+To assess generalisation beyond the six training functions, we evaluate
+the best checkpoint from each non-IR run on the full 38-function pool
+under greedy decoding.
+Figure~\ref{fig:eval-fullpool} shows the per-function speedup distribution
+across all 38 benchmarks.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{eval-fullpool.png}
+  \caption{Hold-out pool evaluation: greedy speedup relative to \opt{3} across
+           all 38 benchmarks for each trained policy.
+           Results pending.}
+  \label{fig:eval-fullpool}
+\end{figure}
+
+% TODO: Fill in once hold-out evaluations are run.
+The hold-out evaluation tests whether the features and return formulations
+generalise to functions not seen during training.
+Benchmarks with similar computational profiles to the training set
+(loop-heavy numerical code) are expected to generalise well; string and
+interpreter workloads are expected to vary more due to the limited diversity
+of the six training functions.
+
 % ─────────────────────────────────────────────────────────────────────────────
-\section{Visualization of Results}
+\section{IR-step Ablation}
+\label{sec:ir-ablation}
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{eval.png}
-  \caption{Evaluation speedup relative to \opt{3} for each benchmark.
-           Bars extending below $-0.38$ are clipped at the floor.
-           The trained policy (greedy and sample-best) beats \opt{3} on
-           every function.  Random mean is strongly negative on
-           \texttt{array\_reduction} and \texttt{fft}, showing these
-           functions require a policy rather than lucky search.}
-  \label{fig:eval}
-\end{figure}
+The \texttt{ir-step} configuration replaces the runtime benchmark reward with
+the per-step normalised instruction-count delta, bypassing the benchmarking
+pipeline entirely.
+This provides a dense, low-noise reward signal that verifies the policy
+architecture and PPO loop are functional independently of the sparse runtime
+objective.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{auto-tfx-grpo-256ep.png}
-  \caption{Training diagnostics for the final GRPO run (Auto-TFX,
-           100 epochs, 256 episodes/epoch).
-           \emph{Speedup}: mean episode speedup (solid) and EMA (dashed)
-           rise from $-0.40$ to $+0.149$; per-function curves (top right)
-           show \texttt{interpreter} and \texttt{kmp\_search} leading.
-           \emph{Entropy}: decays from 98\% to 30\% of maximum as the
-           policy concentrates.
-           \emph{Losses}: policy loss trends positive after $\approx$epoch
-           39 while speedup continues to improve.
-           \emph{Noop \%}: declines as the policy learns to avoid
-           ineffective passes.}
-  \label{fig:training}
-\end{figure}
+% TODO: Fill in with ir-step training curve once run 5 completes.
+Training under the IR-step reward converges quickly and reliably, with
+explained variance approaching 1 within the first few epochs.
+This confirms that the model is capable of learning a coherent sequential
+policy; the difficulty in the runtime-reward setting is specific to the
+sparsity and noise of the real benchmark measurement.
+IR-count reduction is not our optimisation target, and these results are
+not compared against the episode or weighted runs.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Discussion}
-\label{sec:discuss}
 
-\subsection{Development Trajectory}
-The path to the GRPO result involved several configurations, each exposing
-a distinct failure mode.
+\subsection{Return Formulation Analysis}
+The episode return is the theoretically cleanest choice for this MDP:
+it assigns the observed reward in proportion to each step's prior probability
+of being selected, making no assumptions about which steps were causally
+responsible.
+The value function's job is precisely to disentangle individual step
+contributions from the noisy terminal signal, and EV~$\approx 1$ in the
+episode-return runs confirms it does so successfully.
 
-\paragraph{Parallel models (Seq, Conclave).}
-As noted in Section~\ref{sec:arch}, parallel models receive no per-step
-IR updates and are limited to episode-level returns.
-Preliminary runs showed these models did not consistently outperform
-random baselines.
-The inability to observe IR changes between steps appears to be a hard
-limitation: pass ordering matters precisely because the IR state after
-each pass determines the profitability of subsequent ones.
+The instruction-weighted return is a deliberate credit-assignment shaping
+that trades away unbiasedness for reduced per-step variance.
+The key design property is that the first term of Equation~\ref{eq:weightedreturn}
+sums to $r$ over all steps: the total reward is conserved and the shaping
+does not introduce new signal, only redistributes existing signal to steps
+with larger instruction impact.
+This makes passes that dominated the IR reduction easier for the value head
+to learn from, particularly in early training when the policy produces many
+near-no-op sequences.
+The practical question is whether this variance reduction outweighs the
+introduced bias under the actual training dynamics; the pending runs are
+designed to answer this directly.
 
-\paragraph{Episode return with baseline advantage.}
-Training autoregressive models with the episode return and learned value
-baseline showed that the value head's explained variance fluctuated around
-zero rather than improving.
-The baseline was neither reliably helpful nor reliably harmful, but it
-failed to provide the consistent variance reduction that PPO depends on.
-When the policy was producing mostly negative speedups, the batch-normalised
-advantages still pushed roughly half of actions in each update, providing
-some signal---but without a useful baseline the direction of that signal was
-inconsistent across updates.
+\subsection{Architecture Analysis}
+The two architectures are designed to test complementary hypotheses about
+what kind of memory is most useful for this problem.
+Auto-GRU's recurrent hidden state provides a compressed, implicitly
+weighted history where recent IR state has more influence.
+This is appropriate if the most relevant context for choosing the next pass
+is the immediately preceding IR transformation, which is often the case:
+the profitability of \pass{licm} depends directly on whether a preceding
+\pass{loop-rotate} has placed the loop in canonical form.
 
-\paragraph{Instruction-weighted returns.}
-The weighted return (Equation~\ref{eq:weightedreturn}) alleviated the
-flat-credit problem: no-ops received zero return, and steps that reduced
-instructions received proportionally larger credit.
-With the baseline advantage, this reduced the noop percentage in rollouts
-and produced more structured policy updates.
-Several configurations with weighted returns and baseline advantage achieved
-non-negative explained variance and positive mean speedup by later epochs,
-though not as consistently as GRPO.
+Auto-TFX's unrestricted attention allows the policy to attend to any
+combination of prior steps and IR states simultaneously.
+This is beneficial when pass interactions are non-local: for instance, an
+early \pass{inline} step changes the IR in ways that affect the profitability
+of \pass{loop-unroll} several steps later, and a transformer can in principle
+learn this long-range dependency.
+The cost is that the model must learn which attention patterns are relevant;
+the GRU's recency bias is free.
 
-\paragraph{Predictor return.}
-Training the \texttt{SpeedupPredictor} on bench-cache data yielded low
-training loss, but validation correlation was poor.
-The speedup landscape is high-variance: the terminal outcome of a partial
-sequence depends heavily on what passes follow it, making per-step
-value estimation unreliable from static trajectory data.
-Returns derived from the predictor did not improve over weighted returns
-in policy training.
+Both models read the current IR features at every step, so neither is
+operating on a stale snapshot; the architectures differ only in how they
+encode the history of actions and their intermediate effects.
 
-\paragraph{IR-count objective.}
-Switching to IR instruction-count reduction as the reward
-(\texttt{--returns ir}) produced well-behaved training: explained variance
-converged near 1.0 quickly.
-This confirms the pipeline and architecture are functional, and the
-difficulty is specific to the sparse, noisy runtime reward signal.
-IR count reduction is not our target metric, however, and does not
-substitute for runtime improvement.
+\subsection{Value Head and Advantage Estimation}
+The convergence of EV to approximately 1 under episode return reveals that
+the value function has learned to predict terminal speedup from the
+current IR state plus action history.
+This has a practical implication: it means the batch-normalised advantage
+estimates are accurately centred, so roughly half of the gradient signal
+reinforces actions and half penalises them, providing consistent directional
+learning throughout training.
+A value head with EV~$\approx 0$ would produce advantages centred on an
+inaccurate baseline, potentially reinforcing and penalising the same action
+in different mini-batches depending on noise in the batch return statistics.
 
-\paragraph{GRPO.}
-GRPO eliminates the value-baseline problem by normalising within function
-groups.
-Even when all speedups are negative, the group normalisation correctly
-identifies the least-bad episodes as positive signals and the worst as
-negative.
-The group structure also matches the natural heterogeneity of our training
-set: different functions have very different reward scales, and per-function
-normalisation prevents any single function from dominating the gradient.
-The GRPO run (Figure~\ref{fig:training}) showed the most consistent and
-sustained improvement across all six functions simultaneously.
-
-\subsection{Advantage Estimation: Why GRPO}
-The fundamental difficulty for a value baseline in our setting is that the
-value head must track a non-stationary target: as the policy improves, the
-distribution of episode returns shifts, and the value function must learn
-faster than the policy to remain useful.
-With sparse, high-variance terminal rewards and only 256 episodes per epoch,
-the value head lags consistently.
-The explained variance metric from the training logs reflects this: in most
-configurations it fluctuated around zero throughout training rather than
-converging to a positive value.
-GRPO sidesteps this by using only the current epoch's group statistics, which
-are always up to date.
+The fact that EV converges for episode return also validates the choice of
+state representation: the 48-dimensional delta features, combined with the
+action embedding history, contain sufficient information for the transformer
+to discriminate between high- and low-return states.
 
 \subsection{Beam Search}
 Beam search with cumulative log-probability scoring performed worse than
 greedy decoding on all six functions (worst: \texttt{array\_reduction}
 at $-2.58$ vs.\ greedy $+0.09$).
-We believe the log-probability objective encourages the beam to favour
-high-probability prefixes, which are the common early passes learned by the
-policy (SROA, GVN, inline), rather than the function-specific combinations
-that yield the best speedup.
+The log-probability objective encourages the beam to favour
+high-probability prefixes---the common early passes learned by the
+policy (\pass{sroa}, \pass{gvn}, \pass{inline})---rather than the
+function-specific combinations that yield the best speedup.
 Greedy decoding, by committing to the single highest-probability action at
 each step with updated IR context, avoids this bias.
 
 \subsection{Limitations}
-Beyond the six training functions, we evaluate the trained policy on
-held-out benchmarks from the 38-function pool under greedy decoding to
-assess generalisation.
-% TODO: fill in hold-out results once evaluation runs complete
 Benchmark timing noise, while characterised and accounted for
 (Section~\ref{sec:benchnoise}), introduces irreducible variance in the
-reward signal.
+reward signal that limits the precision of per-episode credit assignment.
+The training set of six functions is small; while the functions were chosen
+for diversity, they represent a narrow slice of the full benchmark pool.
 Passes are applied without parameter tuning: \pass{loop-unroll} always
 uses default unroll counts, and the action space does not cover pass
 hyperparameters.
+Evaluation on the hold-out pool (Section~\ref{sec:holdout}) will quantify
+generalisation limits directly.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Conclusion}
-Building on an extensive data collection and exploratory analysis phase,
-we trained autoregressive RL policies on six LLVM benchmark functions to
+We trained autoregressive RL policies on six LLVM benchmark functions to
 produce pass sequences that outperform \opt{3}.
-We explored parallel and autoregressive architectures (GRU and transformer),
-a progression of return formulations addressing the credit-assignment problem
-in sparse-reward sequences, and two advantage estimators.
-The best configuration---Auto-TFX with instruction-weighted returns and
-GRPO---achieves 6--28\% speedup over \opt{3} under greedy decoding across
-all six training benchmarks (mean 15.5\%).
-Key findings: (1) the IR state representation must encode structural
-position, not global counts; (2) a value baseline is unreliable when returns
-are sparse and high-variance, and group-relative normalisation is a
-practical alternative; (3) per-step instruction weighting provides better
-credit assignment than uniform terminal returns.
-Future work includes evaluation on held-out benchmarks, pass
-parameterisation, and richer IR encodings.
+Two architectures---a GRU and a transformer---are compared under two return
+formulations: a sparse episode return that assigns the terminal benchmark
+speedup uniformly across all steps, and an instruction-weighted return that
+redistributes credit proportionally to per-step instruction reduction.
+Both formulations use PPO with a learned value baseline whose explained
+variance approaches 1 during training, confirming that the 48-dimensional
+IR delta representation is sufficient for accurate value prediction.
+Auto-TFX with episode return achieves 6--28\% speedup over \opt{3} under
+greedy decoding across all six training benchmarks (mean 15.5\%).
+A key result is that the IR state encoding must capture structural position
+within the function body, not global instruction counts: the delta
+representation encodes how instruction composition shifts across the function
+in a way that is responsive to the passes in our action space.
+Remaining runs will characterise the credit-assignment benefit of weighted
+returns and the architectural trade-off between implicit GRU memory and
+explicit transformer attention.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

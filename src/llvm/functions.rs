@@ -28,7 +28,6 @@ impl Functions {
                 source: Source { file: path },
                 ir,
                 baselines: None,
-                ir_features: None,
             });
         }
         functions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -42,7 +41,4 @@ pub(crate) struct Function {
     pub(crate) ir: Ir,
     /// None until collect_baselines has run; always Some during training.
     pub(crate) baselines: Option<Baselines>,
-    /// Pre-computed chunked opcode histogram (k * IR_CATEGORY_COUNT floats).
-    /// Populated during the baseline phase alongside baselines.
-    pub(crate) ir_features: Option<Vec<f32>>,
 }
