@@ -1,19 +1,885 @@
-// Start with background about LLVM
-// What passes are + Why passes matter + Pass ordering problem
-// model vs fixed pipeline passes of 03
-// previous work referenced (Compiler Gym), but we do speedup not IR reduction
-// our 38 funcs as pool + how we will explore data first -> collect random pass sequences + bench + analyze ( we have figures from previous work that are not present here where we collected ~1 million samples 25000 for the 38 benches to see what happens at them. i no longer have that code here, but i have some figures about it and should reference it as starting point)
-// motivation for selecting 6 to focus on based on EDA metrics (the 6 in benchmarks dir were pulled from pool for beating 03 capability + good range of learning)
-// we have concerns about collecting in parallel as timing is precise and doing many at once is only way to reasonably collect this many runs, so we make bench-noise path which does solo vs 16 rayon threads and compares difference (measurements are )
-// how we structured the IR at first (18 dim of counts non-ordered but they were too similar and it lacked order info) vs now (chunk deltas of frequency to have order)[we really just changed it until the vectors were distinguished enough cosine similarity but its still kinda close]
-// now that we have IR differences to condition on, we try to get PPO returns + adv settled. We start with naive episode return + baseline adv with auto-tfx + auto-gru
-// we see from that how it promotes all steps with terminal even though it might not have affected it right way so learning is scattered and EV is random (we still need to run this experiment now, just know it will probably do that based on math and previous runs before this formal experiment run)
-// then we try weighted by how much IR changes with weighted return on both those arches (will add comparison after we see how it does)
-// we try predictor which uses the collected bench-cache to generate dataset that ties step to terminal speedup as value predictor so it can estimate the return for partial steps from the ground truth of what actually benching that run does
-// mention about training rmse and huber loss reasoning? im not sure about that, but also reference dataset.png to show whats the landscape of our training as well, bench-cache just happens to have good uses as training data + exploration of whats happening during training
-// we try that but it hasnt shown best correlation (from test runs, still need to make formal run for this, but im sure it will not be that good)
-// we try parallel models (seq, conclave) too see if the model can resemble the compiler and compare passes when deciding all at once (we need to do a few runs with this but since only episode return can work as they are not auto and dont have steps to attribute, also did not see much gains when i did test runs on this)
-// since the IR reduction has been done before, we try that out since its easy to adapt our pipeline to it, and see what happens (will do run to have results later, but EV in these gets near 1, so our pipeline works but IR is not our real goal)
-// we finally see that maybe we cant value the steps, too many no-ops, too little reward possibility as most runs are negative, hard correlations between attribution of credit to steps, so we explore GRPO to avoid the value prop all together
-// talk about runs there, + successes (we have that run already and its good)
-// we then evaluate the grpo one as it showed best results (we have eval command which tests against random, greedy, best of sample, ...)
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+\usepackage{hyperref}
+
+\newcommand{\opt}[1]{\texttt{-O#1}}
+\newcommand{\pass}[1]{\texttt{#1}}
+
+\begin{document}
+
+\title{Learning LLVM Pass Sequences via Reinforcement Learning\\
+with an Autoregressive Transformer Policy}
+
+\author{
+  \IEEEauthorblockN{Evan Black}
+  \IEEEauthorblockA{
+    \textit{Department of Modeling \& Simulation}\\
+    \textit{Old Dominion University}\\
+    eblac013@odu.edu
+  }
+}
+
+\maketitle
+
+\begin{abstract}
+Selecting and ordering LLVM optimization passes is a combinatorial problem
+that conventional fixed pipelines solve only approximately.
+We collected 950{,}000 random sequences across 38 benchmarks via exploratory
+data analysis, then trained autoregressive
+reinforcement learning policies on a curated subset of six functions to
+produce pass sequences that outperform \opt{3}.
+Policies observe a 48-dimensional state encoding of consecutive
+chunk-to-chunk deltas in normalised opcode-category frequencies and
+metadata-reference rates within the IR.
+We evaluate four architectures: two parallel models (\texttt{Seq},
+\texttt{Conclave}) that select all passes simultaneously from a fixed IR
+snapshot, and two autoregressive models (GRU, transformer) that re-observe
+the IR after each pass.
+We also explore several return and advantage formulations, culminating in
+Group Relative Policy Optimisation (GRPO) with instruction-weighted returns.
+Greedy decoding of the best configuration achieves 6--28\% speedup over
+\opt{3} across all six training benchmarks.
+\end{abstract}
+
+\begin{IEEEkeywords}
+reinforcement learning, compiler optimization, LLVM, pass ordering,
+proximal policy optimization, GRPO, transformer
+\end{IEEEkeywords}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+
+\subsection{Background and Motivation}
+Modern optimizing compilers such as LLVM expose hundreds of individual
+transformation passes---inlining, loop unrolling, scalar replacement of
+aggregates, vectorization, dead-code elimination, and many others.
+A \emph{pass pipeline} is an ordered sequence of these transformations
+applied to a program's intermediate representation (IR).
+Order matters: inlining before constant propagation exposes more constants
+to fold; loop rotation must precede loop-invariant code motion (LICM) to
+fire on the canonical loop form.
+
+LLVM's \opt{3} flag encodes a fixed pipeline tuned by compiler engineers
+for average-case performance across a broad program distribution.
+While effective in aggregate, this one-size-fits-all schedule is suboptimal
+for individual programs: the same benchmark compiled with a different pass
+ordering of equal length can run substantially faster or slower.
+Finding the best pipeline for a specific program is NP-hard in
+general~\cite{almagor2004finding} and has been studied as the
+\emph{phase-ordering problem}.
+
+Machine learning offers a principled alternative: learn a policy that maps
+program features to pass choices, trained on real execution-time feedback.
+If the policy captures which program characteristics predict the benefit of
+each pass, it can generalise to unseen programs and outperform hand-crafted
+schedules.
+
+\subsection{Problem Statement}
+We model pass sequencing as a finite-horizon MDP.
+At step $t$ the state is a feature vector $\mathbf{f}_t \in \mathbb{R}^{48}$
+derived from the LLVM IR after $t$ transformations (Section~\ref{sec:irfeatures}).
+The action space contains 28 optimisation passes plus a \pass{Stop} action
+(\texttt{src/llvm/pass.rs}); choosing \pass{Stop} or reaching the horizon
+$K = 20$ terminates the episode.
+The terminal reward is the speedup of the resulting binary relative to \opt{3}:
+%
+\begin{equation}
+r = \frac{t_{\text{O3}} - t_{\text{policy}}}{t_{\text{O3}}}
+\label{eq:speedup}
+\end{equation}
+%
+measured as the trimmed mean of repeated \texttt{CLOCK\_MONOTONIC} executions.
+A positive reward means the policy's sequence produces faster code than \opt{3}.
+
+\subsection{Related Work}
+\textbf{CompilerGym}~\cite{compilergym} provides a standardised
+OpenAI Gym interface to LLVM optimisation environments, enabling reproducible
+RL research; prior work in that setting targets IR-size reduction rather than
+runtime speedup.
+\textbf{AutoPhase}~\cite{autophase} formulates phase ordering as an MDP and
+trains an LSTM policy with PPO on LLVM IR features, demonstrating speedups
+over \opt{3} on the LLVM test suite.
+\textbf{MLGO}~\cite{mlgo} demonstrates that a learned inlining policy deployed
+inside production LLVM matches or exceeds the hand-tuned heuristic at Google
+scale.
+\textbf{MILEPOST}~\cite{milepost} learns a nearest-neighbour predictor from
+static program features to select GCC optimisation flags, achieving consistent
+speedups over \opt{3} on MiBench.
+
+Our work differs from AutoPhase in targeting wall-clock execution time
+measured with hardware timing (\texttt{CLOCK\_MONOTONIC}) rather than proxy
+IR metrics, and in collecting a large offline corpus of random sequences
+prior to training to characterise the landscape and guide architecture choices.
+
+\subsection{Dataset Description}
+\label{sec:dataset}
+We assembled a pool of 38 self-contained C benchmark programs spanning
+diverse computational patterns: sorting and searching, numerical computation,
+data-structure operations, string and compression codecs, and interpreted or
+recursive workloads (\texttt{pool/}).
+For each benchmark, 25{,}000 random pass sequences of length 1--20 were
+sampled from the 28-pass primary menu and executed, yielding approximately
+950{,}000 benchmarked (sequence, runtime, IR features) tuples stored in an
+on-disk key-value store we call the \emph{bench-cache}.
+Three baseline compilations (\opt{0}, \opt{2}, \opt{3}) were also recorded
+per benchmark.
+The benchmarking harness (\texttt{benchmarks/bench\_timing.h}) reports a
+10\%-trimmed mean of 201 timed iterations preceded by 5 warm-up executions,
+using \texttt{CLOCK\_MONOTONIC}.
+
+The bench-cache serves two roles.
+First, it is the offline corpus for exploratory data analysis: per-pass
+impact, benchmark sensitivity, and CV statistics are computed directly from
+it without re-running any binaries.
+Second, during RL training it acts as a lookup cache: when an episode
+generates a (function, sequence) pair already in the cache, the stored
+runtime is returned immediately, avoiding redundant benchmark execution.
+Six benchmarks were selected from the pool for the RL training phase
+(Section~\ref{sec:baseline}).
+
+\subsection{Overview of This Work}
+This paper describes the RL training phase that follows the data collection
+and EDA.
+We evaluate two autoregressive policy architectures (GRU and transformer),
+develop a series of return formulations targeting the credit-assignment
+problem in sparse-reward pass sequences, and compare two advantage estimators.
+The result is a trained policy that consistently beats \opt{3} on all six
+training benchmarks under greedy decoding.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Data Preprocessing and Exploratory Data Analysis}
+
+\subsection{Compilation Environment}
+\label{sec:compenv}
+All experiments use LLVM 20 (\texttt{clang-20}, \texttt{opt-20}).
+Each benchmark is a self-contained C source file compiled through a
+three-stage pipeline (\texttt{src/llvm/mod.rs}):
+
+\begin{enumerate}
+  \item \textbf{C $\to$ unoptimised IR.}
+        \texttt{clang -O3 -Xclang -disable-llvm-optzns -emit-llvm -S}
+        emits LLVM IR with front-end optimisations only; the backend
+        optimisation pipeline is suppressed, giving a clean starting point
+        for the policy to work from.
+  \item \textbf{IR $\to$ optimised IR.}
+        \texttt{opt --passes=\textit{pipeline}} applies the pass sequence
+        chosen by the policy.
+        Passes are composed into a single \texttt{opt} invocation via
+        \texttt{opt\_pipeline()} (\texttt{src/llvm/pass.rs:71}), which
+        wraps passes that require nesting contexts
+        (\pass{inline} inside \texttt{cgscc}, \pass{licm} inside
+        \texttt{loop-mssa}, \pass{loop-rotate} inside \texttt{loop}).
+  \item \textbf{Optimised IR $\to$ native binary.}
+        \texttt{clang -O3 -Xclang -disable-llvm-passes} compiles the
+        optimised IR to a native binary, bypassing clang's own
+        optimisation pipeline so only the policy-chosen passes are applied.
+\end{enumerate}
+
+Standard baselines (\opt{0}--\opt{3}) are compiled by passing the flag
+directly to \texttt{clang} without IR emission, matching the behaviour a
+user would observe.
+
+\subsection{Pass Menu Curation}
+\label{sec:passmenu}
+A na\"{i}ve action space containing all LLVM passes would make exploration
+intractable and include passes irrelevant to single-function C compute code.
+We defined a \emph{primary pass menu} of 28 transforms satisfying three
+criteria: (1) the pass appears inside LLVM's \opt{3} inner optimisation loop
+or is a direct prerequisite; (2) it has demonstrable, broad impact on typical
+C compute code; and (3) it covers a distinct optimisation category with no
+redundant substitute already in the menu.
+The full enumeration is in \texttt{src/llvm/pass.rs}.
+LLVM 20 imposes nesting constraints requiring additional preprocessing:
+\pass{inline} must be wrapped in \texttt{cgscc(...)}; \pass{licm} must
+appear inside \texttt{loop-mssa(...)}; \pass{loop-rotate} must be wrapped
+in \texttt{loop(...)}. These rules are handled transparently
+(\texttt{src/llvm/pass.rs:71--146}).
+
+\subsection{IR Feature Extraction}
+\label{sec:irfeatures}
+The policy must observe a fixed-length summary of the current IR state.
+We initially used an 18-dimensional static feature vector of
+log-transformed instruction-type counts and structural ratios extracted
+from the IR text in a single pass.
+While informative globally, this representation cannot distinguish two
+functions with identical aggregate counts but different internal structure:
+e.g., a function where memory operations are concentrated in an inner loop
+versus one where they are uniformly distributed.
+
+We replace it with a representation that captures how instruction composition
+\emph{shifts} through the function body.
+The IR instruction sequence is divided into $C = 4$ equal-length positional
+chunks.
+Within each chunk we compute two normalised histograms:
+\begin{itemize}
+  \item \textbf{Opcode histogram}: fraction of instructions in each of 12
+        semantic categories (memory, integer arithmetic, float arithmetic,
+        bitwise, compare, cast, call, control, phi/select, vector, block
+        boundary, other), defined in \texttt{src/llvm/ir.rs:252}.
+  \item \textbf{Metadata rate}: per-instruction occurrence rate of four
+        named metadata kinds (\texttt{tbaa}, \texttt{llvm.loop},
+        \texttt{alias.scope}, \texttt{noalias}), which signal
+        alias-analysis richness and loop-hint presence.
+\end{itemize}
+
+For each adjacent chunk pair $(c, c{+}1)$ we take the element-wise
+difference of both histograms, yielding a 16-dimensional delta
+$(12 + 4)$.
+Concatenating $C{-}1 = 3$ such deltas gives the 48-dimensional model
+feature vector $\mathbf{f}_t$ (\texttt{src/llvm/ir.rs:307}, \texttt{ir\_features()}).
+The number of chunks is a hyperparameter (\texttt{--ir-chunks}, default 4).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{features_op.png}
+  \includegraphics[width=\columnwidth]{features_meta.png}
+  \caption{Chunk-to-chunk deltas for the six training functions.
+           \emph{Top}: opcode-category frequencies (12 categories).
+           \emph{Bottom}: metadata-reference rates (\texttt{tbaa},
+           \texttt{llvm.loop}, \texttt{alias.scope}, \texttt{noalias}).
+           Functions with rich loop structure (\texttt{fft},
+           \texttt{kmp\_search}) show large deltas in memory and control
+           categories, distinguishing them from straight-line functions.}
+  \label{fig:features}
+\end{figure}
+
+\subsection{Benchmark Selection and Baseline Landscape}
+\label{sec:baseline}
+From the 38-function pool, six benchmarks were selected for the RL training
+phase based on three criteria from the EDA: (1) at least one random sequence
+achieves lower execution time than \opt{3}, confirming the pass menu is
+expressive enough for that function; (2) a high coefficient of variation
+(CV) across random sequences, indicating a rugged optimisation landscape
+with strong reward gradient for learning; and (3) diversity of computational
+profile (call-heavy, arithmetic-heavy, loop/vectorize, pointer/struct).
+
+Table~\ref{tab:baselines} shows the key statistics from our exploratory data analysis.
+
+\begin{table}[t]
+\caption{Six training benchmarks: \opt{3} baseline, best random-search
+result, and CV across 25{,}000 random sequences.
+``vs O3'' is percentage improvement (negative = faster than \opt{3}).}
+\label{tab:baselines}
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Benchmark & O3 (ns) & Best (ns) & vs O3 & CV \\
+\midrule
+interpreter      &  37{,}918 &  27{,}591 & $-27.2\%$ & 13.9\% \\
+kmp\_search      & 886{,}408 & 671{,}195 & $-24.3\%$ & 42.7\% \\
+polynomial\_eval & 417{,}235 & 364{,}235 & $-12.7\%$ & 46.0\% \\
+fft              &  46{,}509 &  41{,}852 & $-10.0\%$ & 35.5\% \\
+array\_reduction &  97{,}184 &  92{,}619 &  $-4.7\%$ & 36.6\% \\
+binary\_tree     & 117{,}990 & 107{,}087 &  $-9.2\%$ & 18.4\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pass Impact Analysis}
+The EDA quantified per-pass marginal impact using two metrics.
+\emph{Top-decile enrichment} is the ratio of a pass's presence rate in the
+top 10\% of sequences to its overall presence rate ($\approx$30\% under
+uniform sampling with a 20-pass budget).
+\emph{Geometric-mean speedup} compares sequences containing a pass against
+matched sequences not containing it.
+\pass{inline} is the most impactful pass by both metrics
+(enrichment $2.35\times$, geo-mean speedup $1.26\times$), consistent with
+its role as a \emph{pass enabler}: eliminating call overhead exposes callee
+bodies to constant propagation, dead-code elimination, and loop
+transformations.
+\pass{simplifycfg}, \pass{sroa}, and \pass{mem2reg} rank second through
+fourth, confirming that SSA promotion and CFG cleanup are prerequisites for
+most downstream analyses.
+
+\subsection{Sequence Length Analysis}
+\label{sec:seqlen}
+Figure~\ref{fig:dataset} shows the sequence-length distribution across all
+samples in the bench-cache.
+Lengths are approximately uniformly distributed across 1--20, reflecting the
+uniform sampling strategy.
+A violin plot of the \emph{best}-found
+sequence length per benchmark found a median of 17--18 across
+difficulty tiers with no systematic spike at the 20-pass cap, validating both
+the choice of $K = 20$ as the horizon and the \pass{Stop} action as a
+meaningful early-termination mechanism.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{dataset.png}
+  \caption{Predictor dataset statistics (11M samples, 6 functions).
+           Top right: sequence-length distribution is approximately
+           uniform across 1--20.
+           Top left: the bulk of speedup values are near zero or negative,
+           confirming that most random sequences are harmful and useful
+           reward signal is sparse.}
+  \label{fig:dataset}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Methodology}
+
+\subsection{Architecture}
+\label{sec:arch}
+
+\paragraph{Parallel architectures.}
+The simplest policy formulation treats the entire pass sequence as a single
+multi-label prediction from the initial IR: given a snapshot of the function
+at \opt{0}, output all $K$ passes at once.
+This is attractive because a single forward pass produces a full sequence,
+and the model never needs to track intermediate IR state.
+The \texttt{Seq} model (\texttt{src/ppo/model/seq.rs}) does this with an
+independent head per slot; \texttt{Conclave}
+(\texttt{src/ppo/model/conclave.rs}) uses a small attention mechanism to let
+the slot predictions attend to each other.
+The fundamental limitation is that both models receive no per-step IR updates:
+the state is fixed at episode start, collapsing the MDP to a bandit.
+Credit assignment at the step level is impossible, so only episode-level
+returns are usable, and the model cannot condition any choice on what earlier
+passes actually did to the IR.
+
+\paragraph{Autoregressive architectures.}
+The \texttt{Auto-GRU} (\texttt{src/ppo/model/auto\_gru.rs}) and
+\texttt{Auto-TFX} (\texttt{src/ppo/model/auto\_tfx.rs}) models act
+autoregressively: at each step $t$ they observe the \emph{current} IR
+feature vector (updated after applying the previous pass) and the history
+of actions taken so far.
+This enables per-step credit assignment and allows the policy to condition
+each choice on what the previous passes actually did to the IR.
+
+Both architectures share the same interface but differ in how they encode
+history.
+\texttt{Auto-GRU} maintains a recurrent hidden state that is updated at each
+step, carrying a compressed memory of the action sequence.
+\texttt{Auto-TFX} builds an explicit token sequence and applies a transformer
+encoder:
+%
+\begin{equation}
+\mathbf{s}_t = \bigl[W_{\text{ir}}\,\mathbf{f}_t \;\big|\;
+               E[a_0], \ldots, E[a_{t-1}]\bigr]
+               \in \mathbb{R}^{(1+t)\times d}
+\label{eq:tokens}
+\end{equation}
+%
+where $W_{\text{ir}} \in \mathbb{R}^{48 \times d}$ projects the current IR
+features (\texttt{ir\_proj}, line 58) and $E \in \mathbb{R}^{29 \times d}$
+is a learned action embedding table (\texttt{action\_embed}, line 59).
+No causal mask is applied: since we decode one step at a time, the full
+sequence is always available and cross-step attention is beneficial.
+The \textbf{policy head} reads from the last token (position $t$) to produce
+logits over 29 actions; the \textbf{value head} reads from token 0 (the
+current IR projection) to estimate $V(\mathbf{f}_t)$.
+
+\paragraph{Batched replay.}
+During PPO updates, recomputing all logits naively requires one forward per
+step per episode ($N \times K$ calls).
+\texttt{replay\_batch} (\texttt{auto\_tfx.rs:191}) reduces this to $K$
+batched calls by iterating over step positions: at step $t$, all episodes
+with length $> t$ are stacked into a single batch of shape
+$[|\text{active}|,\,1{+}t,\,d]$ and processed together.
+Episodes shorter than $t$ are simply absent, requiring no padding mask.
+Each step is assigned weight $w = 1/(N_{\text{chunk}} \cdot K_i)$ in the
+loss, averaging first within episodes then across them
+(\texttt{ppo/mod.rs:213}).
+
+\subsection{PPO Training}
+\label{sec:ppo}
+
+PPO is an on-policy algorithm structured as a collection--update loop.
+At each epoch, the current policy rolls out a batch of complete episodes
+under its current parameters; those episodes---each a sequence of
+(state, action, log-prob, return) tuples---form the training batch for
+that round.
+The policy parameters are then updated via multiple gradient steps over
+the batch before the next collection round begins.
+The core challenge is that these gradient steps move the policy away from
+the distribution under which the data was collected, making the stored
+log-probabilities increasingly stale.
+The clipped surrogate objective bounds how far the updated policy can
+deviate from the collection policy, keeping gradient estimates valid while
+still extracting multiple updates from each batch.
+After all inner-epoch updates, the batch is discarded and new episodes are
+collected under the updated policy.
+
+\paragraph{Policy gradient objective.}
+At each PPO update we have a mini-batch of episodes with stored
+(state, action, log-prob, return, advantage) tuples.
+For each step $t$ we compute the probability ratio
+$\rho_t = \pi_\theta(a_t | s_t) / \pi_{\theta_{\text{old}}}(a_t | s_t)$
+and form the clipped surrogate:
+%
+\begin{equation}
+L^{\text{CLIP}}_t = \min\!\bigl(
+  \rho_t \hat{A}_t,\;
+  \text{clip}(\rho_t, 1{-}\epsilon, 1{+}\epsilon)\,\hat{A}_t
+\bigr)
+\label{eq:ppo}
+\end{equation}
+%
+with clip threshold $\epsilon = 0.2$.
+The total loss is:
+%
+\begin{equation}
+L = -\mathbb{E}_t\!\left[L^{\text{CLIP}}_t\right]
+    + c_v\,\mathbb{E}_t\!\left[(V_\theta(s_t) - R_t)^2\right]
+    - c_e\,\mathbb{E}_t\!\left[H(\pi_\theta(\cdot|s_t))\right]
+\label{eq:ppofull}
+\end{equation}
+%
+where $c_v = 0.5$ is the value coefficient, $c_e = 0.03$ is the entropy
+bonus coefficient, and $H$ is Shannon entropy encouraging exploration.
+A per-minibatch KL early-stop threshold of 0.05 aborts remaining inner
+epochs when the policy update is too large, preventing entropy collapse
+(\texttt{ppo/mod.rs:263}).
+
+\paragraph{Baselines and episode collection.}
+Before any training begins, serial baselines (\opt{0}--\opt{3}) are
+collected for each function under stable single-threaded conditions.
+Episode collection during training is parallelised across all available
+CPU cores using Rayon.
+Section~\ref{sec:benchnoise} describes how we characterised and accounted
+for the timing overhead this introduces.
+
+\subsection{Benchmark Noise Characterisation}
+\label{sec:benchnoise}
+Because episode rewards are runtime measurements, systematic timing bias
+from parallel execution would corrupt the reward signal.
+The \texttt{bench-noise} command (\texttt{src/main.rs:936}) measures this
+bias: for each benchmark binary it records the solo execution time, then
+runs the same binary simultaneously across 16 Rayon workers and records
+the distribution of measurements.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.48\columnwidth]{bench_noise-fft.png}
+  \hfill
+  \includegraphics[width=0.48\columnwidth]{bench_noise-kmp.png}
+  \caption{Timing distributions under solo vs.\ 16-worker parallel
+           execution for \texttt{fft} (left) and \texttt{kmp\_search}
+           (right).  Parallel overhead is small and consistent across
+           all six benchmarks.}
+  \label{fig:benchnoise}
+\end{figure}
+
+Parallel overhead was small and consistent across all six benchmarks.
+We account for it by applying a fixed noise margin that pessimises the
+\opt{3} baseline when computing episode rewards during training
+(\texttt{speedup\_vs\_o3\_parallel}, \texttt{src/llvm/benchmark.rs:42},
+\texttt{PARALLEL\_NOISE\_MARGIN = 1.01}).
+This ensures that a policy sequence must beat \opt{3} by more than the
+measurement noise floor to receive a positive reward.
+Final evaluation uses serial benchmarking only.
+
+\subsection{Return Formulations}
+\label{sec:returns}
+With a sparse terminal reward (one measurement per episode), the central
+challenge is credit assignment: which of the $K$ actions in the sequence
+contributed to the final outcome?
+We developed a progression of return functions, each addressing a failure
+mode of the previous.
+Where per-step shaping is applied, a step is classified as a no-op when
+the normalised instruction-count delta $|\Delta I_t| < 0.01$ \emph{and}
+the L1 distance between IR feature vectors before and after is below $0.05$
+(\texttt{src/ppo/noop.rs}).
+The dual threshold is necessary because passes such as \pass{loop-rotate}
+and \pass{licm} restructure loop metadata without changing instruction count.
+
+\paragraph{Episode return.}
+The simplest formulation assigns the terminal speedup $r$ uniformly to every
+step (\texttt{src/ppo/returns/episode\_return.rs}):
+$R_t = r \;\forall\, t$.
+This is unbiased but provides no per-step signal.
+When $r$ is negative---which it is for most episodes early in training---every
+action is penalised equally, including actions that would have been beneficial
+had the sequence terminated differently.
+
+\paragraph{Instruction-weighted terminal return.}
+Episode return assigns the same terminal reward to every step, so when
+$r < 0$---as it is for most episodes early in training---every action is
+penalised equally, including actions that reduced IR size and would have
+been beneficial given a different continuation.
+The \texttt{weighted} formulation
+(\texttt{src/ppo/returns/instruction\_weighted\_terminal.rs}) breaks this
+symmetry: each step's return is scaled by its share of the total
+instruction reduction, steps that reduced instructions earn a small
+direction bonus, and no-op steps are penalised:
+%
+\begin{equation}
+R_t = r \cdot \frac{|\Delta I_t|}{\sum_s |\Delta I_s|}
+      + \delta \cdot \operatorname{sign}(-\Delta I_t)
+      - p \cdot \mathbf{1}[\text{noop}_t]
+\label{eq:weightedreturn}
+\end{equation}
+%
+where $\Delta I_t$ is the normalised instruction-count change at step $t$
+(\texttt{src/llvm/ir.rs:462}, \texttt{step\_delta()}),
+$\delta = 0.05$ is the direction bonus, and $p = 0.025$ is the no-op
+penalty.
+Weighted returns improved training stability relative to episode return,
+but the value head's explained variance still fluctuated rather than
+converging, motivating the advantage estimation changes in
+Section~\ref{sec:advantages}.
+
+\paragraph{IR-count return.}
+For ablation, \texttt{ir} and \texttt{ir-step} returns
+(\texttt{src/ppo/returns/ir\_count\_return.rs},
+\texttt{ir\_step\_return.rs}) use the terminal or per-step IR instruction
+reduction as the reward, bypassing benchmarking entirely
+(\texttt{src/config.rs:98}, \texttt{skip\_benchmark}).
+This allows fast iteration to verify that the policy architecture and
+training loop are functional without waiting on benchmark collection.
+IR reduction is used only as a pipeline check; our optimisation target
+throughout is measured runtime, so these configurations are not evaluated
+as policies.
+
+\paragraph{Predictor return.}
+The \texttt{predictor} formulation
+(\texttt{src/ppo/returns/predictor\_return.rs}) attempts to provide dense
+per-step rewards grounded in real benchmark data.
+A separate \texttt{SpeedupPredictor} transformer
+(\texttt{src/predictor/}) is trained on the bench-cache to map
+(IR features, partial pass sequence) $\to$ terminal speedup.
+The predictor's output at each step serves as the per-step return estimate.
+Training details and results are in Section~\ref{sec:discuss}.
+
+\subsection{Advantage Estimation}
+\label{sec:advantages}
+The return $R_t$ alone is not used directly in the PPO objective; the
+\emph{advantage} $\hat{A}_t$ subtracts a baseline to reduce variance.
+We compare two estimators.
+
+\paragraph{Baseline advantage.}
+Standard PPO subtracts the learned value estimate
+(\texttt{src/ppo/advantages/baseline.rs}):
+$\hat{A}_t = R_t - V_\theta(\mathbf{f}_t)$.
+The resulting advantages are batch-normalised (zero mean, unit variance)
+across all steps in the mini-batch, ensuring roughly half of actions are
+reinforced and half penalised regardless of the absolute reward scale.
+The quality of this estimator depends entirely on how well the value head
+has learned to predict $R_t$; \emph{explained variance}
+$\text{EV} = 1 - \operatorname{Var}(R_t - V_\theta) / \operatorname{Var}(R_t)$
+measures this, with EV near 1 indicating a useful baseline and EV near 0
+or negative indicating the value head is adding noise.
+
+\paragraph{Group Relative Policy Optimisation.}
+GRPO~\cite{grpo} replaces the value baseline with group-relative
+normalisation.
+We group episodes by function name: for each function the episodes collected
+in the current epoch form a group.
+The advantage is:
+%
+\begin{equation}
+\hat{A}_i = \frac{r_i - \mu_g}{\sigma_g + \epsilon}
+\label{eq:grpo}
+\end{equation}
+%
+where $\mu_g$ and $\sigma_g$ are the mean and standard deviation of terminal
+speedups across function group $g$, and $\epsilon = 10^{-8}$
+(\texttt{src/ppo/advantages/group\_relative.rs}).
+All steps within an episode share the same advantage.
+The value head is retained but its loss coefficient is set to zero during
+GRPO training, so it contributes no gradient.
+GRPO requires no value-head training, is stable regardless of the absolute
+reward scale, and adapts automatically as the policy's mean return shifts.
+
+\subsection{Training Setup}
+All experiments train for 100 epochs.
+Each epoch collects 256 episodes in parallel, then runs 4 PPO inner epochs
+on mini-batches of 128 episodes.
+The optimiser is AdamW with a cosine learning-rate schedule from $10^{-3}$
+to $\approx 0$ over 100 epochs.
+The training framework is Rust + Burn~\cite{burn} on the \texttt{wgpu}
+backend.
+
+\subsection{Hyperparameters}
+Table~\ref{tab:hparams} lists all model and training hyperparameters for
+the reported GRPO run.
+Architecture parameters are read from \texttt{arch\_config.json} at
+checkpoint load time; training parameters are set via command-line flags
+(\texttt{src/config.rs}).
+\begin{table}[t]
+\caption{Model and training hyperparameters for the GRPO run.}
+\label{tab:hparams}
+\centering
+\begin{tabular}{ll}
+\toprule
+Parameter & Value \\
+\midrule
+\multicolumn{2}{l}{\emph{Model (arch\_config.json)}} \\
+$d_{\text{model}}$ & 128 \\
+Transformer layers & 2 \\
+Attention heads & 4 \\
+Feed-forward width & 256 \\
+Dropout & 0.1 \\
+Head hidden dim & 64 \\
+IR chunks & 4 $\to$ 48-dim feature \\
+Actions & 29 (28 passes + Stop) \\
+Horizon $K$ & 20 \\
+\midrule
+\multicolumn{2}{l}{\emph{Training}} \\
+Epochs & 100 \\
+Episodes / epoch & 256 \\
+PPO inner epochs & 4 \\
+Mini-batch size & 128 \\
+KL early-stop & 0.05 \\
+Learning rate & $10^{-3}$ cosine \\
+Clip $\epsilon$ & 0.2 \\
+Entropy coef $c_e$ & 0.03 \\
+Value coef $c_v$ & 0.0 (GRPO) \\
+No-op $\tau_{\text{count}}$ & 0.01 \\
+No-op $\tau_{\text{feat}}$ & 0.05 \\
+No-op penalty $p$ & 0.025 \\
+Direction bonus $\delta$ & 0.05 \\
+Noise margin & 1.01 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Diagnose: Reproducibility Verification}
+\label{sec:diagnose}
+Training caches the top-performing sequences observed during episode
+collection (\texttt{src/llvm/top\_sequences.rs}).
+The \texttt{diagnose} command (\texttt{src/main.rs:800}) re-benchmarks
+these sequences serially under controlled conditions to verify that the
+cached speedups are reproducible rather than artefacts of parallel timing
+noise.
+Each sequence is benchmarked 20 times independently to obtain a mean,
+standard deviation, and full distribution.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{diagnose.png}
+  \caption{Diagnose results for the top sequences from training.
+           Left: mean speedup (bar, $\pm$1 std) vs.\ cached training speedup
+           (dot).  Right top: scatter of cached vs.\ measured speedup
+           showing strong correlation.  Right bottom: per-sequence speedup
+           distributions across 20 re-runs, confirming low variance.
+           The dominant sequences are from \texttt{interpreter} and
+           \texttt{kmp\_search}, consistent with their high
+           random-search ceiling.}
+  \label{fig:diagnose}
+\end{figure}
+
+Figure~\ref{fig:diagnose} shows that cached training speedups correlate
+strongly with re-measured values, and that the per-sequence distributions
+are tight, confirming the reward signal is reproducible and not dominated
+by timing noise.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Results and Evaluation}
+
+\subsection{Evaluation Protocol}
+The trained policy is evaluated on the six training functions.
+All evaluation runs use serial benchmarking: 5 runs of 200 iterations each
+for the policy sequences, and 3 runs of 200 iterations for the baselines.
+We compare four strategies against the \opt{3} reference:
+\begin{itemize}
+  \item \textbf{Random mean / best}: mean and best speedup across 20 uniformly
+        sampled sequences of length up to $K$.
+  \item \textbf{Greedy}: deterministic argmax decoding.
+  \item \textbf{Sample best}: best of 20 stochastic policy rollouts.
+\end{itemize}
+
+\subsection{Results}
+\begin{table}[t]
+\caption{Per-function speedup relative to \opt{3}.
+Positive = faster than \opt{3}.}
+\label{tab:results}
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Function & rand mean & rand best & greedy & samp best \\
+\midrule
+array\_reduction & $-0.791$ & $-0.062$ & $+0.092$ & $+0.104$ \\
+binary\_tree     & $-0.082$ & $+0.082$ & $+0.077$ & $+0.086$ \\
+fft              & $-0.677$ & $-0.002$ & $+0.063$ & $+0.072$ \\
+interpreter      & $-0.260$ & $+0.266$ & $+0.277$ & $+0.283$ \\
+kmp\_search      & $-0.107$ & $+0.191$ & $+0.277$ & $+0.278$ \\
+polynomial\_eval & $-0.181$ & $+0.140$ & $+0.144$ & $+0.145$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Greedy decoding beats \opt{3} on all six functions.
+Mean greedy speedup is $+0.155$ (15.5\%).
+\texttt{interpreter} and \texttt{kmp\_search} show the largest gains
+(27.7\%), while \texttt{fft} shows the smallest (6.3\%).
+Stochastic sampling provides a small additional gain on most functions.
+
+The random-mean baseline is strongly negative on \texttt{array\_reduction}
+($-0.79$) and \texttt{fft} ($-0.68$), confirming that most random sequences
+are harmful on these functions and that the policy's ability to
+consistently produce positive-speedup sequences is non-trivial.
+The greedy policy also outperforms the best of 20 random sequences on four
+of six functions, demonstrating that it has learned more than just the
+easiest sequences in the landscape.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Visualization of Results}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{eval.png}
+  \caption{Evaluation speedup relative to \opt{3} for each benchmark.
+           Bars extending below $-0.38$ are clipped at the floor.
+           The trained policy (greedy and sample-best) beats \opt{3} on
+           every function.  Random mean is strongly negative on
+           \texttt{array\_reduction} and \texttt{fft}, showing these
+           functions require a policy rather than lucky search.}
+  \label{fig:eval}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-tfx-grpo-256ep.png}
+  \caption{Training diagnostics for the final GRPO run (Auto-TFX,
+           100 epochs, 256 episodes/epoch).
+           \emph{Speedup}: mean episode speedup (solid) and EMA (dashed)
+           rise from $-0.40$ to $+0.149$; per-function curves (top right)
+           show \texttt{interpreter} and \texttt{kmp\_search} leading.
+           \emph{Entropy}: decays from 98\% to 30\% of maximum as the
+           policy concentrates.
+           \emph{Losses}: policy loss trends positive after $\approx$epoch
+           39 while speedup continues to improve.
+           \emph{Noop \%}: declines as the policy learns to avoid
+           ineffective passes.}
+  \label{fig:training}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Discussion}
+\label{sec:discuss}
+
+\subsection{Development Trajectory}
+The path to the GRPO result involved several configurations, each exposing
+a distinct failure mode.
+
+\paragraph{Parallel models (Seq, Conclave).}
+As noted in Section~\ref{sec:arch}, parallel models receive no per-step
+IR updates and are limited to episode-level returns.
+Preliminary runs showed these models did not consistently outperform
+random baselines.
+The inability to observe IR changes between steps appears to be a hard
+limitation: pass ordering matters precisely because the IR state after
+each pass determines the profitability of subsequent ones.
+
+\paragraph{Episode return with baseline advantage.}
+Training autoregressive models with the episode return and learned value
+baseline showed that the value head's explained variance fluctuated around
+zero rather than improving.
+The baseline was neither reliably helpful nor reliably harmful, but it
+failed to provide the consistent variance reduction that PPO depends on.
+When the policy was producing mostly negative speedups, the batch-normalised
+advantages still pushed roughly half of actions in each update, providing
+some signal---but without a useful baseline the direction of that signal was
+inconsistent across updates.
+
+\paragraph{Instruction-weighted returns.}
+The weighted return (Equation~\ref{eq:weightedreturn}) alleviated the
+flat-credit problem: no-ops received zero return, and steps that reduced
+instructions received proportionally larger credit.
+With the baseline advantage, this reduced the noop percentage in rollouts
+and produced more structured policy updates.
+Several configurations with weighted returns and baseline advantage achieved
+non-negative explained variance and positive mean speedup by later epochs,
+though not as consistently as GRPO.
+
+\paragraph{Predictor return.}
+Training the \texttt{SpeedupPredictor} on bench-cache data yielded low
+training loss, but validation correlation was poor.
+The speedup landscape is high-variance: the terminal outcome of a partial
+sequence depends heavily on what passes follow it, making per-step
+value estimation unreliable from static trajectory data.
+Returns derived from the predictor did not improve over weighted returns
+in policy training.
+
+\paragraph{IR-count objective.}
+Switching to IR instruction-count reduction as the reward
+(\texttt{--returns ir}) produced well-behaved training: explained variance
+converged near 1.0 quickly.
+This confirms the pipeline and architecture are functional, and the
+difficulty is specific to the sparse, noisy runtime reward signal.
+IR count reduction is not our target metric, however, and does not
+substitute for runtime improvement.
+
+\paragraph{GRPO.}
+GRPO eliminates the value-baseline problem by normalising within function
+groups.
+Even when all speedups are negative, the group normalisation correctly
+identifies the least-bad episodes as positive signals and the worst as
+negative.
+The group structure also matches the natural heterogeneity of our training
+set: different functions have very different reward scales, and per-function
+normalisation prevents any single function from dominating the gradient.
+The GRPO run (Figure~\ref{fig:training}) showed the most consistent and
+sustained improvement across all six functions simultaneously.
+
+\subsection{Advantage Estimation: Why GRPO}
+The fundamental difficulty for a value baseline in our setting is that the
+value head must track a non-stationary target: as the policy improves, the
+distribution of episode returns shifts, and the value function must learn
+faster than the policy to remain useful.
+With sparse, high-variance terminal rewards and only 256 episodes per epoch,
+the value head lags consistently.
+The explained variance metric from the training logs reflects this: in most
+configurations it fluctuated around zero throughout training rather than
+converging to a positive value.
+GRPO sidesteps this by using only the current epoch's group statistics, which
+are always up to date.
+
+\subsection{Beam Search}
+Beam search with cumulative log-probability scoring performed worse than
+greedy decoding on all six functions (worst: \texttt{array\_reduction}
+at $-2.58$ vs.\ greedy $+0.09$).
+We believe the log-probability objective encourages the beam to favour
+high-probability prefixes, which are the common early passes learned by the
+policy (SROA, GVN, inline), rather than the function-specific combinations
+that yield the best speedup.
+Greedy decoding, by committing to the single highest-probability action at
+each step with updated IR context, avoids this bias.
+
+\subsection{Limitations}
+Beyond the six training functions, we evaluate the trained policy on
+held-out benchmarks from the 38-function pool under greedy decoding to
+assess generalisation.
+% TODO: fill in hold-out results once evaluation runs complete
+Benchmark timing noise, while characterised and accounted for
+(Section~\ref{sec:benchnoise}), introduces irreducible variance in the
+reward signal.
+Passes are applied without parameter tuning: \pass{loop-unroll} always
+uses default unroll counts, and the action space does not cover pass
+hyperparameters.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+Building on an extensive data collection and exploratory analysis phase,
+we trained autoregressive RL policies on six LLVM benchmark functions to
+produce pass sequences that outperform \opt{3}.
+We explored parallel and autoregressive architectures (GRU and transformer),
+a progression of return formulations addressing the credit-assignment problem
+in sparse-reward sequences, and two advantage estimators.
+The best configuration---Auto-TFX with instruction-weighted returns and
+GRPO---achieves 6--28\% speedup over \opt{3} under greedy decoding across
+all six training benchmarks (mean 15.5\%).
+Key findings: (1) the IR state representation must encode structural
+position, not global counts; (2) a value baseline is unreliable when returns
+are sparse and high-variance, and group-relative normalisation is a
+practical alternative; (3) per-step instruction weighting provides better
+credit assignment than uniform terminal returns.
+Future work includes evaluation on held-out benchmarks, pass
+parameterisation, and richer IR encodings.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

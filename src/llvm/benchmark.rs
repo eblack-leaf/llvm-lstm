@@ -23,7 +23,7 @@ pub(crate) struct Baselines {
 /// Parallel benchmark noise margin applied when comparing episode timings
 /// (collected by concurrent rayon workers) against the solo baseline.
 /// BenchNoise showed up to ~4% overhead; 1.05 gives a 1% buffer above that.
-pub(crate) const PARALLEL_NOISE_MARGIN: f32 = 1.00;
+pub(crate) const PARALLEL_NOISE_MARGIN: f32 = 1.01;
 
 impl Baselines {
     /// Raw speedup of `opt_ns` relative to O3. Use this for evaluation and any
