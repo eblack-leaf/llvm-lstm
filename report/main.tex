@@ -1027,6 +1027,69 @@ state representation: the 48-dimensional delta features, combined with the
 action embedding history, contain sufficient information for the transformer
 to discriminate between high- and low-return states.
 
+\subsection{Stop-Token Credit Assignment}
+\label{sec:stop}
+A persistent observation across all training runs is that the mean episode
+length converges to the horizon $K = 20$ and remains there.
+The policy never learns to emit \pass{Stop} before exhausting its budget.
+This is not a training failure; it is the rational response to the
+credit-assignment structure of a terminal return.
+
+When the agent considers \pass{Stop} at step~$k$, its expected value is
+$Q(s_k, \text{Stop}) = R_k$, the observed speedup after the passes chosen so
+far.
+The expected value of any continuing action is
+$Q(s_k, a) = \mathbb{E}[R_T \mid s_k, a, \pi]$, where $T > k$ is some
+future terminal step.
+For the policy to choose \pass{Stop} rationally, it must believe that every
+continuing action in expectation yields no improvement over $R_k$.
+In a pass-sequence problem this is rarely true: the agent has incomplete
+information about which passes it has not yet tried, and the distribution over
+future returns is wide.
+The rational response is to keep applying passes — any one of them might help,
+and the horizon is the only thing that actually stops the episode.
+
+The no-op penalty in the weighted return was designed to push back against
+this by assigning a negative reward to steps that do not change the IR.
+In practice the detection threshold is conservative: both the instruction-count
+delta and the feature-vector distance must be below their respective thresholds
+simultaneously.
+Training plots confirm the penalty works as intended at the surface level:
+the fraction of steps classified as no-ops decreases over training as the
+policy learns to prefer passes with measurable IR effects.
+However, the penalty does not address the most common form of uninformative
+continuation: re-applying the \emph{same pass repeatedly}.
+A second application of a pass like \pass{instcombine} after the first has
+already converged the IR will technically produce a non-zero IR delta --- the
+pass runs again and emits a slightly modified representation --- but the
+marginal gain rapidly diminishes.
+Neither no-op threshold catches this because the absolute IR change is still
+detectable; only the \emph{value} of the change is negligible.
+Empirically, many of the highest-scoring sequences in the evaluated runs
+consist of five to seven repetitions of a single dominant pass, filling the
+remaining budget after the real optimisation work was done in the first few
+steps.
+The agent discovered that repeating a pass is safe (rarely hurts) and
+occasionally lucky (the next application finds a new opportunity), so it
+became the default strategy for filling the horizon.
+Even those steps that \emph{are} penalised pay only $p = 0.025$, which is
+small relative to the observed speedup range of $\pm 30\%$; a single
+productive repetition can recover that cost many times over.
+The penalty shifts the incentive at the margin but does not overcome the
+structural asymmetry: the cost of stopping (foregone unknown future gain) is
+unbounded, while the cost of one more pass is at most $p$.
+
+A stronger fix would be a per-step length cost applied unconditionally, or
+an explicit \pass{Stop} bonus calibrated to the expected marginal return from
+one additional random pass.
+Either change trades away some top-end performance (the agent would stop before
+the sequence is fully optimised in some cases) in exchange for sequences that
+generalise more predictably to unseen functions where the optimal length is
+shorter.
+As implemented, the horizon $K$ is the de-facto sequence length; the
+\pass{Stop} token is effectively unused and the greedy-decoded sequence always
+runs to length $K$.
+
 \subsection{Limitations}
 Benchmark timing noise, while characterised and accounted for
 (Section~\ref{sec:benchnoise}), introduces irreducible variance in the

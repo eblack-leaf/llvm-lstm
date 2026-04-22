@@ -190,6 +190,13 @@ enum Command {
         #[arg(long, default_value = "checkpoints/diagnose.json")]
         results: PathBuf,
     },
+    /// Dump the bench-cache to a JSONL dataset file for plot-dataset.
+    CollectDataset {
+        #[arg(long, default_value = "checkpoints/data.cache")]
+        cache_file: PathBuf,
+        #[arg(long, default_value = "dataset.jsonl")]
+        output: PathBuf,
+    },
     PlotDataset {
         #[arg(long, default_value = "dataset.jsonl")]
         data: PathBuf,
@@ -890,6 +897,39 @@ fn main() {
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
+        }
+        Command::CollectDataset { cache_file, output } => {
+            use crate::llvm::{load_cache, BenchCache};
+            use std::io::Write;
+
+            let cache = load_cache(&cache_file).expect("load bench cache");
+            if let Some(parent) = output.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let mut out = std::fs::File::create(&output).expect("create output file");
+            let mut count = 0usize;
+            for entry in cache.iter() {
+                let (func_name, passes) = entry.key();
+                let (speedup, step_deltas) = entry.value();
+                let pass_names: Vec<String> = passes
+                    .iter()
+                    .filter(|&&p| p != crate::llvm::pass::Pass::Stop)
+                    .map(|p| format!("{p:?}"))
+                    .collect();
+                // expand prefixes: length 1..=pass_names.len()
+                for len in 1..=pass_names.len().max(1) {
+                    let record = serde_json::json!({
+                        "func_name": func_name,
+                        "passes": &pass_names[..len.min(pass_names.len())],
+                        "step_deltas": &step_deltas[..len.min(step_deltas.len())],
+                        "speedup": speedup,
+                    });
+                    serde_json::to_writer(&mut out, &record).expect("write record");
+                    writeln!(&mut out).expect("newline");
+                    count += 1;
+                }
+            }
+            println!("Wrote {count} samples to {}", output.display());
         }
         Command::PlotDataset { data } => {
             let cwd = std::env::current_dir().expect("cwd");
