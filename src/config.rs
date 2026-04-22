@@ -11,9 +11,10 @@ pub(crate) type BurnDevice = burn::backend::wgpu::WgpuDevice;
 pub(crate) type BurnAutoDiff = Autodiff<BurnBackend>;
 
 // ── Autoregressive architectures ─────────────────────────────────────────────
-#[cfg(feature = "auto-tfx")]
+// auto-gru takes precedence when both features are active (e.g. --no-default-features --features auto-gru).
+#[cfg(all(feature = "auto-tfx", not(feature = "auto-gru")))]
 pub(crate) type Arch = crate::ppo::model::auto_tfx::AutoTfxActor<BurnAutoDiff>;
-#[cfg(feature = "auto-tfx")]
+#[cfg(all(feature = "auto-tfx", not(feature = "auto-gru")))]
 pub(crate) type ArchConfig = crate::ppo::model::auto_tfx::AutoTfxConfig;
 
 #[cfg(feature = "auto-gru")]
@@ -50,6 +51,7 @@ pub(crate) struct Cfg {
     pub(crate) checkpoint_dir: PathBuf,
     pub(crate) learning_rate: f64,
     pub(crate) clip_epsilon: f32,
+    pub(crate) value_coef: f32,
     pub(crate) entropy_coef: f32,
     pub(crate) mini_batch_size: usize,
     pub(crate) cache_file: Option<PathBuf>,

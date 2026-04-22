@@ -535,7 +535,7 @@ Episode return assigns the same terminal reward to every step, so a pass
 that substantially reduces instruction count receives the same gradient
 signal as an immediately following no-op.
 The instruction-weighted formulation
-(\texttt{src/ppo/returns/instruction\_weighted\_terminal.rs}) breaks this
+(\texttt{src/ppo/returns/weighted.rs}) breaks this
 symmetry without introducing any signal not already present in the IR:
 each step's return is scaled by its share of the total instruction
 reduction, steps that reduced instructions earn a small direction bonus,
@@ -615,7 +615,8 @@ via command-line flags (\texttt{src/config.rs}).
 
 \begin{table}[t]
 \caption{Model and training hyperparameters for all reported runs.
-Weighted-return parameters are used only when \texttt{--returns weighted}.}
+Weighted-return parameters apply only when \texttt{--returns weighted}.
+\texttt{--value-coef} defaults to 0.5 and can be adjusted per run.}
 \label{tab:hparams}
 \centering
 \begin{tabular}{ll}
@@ -690,7 +691,7 @@ by timing noise.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{auto-tfx-episode-256ep.png}
+  \includegraphics[width=\columnwidth]{auto-tfx-episode.png}
   \caption{Training diagnostics for Auto-TFX with episode return
            (100 epochs, 256 episodes/epoch).
            \emph{Speedup}: mean episode speedup and EMA rise from $-0.40$
@@ -723,7 +724,7 @@ passes with measurable IR impact over structurally neutral ones.
 % TODO: Replace with actual Auto-GRU episode training figure once run 2 completes.
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{auto-gru-episode-256ep.png}
+  \includegraphics[width=\columnwidth]{auto-gru-episode.png}
   \caption{Training diagnostics for Auto-GRU with episode return
            (100 epochs, 256 episodes/epoch). Results pending.}
   \label{fig:training-gru-episode}
@@ -741,7 +742,7 @@ is presented in Section~\ref{sec:arch-comparison}.
 % TODO: Fill in once auto-tfx weighted run (run 3) completes tonight.
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{auto-tfx-weighted-256ep.png}
+  \includegraphics[width=\columnwidth]{auto-tfx-weighted.png}
   \caption{Training diagnostics for Auto-TFX with instruction-weighted
            return (100 epochs, 256 episodes/epoch). Results pending.}
   \label{fig:training-tfx-weighted}
@@ -749,7 +750,7 @@ is presented in Section~\ref{sec:arch-comparison}.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{auto-gru-weighted-256ep.png}
+  \includegraphics[width=\columnwidth]{auto-gru-weighted.png}
   \caption{Training diagnostics for Auto-GRU with instruction-weighted
            return (100 epochs, 256 episodes/epoch). Results pending.}
   \label{fig:training-gru-weighted}
@@ -1025,17 +1026,6 @@ The fact that EV converges for episode return also validates the choice of
 state representation: the 48-dimensional delta features, combined with the
 action embedding history, contain sufficient information for the transformer
 to discriminate between high- and low-return states.
-
-\subsection{Beam Search}
-Beam search with cumulative log-probability scoring performed worse than
-greedy decoding on all six functions (worst: \texttt{array\_reduction}
-at $-2.58$ vs.\ greedy $+0.09$).
-The log-probability objective encourages the beam to favour
-high-probability prefixes---the common early passes learned by the
-policy (\pass{sroa}, \pass{gvn}, \pass{inline})---rather than the
-function-specific combinations that yield the best speedup.
-Greedy decoding, by committing to the single highest-probability action at
-each step with updated IR context, avoids this bias.
 
 \subsection{Limitations}
 Benchmark timing noise, while characterised and accounted for

@@ -9,8 +9,7 @@ use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::checkpoint::Checkpoint;
 use crate::ppo::logging::LogMode;
 use crate::ppo::returns::episode_return::EpisodeReturn;
-use crate::ppo::returns::instruction_weighted_terminal::InstructionWeightedTerminal;
-use crate::ppo::returns::ir_count_return::IrCountReturn;
+use crate::ppo::returns::weighted::Weighted;
 use crate::ppo::returns::ir_step_return::IrStepReturn;
 use crate::train::Trainer;
 use burn::module::AutodiffModule;
@@ -61,6 +60,8 @@ enum Command {
         learning_rate: f64,
         #[arg(long, default_value = "0.2")]
         clip_epsilon: f32,
+        #[arg(long, default_value = "0.5")]
+        value_coef: f32,
         #[arg(long, default_value = "0.03")]
         entropy_coef: f32,
         /// PPO inner-loop KL early-stop threshold (0 = disabled).
@@ -77,8 +78,7 @@ enum Command {
         /// Return signal:
         ///   episode  — uniform terminal speedup across all slots
         ///   weighted — terminal weighted by per-slot instr reduction; no-ops get 0
-        ///   ir       — terminal IR-count reduction, uniform across slots
-        ///   ir-step  — per-step IR-count delta (dense)
+        ///   ir-step  — per-step IR-count delta (dense; skips benchmarking)
         #[arg(long, default_value = "weighted")]
         returns: String,
         /// |instr_delta| below this is a candidate no-op.
@@ -123,9 +123,6 @@ enum Command {
         /// Number of policy samples (stochastic rollouts) per function.
         #[arg(long, default_value = "20")]
         policy_samples: usize,
-        /// Beam width for beam-search decoding (0 = disabled).
-        #[arg(long, default_value = "0")]
-        beam_width: usize,
         #[arg(long, default_value = "4")]
         ir_chunks: usize,
         #[arg(long)]
@@ -260,6 +257,7 @@ fn main() {
             max_seq_len,
             learning_rate,
             clip_epsilon,
+            value_coef,
             entropy_coef,
             mini_batch_size,
             cache_file,
@@ -293,23 +291,23 @@ fn main() {
                 checkpoint_dir: checkpoint_dir.clone(),
                 learning_rate,
                 clip_epsilon,
+                value_coef,
                 entropy_coef,
                 mini_batch_size,
                 cache_file,
                 noop,
                 ir_chunks,
-                skip_benchmark: returns == "ir" || returns == "ir-step",
+                skip_benchmark: returns == "ir-step",
                 kl_target,
             };
             let log_path = checkpoint_dir.join("train.jsonl");
             let seq_path =
                 sequences_file.or_else(|| Some(checkpoint_dir.join("top_sequences.bin")));
             let returns_impl: Box<dyn crate::ppo::returns::Returns> = match returns.as_str() {
-                "weighted" => Box::new(InstructionWeightedTerminal {
+                "weighted" => Box::new(Weighted {
                     noop,
                     direction_bonus: weighted_direction_bonus,
                 }),
-                "ir" => Box::new(IrCountReturn),
                 "ir-step" => Box::new(IrStepReturn { noop }),
                 _ => Box::new(EpisodeReturn),
             };
@@ -335,7 +333,6 @@ fn main() {
             baseline_iters,
             random_sequences,
             policy_samples,
-            beam_width,
             ir_chunks,
             output,
         } => {
@@ -384,7 +381,6 @@ fn main() {
                 (idx, probs[idx].max(f32::EPSILON).ln())
             };
 
-            let col_beam = beam_width > 0;
             let col_samples = policy_samples > 0;
 
             // All numeric columns are 9 wide; header labels match exactly.
@@ -393,8 +389,7 @@ fn main() {
                 "function", "O0", "O1", "O2", "rand_mean", "greedy", "rand_best"
             );
             if col_samples { header.push_str(&format!(" {:>9}", "samp_best")); }
-            if col_beam    { header.push_str(&format!(" {:>9}", "beam")); }
-            let sep_len = 22 + (9 + 1) * (6 + if col_samples { 1 } else { 0 } + if col_beam { 1 } else { 0 });
+            let sep_len = 22 + (9 + 1) * (6 + if col_samples { 1 } else { 0 });
             println!("{header}");
             println!("{}", "-".repeat(sep_len));
 
@@ -446,27 +441,37 @@ fn main() {
 
                 // ── Random sequences ──────────────────────────────────────────────
                 let mut random_speedups: Vec<f32> = Vec::new();
+                let mut random_passes_all: Vec<Vec<String>> = Vec::new();
                 for rand_i in 0..random_sequences {
                     let rand_llvm = llvm.with_env(
                         work_dir.join(format!("eval_{}_r{rand_i}", func.name)),
                     );
                     std::fs::create_dir_all(&rand_llvm.work_dir).expect("create rand dir");
                     let mut cur = func.ir.clone();
+                    let mut rpasses: Vec<String> = Vec::new();
                     for step in 0..max_seq_len {
                         let idx = (rand::random::<f32>() * crate::ppo::model::ACTIONS.len() as f32) as usize;
                         let action = crate::ppo::model::ACTIONS[idx];
                         if action == Pass::Stop { break; }
+                        rpasses.push(format!("{action:?}"));
                         cur = rand_llvm.apply_one(&cur, action, step).expect("apply rand");
                     }
                     let bin = rand_llvm.compile(&cur).expect("compile rand");
                     let bm = rand_llvm.benchmark(&bin, runs, iters).expect("bench rand");
                     random_speedups.push(baselines.speedup_vs_o3(bm.mean_ns));
+                    random_passes_all.push(rpasses);
                 }
                 let rand_mean = random_speedups.iter().sum::<f32>() / random_speedups.len().max(1) as f32;
-                let rand_best = random_speedups.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let (rand_best, rand_best_passes) = random_speedups
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, &s)| (s, random_passes_all[i].clone()))
+                    .unwrap_or((f32::NEG_INFINITY, Vec::new()));
 
                 // ── Policy samples (stochastic rollouts) ──────────────────────────
                 let mut sample_speedups: Vec<f32> = Vec::new();
+                let mut sample_passes_all: Vec<Vec<String>> = Vec::new();
                 if col_samples {
                     for samp_i in 0..policy_samples {
                         let samp_llvm = llvm.with_env(
@@ -477,6 +482,7 @@ fn main() {
                         let mut acts: Vec<usize> = Vec::new();
                         let mut cur = func.ir.clone();
                         let mut hid: Option<Vec<f32>> = None;
+                        let mut spasses: Vec<String> = Vec::new();
                         for step in 0..max_seq_len {
                             ir_feats.push(cur.model_features(ir_chunks));
                             let (logits, _, new_hid) = inference_model
@@ -486,85 +492,21 @@ fn main() {
                             let action = crate::ppo::model::ACTIONS[idx];
                             acts.push(idx);
                             if action == Pass::Stop { break; }
+                            spasses.push(format!("{action:?}"));
                             cur = samp_llvm.apply_one(&cur, action, step).expect("apply samp");
                         }
                         let bin = samp_llvm.compile(&cur).expect("compile samp");
                         let bm = samp_llvm.benchmark(&bin, runs, iters).expect("bench samp");
                         sample_speedups.push(baselines.speedup_vs_o3(bm.mean_ns));
+                        sample_passes_all.push(spasses);
                     }
                 }
-                let samp_best = sample_speedups.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
-                // ── Beam search ───────────────────────────────────────────────────
-                let beam_speedup = if col_beam {
-                    struct Beam {
-                        ir: crate::llvm::ir::Ir,
-                        ir_feats: Vec<Vec<f32>>,
-                        acts: Vec<usize>,
-                        log_prob: f32,
-                        passes: Vec<String>,
-                    }
-                    let mut beams: Vec<Beam> = vec![Beam {
-                        ir: func.ir.clone(),
-                        ir_feats: Vec::new(),
-                        acts: Vec::new(),
-                        log_prob: 0.0,
-                        passes: Vec::new(),
-                    }];
-                    let beam_llvm = llvm.with_env(work_dir.join(format!("eval_{}_beam", func.name)));
-                    std::fs::create_dir_all(&beam_llvm.work_dir).expect("create beam dir");
-
-                    for step in 0..max_seq_len {
-                        let mut candidates: Vec<Beam> = Vec::new();
-                        for beam in &beams {
-                            let mut feats = beam.ir_feats.clone();
-                            feats.push(beam.ir.model_features(ir_chunks));
-                            let (logits, _, _) = inference_model
-                                .infer_step_stateful(&feats, &beam.acts, None, &device);
-
-                            let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                            let exp: Vec<f32> = logits.iter().map(|&x| (x - max_l).exp()).collect();
-                            let sum: f32 = exp.iter().sum::<f32>().max(f32::EPSILON);
-
-                            for (idx, &e) in exp.iter().enumerate() {
-                                let lp = (e / sum).max(f32::EPSILON).ln();
-                                let action = crate::ppo::model::ACTIONS[idx];
-                                let mut new_acts = beam.acts.clone();
-                                new_acts.push(idx);
-                                let mut new_passes = beam.passes.clone();
-                                let new_ir = if action == Pass::Stop {
-                                    beam.ir.clone()
-                                } else {
-                                    new_passes.push(format!("{action:?}"));
-                                    beam_llvm.apply_one(&beam.ir, action, step).expect("beam apply")
-                                };
-                                candidates.push(Beam {
-                                    ir: new_ir,
-                                    ir_feats: feats.clone(),
-                                    acts: new_acts,
-                                    log_prob: beam.log_prob + lp,
-                                    passes: new_passes,
-                                });
-                            }
-                        }
-                        candidates.sort_by(|a, b| b.log_prob.partial_cmp(&a.log_prob).unwrap_or(std::cmp::Ordering::Equal));
-                        candidates.truncate(beam_width);
-                        beams = candidates.into_iter().filter(|b| {
-                            b.acts.last().map(|&i| crate::ppo::model::ACTIONS[i] != Pass::Stop).unwrap_or(true)
-                        }).collect();
-                        if beams.is_empty() { break; }
-                    }
-
-                    if let Some(best_beam) = beams.into_iter().max_by(|a, b| a.log_prob.partial_cmp(&b.log_prob).unwrap_or(std::cmp::Ordering::Equal)) {
-                        let bin = beam_llvm.compile(&best_beam.ir).expect("compile beam");
-                        let bm = beam_llvm.benchmark(&bin, runs, iters).expect("bench beam");
-                        Some(baselines.speedup_vs_o3(bm.mean_ns))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                let (samp_best, samp_best_passes) = sample_speedups
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(i, &s)| (s, sample_passes_all[i].clone()))
+                    .unwrap_or((f32::NEG_INFINITY, Vec::new()));
 
                 // ── Print row ─────────────────────────────────────────────────────
                 let mut row = format!(
@@ -574,12 +516,6 @@ fn main() {
                 );
                 if col_samples {
                     row.push_str(&format!(" {:>+9.3}", samp_best));
-                }
-                if col_beam {
-                    match beam_speedup {
-                        Some(s) => row.push_str(&format!(" {:>+9.3}", s)),
-                        None    => row.push_str(&format!(" {:>9}", "—")),
-                    }
                 }
                 println!("{row}");
 
@@ -594,14 +530,13 @@ fn main() {
                     "greedy_passes": greedy_passes,
                     "random_mean_speedup": rand_mean,
                     "random_best_speedup": rand_best,
+                    "random_best_passes": rand_best_passes,
                     "random_speedups": random_speedups,
                 });
                 if col_samples {
                     record["sample_best_speedup"] = serde_json::json!(samp_best);
+                    record["sample_best_passes"] = serde_json::json!(samp_best_passes);
                     record["sample_speedups"] = serde_json::json!(sample_speedups);
-                }
-                if let Some(s) = beam_speedup {
-                    record["beam_speedup"] = serde_json::json!(s);
                 }
                 json_records.push(record);
             }

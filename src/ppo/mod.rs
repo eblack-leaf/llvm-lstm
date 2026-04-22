@@ -32,7 +32,7 @@ impl Ppo {
     pub(crate) fn new(cfg: &Cfg) -> Self {
         Self {
             clip_epsilon: cfg.clip_epsilon,
-            value_coef: 0.5,
+            value_coef: cfg.value_coef,
             entropy_coef: cfg.entropy_coef,
             ppo_epochs: cfg.ppo_epochs,
             mini_batch_size: cfg.mini_batch_size,

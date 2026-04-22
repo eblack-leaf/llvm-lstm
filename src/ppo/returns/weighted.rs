@@ -10,12 +10,12 @@ use crate::ppo::returns::Returns;
 ///   d < 0 (increase)→ terminal - direction_bonus
 ///   d == 0, active  → terminal
 ///   is_noop         → terminal - noop.penalty  (always worse than active steps)
-pub(crate) struct InstructionWeightedTerminal {
+pub(crate) struct Weighted {
     pub(crate) noop: NoOp,
     pub(crate) direction_bonus: f32,
 }
 
-impl Returns for InstructionWeightedTerminal {
+impl Returns for Weighted {
     fn compute(&self, results: &Results) -> Vec<f32> {
         let terminal = results.episode_return;
         let base = results.instr_counts.first().copied().unwrap_or(1).max(1) as f32;

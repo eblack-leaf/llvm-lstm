@@ -1,5 +1,5 @@
 pub(crate) mod episode_return;
-pub(crate) mod instruction_weighted_terminal;
+pub(crate) mod weighted;
 pub(crate) mod ir_step_return;
 
 use crate::ppo::episode::Results;

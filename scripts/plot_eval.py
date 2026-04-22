@@ -40,8 +40,13 @@ ncols   = len(cols)
 width   = 0.72 / ncols
 offsets = np.linspace(-(ncols-1)/2, (ncols-1)/2, ncols) * width
 
-fig, ax = plt.subplots(figsize=(7.0, 3.4))
-fig.subplots_adjust(left=0.10, right=0.78, top=0.88, bottom=0.18)
+fig, ax = plt.subplots(figsize=(max(7.0, n * 0.55), 3.8))
+fig.subplots_adjust(left=0.10, right=0.78, top=0.88, bottom=0.22)
+
+# Alternating background bands to separate function groups.
+for idx in range(n):
+    if idx % 2 == 0:
+        ax.axvspan(idx - 0.5, idx + 0.5, color="#f0f0f0", zorder=0)
 
 for i, col in enumerate(cols):
     vals = [r[keys[col]] for r in records]
@@ -53,7 +58,18 @@ ax.axhline(0, color="#333333", linewidth=0.8, zorder=4)
 ax.text(n - 0.45, 0.005, "-O3", fontsize=7, color="#333333", va="bottom")
 ax.set_ylim(Y_MIN, 0.36)
 ax.set_xticks(x)
-ax.set_xticklabels(funcs, rotation=20, ha="right", fontsize=9)
+
+# 3-level vertical stagger: tick labels sit at three offsets so
+# adjacent names never overlap, no rotation needed.
+LEVELS = 3
+STEP   = 10   # points per level
+ax.set_xticklabels([])   # hide default tick labels
+for idx, name in enumerate(funcs):
+    offset_pts = (idx % LEVELS) * STEP
+    ax.annotate(name, xy=(idx, 0), xycoords=("data", "axes fraction"),
+                xytext=(0, -(18 + offset_pts)), textcoords="offset points",
+                ha="center", va="top", fontsize=8, annotation_clip=False)
+
 ax.set_ylabel("Speedup vs -O3", fontsize=9)
 ax.set_title("Policy evaluation — speedup relative to -O3  (positive = faster)", fontsize=9)
 ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.5, zorder=0)
