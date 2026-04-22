@@ -1,6 +1,6 @@
 pub(crate) mod episode_return;
-pub(crate) mod weighted;
 pub(crate) mod ir_step_return;
+pub(crate) mod weighted;
 
 use crate::ppo::episode::Results;
 

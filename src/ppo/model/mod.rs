@@ -55,7 +55,11 @@ pub(crate) struct MlpHeadConfig {
 
 impl MlpHeadConfig {
     pub(crate) fn new(in_dim: usize, hidden_dim: usize, out_dim: usize) -> Self {
-        Self { in_dim, hidden_dim, out_dim }
+        Self {
+            in_dim,
+            hidden_dim,
+            out_dim,
+        }
     }
     pub(crate) fn init<B: Backend>(&self, device: &B::Device) -> MlpHead<B> {
         MlpHead {

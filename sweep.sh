@@ -17,6 +17,8 @@ MINI_BATCH=64
 #cargo run --release --features wgpu -- diagnose \
 #    --sequences checkpoints/auto-tfx-episode-top.bin \
 #    --output checkpoints/auto-tfx-episode-diagnose.json
+#cargo run --release --features wgpu -- plot-diagnose \
+#    --results checkpoints/auto-tfx-episode-diagnose.json
 #
 #cargo run --release --features wgpu -- evaluate \
 #    --model checkpoints/auto-tfx-episode/best \
@@ -38,6 +40,8 @@ MINI_BATCH=64
 #cargo run --release --no-default-features --features wgpu,auto-gru -- diagnose \
 #    --sequences checkpoints/auto-gru-episode-top.bin \
 #    --output checkpoints/auto-gru-episode-diagnose.json
+#cargo run --release --no-default-features --features wgpu,auto-gru -- plot-diagnose \
+#    --results checkpoints/auto-gru-episode-diagnose.json
 
 # ── 3. Auto-TFX + weighted + baseline  (shaped rewards) ─────────── [ ] todo ────
 #cargo run --release --features wgpu -- train \
@@ -52,6 +56,8 @@ MINI_BATCH=64
 #cargo run --release --features wgpu -- diagnose \
 #    --sequences checkpoints/auto-tfx-weighted-top.bin \
 #    --output checkpoints/auto-tfx-weighted-diagnose.json
+#cargo run --release --features wgpu -- plot-diagnose \
+#    --results checkpoints/auto-tfx-weighted-diagnose.json
 
 # ── 4. Auto-GRU + weighted + baseline  (architecture comparison) ── [ ] todo ────
 #cargo run --release --no-default-features --features wgpu,auto-gru -- train \
@@ -66,6 +72,8 @@ MINI_BATCH=64
 #cargo run --release --no-default-features --features wgpu,auto-gru -- diagnose \
 #    --sequences checkpoints/auto-gru-weighted-top.bin \
 #    --output checkpoints/auto-gru-weighted-diagnose.json
+#cargo run --release --no-default-features --features wgpu,auto-gru -- plot-diagnose \
+#    --results checkpoints/auto-gru-weighted-diagnose.json
 
 # ── 5. Auto-TFX + ir-step  (return ablation, separate cache) ─────── [ ] todo ────
 #cargo run --release --features wgpu -- train \
@@ -80,6 +88,8 @@ MINI_BATCH=64
 #cargo run --release --features wgpu -- diagnose \
 #    --sequences checkpoints/auto-tfx-irstep-top.bin \
 #    --output checkpoints/auto-tfx-irstep-diagnose.json
+#cargo run --release --features wgpu -- plot-diagnose \
+#    --results checkpoints/auto-tfx-irstep-diagnose.json
 
 # ── 6. Auto-TFX + episode + full pool  (generalisation train) ────── [ ] todo ────
 cargo run --release --features wgpu -- train \
@@ -92,6 +102,12 @@ cargo run --release --features wgpu -- train \
 cargo run --release --features wgpu -- plot-train \
     --dir checkpoints/auto-tfx-pool
 cp checkpoints/auto-tfx-pool/train_plots.png checkpoints/auto-tfx-pool.png
+cargo run --release --features wgpu -- diagnose \
+    --sequences checkpoints/auto-tfx-pool-top.bin \
+    --directory pool \
+    --output checkpoints/auto-tfx-pool/diagnose.json
+cargo run --release --features wgpu -- plot-diagnose \
+    --results checkpoints/auto-tfx-pool/diagnose.json
 cargo run --release --features wgpu -- evaluate \
     --model checkpoints/auto-tfx-pool/best \
     --directory pool \

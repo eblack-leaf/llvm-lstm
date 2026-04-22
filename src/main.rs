@@ -9,8 +9,8 @@ use crate::ppo::advantages::baseline::BaselineAdvantage;
 use crate::ppo::checkpoint::Checkpoint;
 use crate::ppo::logging::LogMode;
 use crate::ppo::returns::episode_return::EpisodeReturn;
-use crate::ppo::returns::weighted::Weighted;
 use crate::ppo::returns::ir_step_return::IrStepReturn;
+use crate::ppo::returns::weighted::Weighted;
 use crate::train::Trainer;
 use burn::module::AutodiffModule;
 use clap::{Parser, Subcommand};
@@ -383,7 +383,10 @@ fn main() {
                 let mut idx = probs.len() - 1;
                 for (i, &p) in probs.iter().enumerate() {
                     cum += p;
-                    if cum > u { idx = i; break; }
+                    if cum > u {
+                        idx = i;
+                        break;
+                    }
                 }
                 (idx, probs[idx].max(f32::EPSILON).ln())
             };
@@ -395,7 +398,9 @@ fn main() {
                 "\n{:<22} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
                 "function", "O0", "O1", "O2", "rand_mean", "greedy", "rand_best"
             );
-            if col_samples { header.push_str(&format!(" {:>9}", "samp_best")); }
+            if col_samples {
+                header.push_str(&format!(" {:>9}", "samp_best"));
+            }
             let sep_len = 22 + (9 + 1) * (6 + if col_samples { 1 } else { 0 });
             println!("{header}");
             println!("{}", "-".repeat(sep_len));
@@ -404,8 +409,7 @@ fn main() {
 
             for func in &functions.functions {
                 let baselines = func.baselines.as_ref().unwrap();
-                let func_llvm =
-                    llvm.with_env(work_dir.join(format!("eval_{}", func.name)));
+                let func_llvm = llvm.with_env(work_dir.join(format!("eval_{}", func.name)));
                 std::fs::create_dir_all(&func_llvm.work_dir).expect("create eval dir");
 
                 let o0_speedup = baselines.speedup_vs_o3(baselines.o0.mean_ns);
@@ -422,13 +426,12 @@ fn main() {
                 for step in 0..max_seq_len {
                     let ir_feat = current_ir.model_features(ir_chunks);
                     ir_features_so_far.push(ir_feat);
-                    let (logits, _value, new_hidden) = inference_model
-                        .infer_step_stateful(
-                            &ir_features_so_far,
-                            &action_history,
-                            hidden,
-                            &device,
-                        );
+                    let (logits, _value, new_hidden) = inference_model.infer_step_stateful(
+                        &ir_features_so_far,
+                        &action_history,
+                        hidden,
+                        &device,
+                    );
                     hidden = new_hidden;
                     let action_idx = logits
                         .iter()
@@ -438,28 +441,36 @@ fn main() {
                         .unwrap_or(0);
                     let action = crate::ppo::model::ACTIONS[action_idx];
                     action_history.push(action_idx);
-                    if action == Pass::Stop { break; }
+                    if action == Pass::Stop {
+                        break;
+                    }
                     greedy_passes.push(format!("{action:?}"));
-                    current_ir = func_llvm.apply_one(&current_ir, action, step).expect("apply greedy");
+                    current_ir = func_llvm
+                        .apply_one(&current_ir, action, step)
+                        .expect("apply greedy");
                 }
                 let greedy_bin = func_llvm.compile(&current_ir).expect("compile greedy");
-                let greedy_bm = func_llvm.benchmark(&greedy_bin, runs, iters).expect("bench greedy");
+                let greedy_bm = func_llvm
+                    .benchmark(&greedy_bin, runs, iters)
+                    .expect("bench greedy");
                 let greedy_speedup = baselines.speedup_vs_o3(greedy_bm.mean_ns);
 
                 // ── Random sequences ──────────────────────────────────────────────
                 let mut random_speedups: Vec<f32> = Vec::new();
                 let mut random_passes_all: Vec<Vec<String>> = Vec::new();
                 for rand_i in 0..random_sequences {
-                    let rand_llvm = llvm.with_env(
-                        work_dir.join(format!("eval_{}_r{rand_i}", func.name)),
-                    );
+                    let rand_llvm =
+                        llvm.with_env(work_dir.join(format!("eval_{}_r{rand_i}", func.name)));
                     std::fs::create_dir_all(&rand_llvm.work_dir).expect("create rand dir");
                     let mut cur = func.ir.clone();
                     let mut rpasses: Vec<String> = Vec::new();
                     for step in 0..max_seq_len {
-                        let idx = (rand::random::<f32>() * crate::ppo::model::ACTIONS.len() as f32) as usize;
+                        let idx = (rand::random::<f32>() * crate::ppo::model::ACTIONS.len() as f32)
+                            as usize;
                         let action = crate::ppo::model::ACTIONS[idx];
-                        if action == Pass::Stop { break; }
+                        if action == Pass::Stop {
+                            break;
+                        }
                         rpasses.push(format!("{action:?}"));
                         cur = rand_llvm.apply_one(&cur, action, step).expect("apply rand");
                     }
@@ -468,7 +479,8 @@ fn main() {
                     random_speedups.push(baselines.speedup_vs_o3(bm.mean_ns));
                     random_passes_all.push(rpasses);
                 }
-                let rand_mean = random_speedups.iter().sum::<f32>() / random_speedups.len().max(1) as f32;
+                let rand_mean =
+                    random_speedups.iter().sum::<f32>() / random_speedups.len().max(1) as f32;
                 let (rand_best, rand_best_passes) = random_speedups
                     .iter()
                     .enumerate()
@@ -481,9 +493,8 @@ fn main() {
                 let mut sample_passes_all: Vec<Vec<String>> = Vec::new();
                 if col_samples {
                     for samp_i in 0..policy_samples {
-                        let samp_llvm = llvm.with_env(
-                            work_dir.join(format!("eval_{}_s{samp_i}", func.name)),
-                        );
+                        let samp_llvm =
+                            llvm.with_env(work_dir.join(format!("eval_{}_s{samp_i}", func.name)));
                         std::fs::create_dir_all(&samp_llvm.work_dir).expect("create samp dir");
                         let mut ir_feats: Vec<Vec<f32>> = Vec::new();
                         let mut acts: Vec<usize> = Vec::new();
@@ -492,13 +503,15 @@ fn main() {
                         let mut spasses: Vec<String> = Vec::new();
                         for step in 0..max_seq_len {
                             ir_feats.push(cur.model_features(ir_chunks));
-                            let (logits, _, new_hid) = inference_model
-                                .infer_step_stateful(&ir_feats, &acts, hid, &device);
+                            let (logits, _, new_hid) =
+                                inference_model.infer_step_stateful(&ir_feats, &acts, hid, &device);
                             hid = new_hid;
                             let (idx, _lp) = sample_logits(&logits);
                             let action = crate::ppo::model::ACTIONS[idx];
                             acts.push(idx);
-                            if action == Pass::Stop { break; }
+                            if action == Pass::Stop {
+                                break;
+                            }
                             spasses.push(format!("{action:?}"));
                             cur = samp_llvm.apply_one(&cur, action, step).expect("apply samp");
                         }
@@ -518,8 +531,13 @@ fn main() {
                 // ── Print row ─────────────────────────────────────────────────────
                 let mut row = format!(
                     "{:<22} {:>+9.3} {:>+9.3} {:>+9.3} {:>+9.3} {:>+9.3} {:>+9.3}",
-                    func.name, o0_speedup, o1_speedup, o2_speedup,
-                    rand_mean, greedy_speedup, rand_best,
+                    func.name,
+                    o0_speedup,
+                    o1_speedup,
+                    o2_speedup,
+                    rand_mean,
+                    greedy_speedup,
+                    rand_best,
                 );
                 if col_samples {
                     row.push_str(&format!(" {:>+9.3}", samp_best));
@@ -549,11 +567,8 @@ fn main() {
             }
 
             if let Some(out) = output {
-                std::fs::write(
-                    &out,
-                    serde_json::to_string_pretty(&json_records).unwrap(),
-                )
-                .expect("write output");
+                std::fs::write(&out, serde_json::to_string_pretty(&json_records).unwrap())
+                    .expect("write output");
                 println!("\nSaved → {}", out.display());
             }
         }
@@ -572,8 +587,10 @@ fn main() {
             let out = output.unwrap_or_else(|| input.with_extension("png"));
             let status = std::process::Command::new(&python)
                 .arg(&script)
-                .arg("--input").arg(&input)
-                .arg("--output").arg(&out)
+                .arg("--input")
+                .arg(&input)
+                .arg("--output")
+                .arg(&out)
                 .status()
                 .expect("failed to spawn python");
             if !status.success() {
@@ -899,7 +916,7 @@ fn main() {
             }
         }
         Command::CollectDataset { cache_file, output } => {
-            use crate::llvm::{load_cache, BenchCache};
+            use crate::llvm::{BenchCache, load_cache};
             use std::io::Write;
 
             let cache = load_cache(&cache_file).expect("load bench cache");

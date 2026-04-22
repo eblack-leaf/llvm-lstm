@@ -166,7 +166,10 @@ impl Ppo {
                     .detach()
                     .into_data()
                     .to_vec::<f32>()
-                    .map(|v| v.iter().filter(|&&r| r < lo || r > hi).count() as f32 / v.len().max(1) as f32)
+                    .map(|v| {
+                        v.iter().filter(|&&r| r < lo || r > hi).count() as f32
+                            / v.len().max(1) as f32
+                    })
                     .unwrap_or(0.0);
 
                 let diff = values_flat - targets;
