@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-EPISODES=64
-MINI_BATCH=64
+EPISODES=128
+MINI_BATCH=128
 
 # ── 1. Auto-TFX + episode + baseline  (primary result) ─────────── [x] done ────
 cargo run --release --features wgpu -- train \
