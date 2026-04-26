@@ -27,22 +27,30 @@ impl TopSequences {
     }
 
     pub(crate) fn update(&mut self, speedup: f32, func_name: &str, passes: &[Pass]) {
-        if self.entries.len() < self.top_k
-            || speedup
-                > self
-                    .entries
-                    .last()
-                    .map(|e| e.speedup)
-                    .unwrap_or(f32::NEG_INFINITY)
-        {
+        let func_count = self.entries.iter().filter(|e| e.func_name == func_name).count();
+        let worst_for_func = self
+            .entries
+            .iter()
+            .filter(|e| e.func_name == func_name)
+            .map(|e| e.speedup)
+            .fold(f32::INFINITY, f32::min);
+
+        if func_count < self.top_k || speedup > worst_for_func {
             self.entries.push(TopEntry {
                 speedup,
                 func_name: func_name.to_string(),
                 passes: passes.to_vec(),
             });
             self.entries
-                .sort_by(|a, b| b.speedup.partial_cmp(&a.speedup).unwrap());
-            self.entries.truncate(self.top_k);
+                .sort_by(|a, b| b.speedup.partial_cmp(&a.speedup).unwrap_or(std::cmp::Ordering::Equal));
+            // Keep only the top_k best entries per function.
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            self.entries.retain(|e| {
+                let c = counts.entry(e.func_name.clone()).or_insert(0);
+                *c += 1;
+                *c <= self.top_k
+            });
         }
     }
 

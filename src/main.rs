@@ -209,6 +209,37 @@ enum Command {
         #[arg(long, default_value = "features.json")]
         features: PathBuf,
     },
+    /// Benchmark top sequences from an ir-step bin and measure IR-reduction vs speedup correlation.
+    IrCorr {
+        #[arg(long, default_value = "checkpoints/auto-tfx-irstep-top.bin")]
+        sequences: PathBuf,
+        #[arg(long, default_value = "benchmarks")]
+        directory: PathBuf,
+        #[arg(long, default_value = "work/ir_corr")]
+        work_dir: PathBuf,
+        #[arg(long, default_value = "clang-20")]
+        clang: String,
+        #[arg(long, default_value = "opt-20")]
+        opt: String,
+        #[arg(long, default_value = "20")]
+        top: usize,
+        #[arg(long, default_value = "5")]
+        runs: usize,
+        #[arg(long, default_value = "200")]
+        iters: usize,
+        #[arg(long, default_value = "3")]
+        baseline_runs: usize,
+        #[arg(long, default_value = "200")]
+        baseline_iters: usize,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    PlotIrCorr {
+        #[arg(long, default_value = "checkpoints/ir_corr.json")]
+        results: PathBuf,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Export IR features for all functions in a benchmark directory to JSON.
     ExportFeatures {
         #[arg(long, default_value = "benchmarks")]
@@ -984,6 +1015,191 @@ fn main() {
                 .arg(&script)
                 .arg("--features")
                 .arg(&features)
+                .status()
+                .expect("failed to spawn python");
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        Command::IrCorr {
+            sequences,
+            directory,
+            work_dir,
+            clang,
+            opt,
+            top,
+            runs,
+            iters,
+            baseline_runs,
+            baseline_iters,
+            output,
+        } => {
+            let top_seqs = TopSequences::load(&sequences).expect("load top sequences");
+            if top_seqs.entries.is_empty() {
+                println!("No sequences recorded.");
+                return;
+            }
+
+            std::fs::create_dir_all(&work_dir).expect("create work dir");
+            let mut functions = Functions::new(&directory);
+            let llvm = Llvm::new(&clang, &opt, work_dir.clone());
+
+            println!("Collecting baselines...");
+            for func in &mut functions.functions {
+                let func_llvm = llvm.with_env(work_dir.join(&func.name));
+                std::fs::create_dir_all(&func_llvm.work_dir).expect("create func work dir");
+                func.ir = func_llvm.ir(&func.source).expect("emit ir");
+                func.baselines = Some(
+                    func_llvm
+                        .collect_baselines(&func.source, baseline_runs, baseline_iters)
+                        .expect("baselines"),
+                );
+                println!(
+                    "  {} O3={} ns",
+                    func.name,
+                    func.baselines.as_ref().unwrap().o3.mean_ns
+                );
+            }
+
+            let candidates: Vec<_> = top_seqs.entries.iter().take(top).collect();
+            println!(
+                "\nBenchmarking top {} sequences — IR reduction vs real speedup:\n",
+                candidates.len()
+            );
+            println!(
+                "{:>4}  {:<22}  {:>10}  {:>10}  {:>10}  passes",
+                "rank", "func", "ir_reward", "ir_reduc%", "speedup"
+            );
+            println!("{}", "-".repeat(82));
+
+            let mut json_records: Vec<serde_json::Value> = Vec::new();
+            let mut ir_reductions: Vec<f32> = Vec::new();
+            let mut measured_speedups: Vec<f32> = Vec::new();
+
+            for (rank, entry) in candidates.iter().enumerate() {
+                let func = match functions.functions.iter().find(|f| f.name == entry.func_name) {
+                    Some(f) => f,
+                    None => {
+                        println!(
+                            "  #{} func '{}' not found — skipping",
+                            rank + 1,
+                            entry.func_name
+                        );
+                        continue;
+                    }
+                };
+                let baselines = func.baselines.as_ref().unwrap();
+                let func_llvm = llvm.with_env(work_dir.join(format!("ic_{}", rank)));
+                std::fs::create_dir_all(&func_llvm.work_dir).expect("create work dir");
+
+                let initial_count = func.ir.instruction_count();
+                let mut current_ir = func.ir.clone();
+                let pass_strs: Vec<&str> = entry
+                    .passes
+                    .iter()
+                    .filter(|&&p| p != Pass::Stop)
+                    .map(|p| p.to_opt())
+                    .collect();
+                for (step, &pass) in entry.passes.iter().enumerate() {
+                    if pass != Pass::Stop {
+                        current_ir = func_llvm
+                            .apply_one(&current_ir, pass, step)
+                            .expect("apply pass");
+                    }
+                }
+                let final_count = current_ir.instruction_count();
+                let ir_reduction = if initial_count > 0 {
+                    (initial_count as f32 - final_count as f32) / initial_count as f32
+                } else {
+                    0.0
+                };
+
+                let bin = func_llvm.compile(&current_ir).expect("compile");
+                let mut speedup_samples: Vec<f32> = Vec::with_capacity(runs);
+                for _ in 0..runs {
+                    let bm = func_llvm.benchmark(&bin, 1, iters).expect("benchmark");
+                    speedup_samples.push(baselines.speedup_vs_o3(bm.mean_ns));
+                }
+                let mean_speedup =
+                    speedup_samples.iter().sum::<f32>() / speedup_samples.len() as f32;
+
+                println!(
+                    "{:>4}  {:<22}  {:>+10.4}  {:>9.1}%  {:>+10.4}  [{}]",
+                    rank + 1,
+                    entry.func_name,
+                    entry.speedup,
+                    ir_reduction * 100.0,
+                    mean_speedup,
+                    pass_strs.join(", ")
+                );
+
+                ir_reductions.push(ir_reduction);
+                measured_speedups.push(mean_speedup);
+
+                json_records.push(serde_json::json!({
+                    "rank": rank + 1,
+                    "func_name": entry.func_name,
+                    "ir_reward": entry.speedup,
+                    "initial_ir_count": initial_count,
+                    "final_ir_count": final_count,
+                    "ir_reduction": ir_reduction,
+                    "speedup": mean_speedup,
+                    "passes": pass_strs,
+                    "all_speedups": speedup_samples,
+                }));
+            }
+
+            if ir_reductions.len() >= 2 {
+                let n = ir_reductions.len() as f32;
+                let mean_ir = ir_reductions.iter().sum::<f32>() / n;
+                let mean_sp = measured_speedups.iter().sum::<f32>() / n;
+                let cov = ir_reductions
+                    .iter()
+                    .zip(measured_speedups.iter())
+                    .map(|(&ir, &sp)| (ir - mean_ir) * (sp - mean_sp))
+                    .sum::<f32>()
+                    / n;
+                let std_ir = (ir_reductions
+                    .iter()
+                    .map(|&x| (x - mean_ir).powi(2))
+                    .sum::<f32>()
+                    / n)
+                    .sqrt();
+                let std_sp = (measured_speedups
+                    .iter()
+                    .map(|&x| (x - mean_sp).powi(2))
+                    .sum::<f32>()
+                    / n)
+                    .sqrt();
+                let r = if std_ir > 0.0 && std_sp > 0.0 {
+                    cov / (std_ir * std_sp)
+                } else {
+                    0.0
+                };
+                println!(
+                    "\nPearson r(ir_reduction, speedup) = {:.4}  (n={})",
+                    r,
+                    ir_reductions.len()
+                );
+            }
+
+            if let Some(out) = output {
+                let json = serde_json::to_string_pretty(&json_records).expect("serialize");
+                std::fs::write(&out, json).expect("write ir_corr json");
+                println!("\nsaved → {:?}", out);
+            }
+        }
+        Command::PlotIrCorr { results, output } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let python = cwd.join(".venv/bin/python");
+            let script = cwd.join("scripts/plot_ir_corr.py");
+            let out = output.unwrap_or_else(|| results.with_extension("png"));
+            let status = std::process::Command::new(&python)
+                .arg(&script)
+                .arg("--results")
+                .arg(&results)
+                .arg("--output")
+                .arg(&out)
                 .status()
                 .expect("failed to spawn python");
             if !status.success() {
