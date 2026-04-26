@@ -100,7 +100,7 @@ cargo run --release --features wgpu -- plot-ir-corr \
 cargo run --release --features wgpu -- train \
     --returns episode \
     --directory pool \
-    --episodes $EPISODES --mini-batch-size $MINI_BATCH \
+    --episodes 32 --mini-batch-size 256 \
     --cache-file checkpoints/pool.cache \
     --sequences-file checkpoints/auto-tfx-pool-top.bin \
     --checkpoint-dir checkpoints/auto-tfx-pool
