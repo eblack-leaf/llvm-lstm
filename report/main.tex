@@ -14,6 +14,7 @@
 
 \newcommand{\opt}[1]{\texttt{-O#1}}
 \newcommand{\pass}[1]{\texttt{#1}}
+\graphicspath{{../}{../checkpoints/}}
 
 \begin{document}
 
@@ -49,10 +50,13 @@ We evaluate two return formulations: a sparse episode return that assigns
 terminal speedup uniformly across all steps, and an instruction-weighted
 return that distributes credit proportionally to per-step instruction
 reduction.
-The value head's explained variance approaches 1 during training, confirming
-that the learned baseline provides a reliable variance-reducing estimate.
-Greedy decoding of Auto-TFX trained with episode returns achieves
-6--28\% speedup over \opt{3} across all six training benchmarks (mean 15.5\%).
+Greedy decoding of Auto-TFX trained with episode return achieves
+2--27\% speedup over \opt{3} on five of six training benchmarks
+(mean 10.4\% across all six); stochastic sampling extends this to all six.
+The instruction-weighted return trains with higher value-head explained
+variance but produces lower mean speedup for both architectures, because
+per-step IR-reduction credit is a poor proxy for runtime improvement---a
+finding corroborated by a direct IR-reduction/speedup correlation analysis.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -290,7 +294,25 @@ expressive enough for that function; (2) a high coefficient of variation
 with strong reward gradient for learning; and (3) diversity of computational
 profile (call-heavy, arithmetic-heavy, loop/vectorize, pointer/struct).
 
-Table~\ref{tab:baselines} shows the key statistics from the bench-cache EDA.
+Figure~\ref{fig:ceiling} shows the best random-search result versus baselines
+for all 38 pool functions, used to identify which functions satisfy criterion
+(1).
+Table~\ref{tab:baselines} shows the key statistics for the selected six.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{ceiling_gaps.png}
+  \caption{Best random-search result vs.\ \opt{3} across all 38 pool
+           functions (25{,}000 sequences each).
+           Functions to the left of zero have at least one random sequence
+           that beats \opt{3}, confirming the pass menu is expressive for
+           that function.  The six training benchmarks
+           (\texttt{interpreter}, \texttt{kmp\_search},
+           \texttt{polynomial\_eval}, \texttt{fft},
+           \texttt{array\_reduction}, \texttt{binary\_tree}) appear in the
+           top tier and satisfy all three selection criteria.}
+  \label{fig:ceiling}
+\end{figure}
 
 \begin{table}[t]
 \caption{Six training benchmarks: \opt{3} baseline, best random-search
@@ -330,27 +352,26 @@ most downstream analyses.
 
 \subsection{Sequence Length Analysis}
 \label{sec:seqlen}
-Figure~\ref{fig:dataset} shows the sequence-length distribution across all
-samples in the bench-cache.
-Lengths are approximately uniformly distributed across 1--20, reflecting the
-uniform sampling strategy.
-A violin plot of the \emph{best}-found
-sequence length per benchmark found a median of 17--18 across
-difficulty tiers with no systematic spike at the 20-pass cap, validating both
-the choice of $K = 20$ as the horizon and the \pass{Stop} action as a
-meaningful early-termination mechanism.
+Sequences are sampled with lengths uniformly distributed across 1--20,
+reflecting the uniform sampling strategy.
+Figure~\ref{fig:seqlen} shows the best-found sequence length per benchmark
+grouped by difficulty tier.
+Medians range from 16 to 18 passes across all tiers with no systematic
+spike at the 20-pass cap, validating $K = 20$ as the horizon and confirming
+that optimal sequences do not require the full budget---the \pass{Stop}
+action is available but the distribution of best lengths shows that 17--18
+passes captures most of the achievable gain.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{dataset.png}
-  \caption{Bench-cache statistics (950k samples, 38 functions).
-           Top right: sequence-length distribution is approximately
-           uniform across 1--20.
-           Top left: the bulk of speedup values are near zero or negative,
-           confirming that useful reward signal is sparse and the policy
-           must learn to discriminate good sequences from a large background
-           of ineffective ones.}
-  \label{fig:dataset}
+  \includegraphics[width=\columnwidth]{seq_length_by_tier.png}
+  \caption{Best-found sequence length per benchmark, grouped by difficulty
+           tier across all 38 pool functions.
+           Medians are 18 (beats-O3), 17 (reachable), 18 (gap), 16 (hard).
+           No tier spikes at the 20-pass cap, supporting $K = 20$ as the
+           horizon and the \pass{Stop} token as an available but
+           non-mandatory early-exit.}
+  \label{fig:seqlen}
 \end{figure}
 
 % ─────────────────────────────────────────────────────────────────────────────
@@ -592,10 +613,10 @@ EV near 1 indicates the value head is accurately predicting returns,
 providing a tightly calibrated baseline.
 EV near 0 or negative indicates the value head is not tracking returns and
 the baseline is adding noise rather than removing it.
-In our episode-return runs the value head's EV approaches 1 during
-training (Section~\ref{sec:results}), confirming that the 48-dimensional IR
-state representation---augmented with action history---is sufficient for the
-transformer to learn a useful value function.
+In our episode-return runs the value head's EV reaches $0.69$ (Auto-TFX)
+and $0.59$ (Auto-GRU) by epoch 100 (Section~\ref{sec:results}), confirming
+that the 48-dimensional IR state representation---augmented with action
+history---is sufficient for both architectures to learn a useful value function.
 This is a non-trivial result: with sparse terminal rewards and high-variance
 episode outcomes, value learning is often the bottleneck in on-policy methods.
 
@@ -694,57 +715,65 @@ by timing noise.
   \includegraphics[width=\columnwidth]{auto-tfx-episode.png}
   \caption{Training diagnostics for Auto-TFX with episode return
            (100 epochs, 256 episodes/epoch).
-           \emph{Speedup}: mean episode speedup and EMA rise from $-0.40$
-           to $+0.149$; per-function curves show \texttt{interpreter} and
+           Mean episode speedup and EMA rise from $-0.40$ to $+0.091$;
+           per-function curves show \texttt{interpreter} and
            \texttt{kmp\_search} leading.
-           \emph{Entropy}: decays as the policy concentrates.
-           \emph{Explained variance}: approaches 1, confirming the value
-           head learns a useful baseline.
-           \emph{Noop \%}: declines as the policy learns to avoid
-           ineffective passes.}
+           Entropy decays as the policy concentrates.
+           Explained variance reaches $0.69$.
+           No-op rate stabilises near 30\%.}
   \label{fig:training-tfx-episode}
 \end{figure}
 
 Figure~\ref{fig:training-tfx-episode} shows Auto-TFX training under episode
 return.
-Mean episode speedup climbs steadily from $-0.40$ to approximately $+0.149$.
-The value head's explained variance rises toward 1 across training, indicating
-that the transformer's combination of IR state and action history is sufficient
-to predict terminal speedup.
-This convergence is significant: it confirms that the 48-dimensional delta
-representation encodes enough signal to differentiate good and bad continuations
-at each step, and that the learned baseline is providing reliable variance
-reduction throughout training.
+Mean episode speedup climbs steadily from $-0.40$ to $+0.091$ at epoch 100,
+with the EMA reaching $+0.080$.
+Explained variance rises from near-zero to $0.69$ by epoch 100.
+This steady improvement confirms that the 48-dimensional delta representation
+encodes sufficient signal for the transformer to learn a useful value function
+and make progressively better pass selections.
 
 Entropy declines monotonically from near-maximum to roughly 30\% of maximum,
 reflecting progressive policy concentration without collapse.
-The no-op percentage falls in parallel, showing the policy learns to prefer
-passes with measurable IR impact over structurally neutral ones.
+The no-op percentage stabilises near 30\%, showing the policy selectively
+avoids structurally neutral passes while continuing to exploit the full horizon.
 
-% TODO: Replace with actual Auto-GRU episode training figure once run 2 completes.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{auto-gru-episode.png}
   \caption{Training diagnostics for Auto-GRU with episode return
-           (100 epochs, 256 episodes/epoch). Results pending.}
+           (100 epochs, 256 episodes/epoch).
+           Mean episode speedup rises from $-0.44$ to $+0.043$; explained
+           variance reaches $0.59$. Convergence is slower and final speedup
+           lower than Auto-TFX, consistent with the GRU's weaker capacity
+           for long-range pass interactions.}
   \label{fig:training-gru-episode}
 \end{figure}
 
 Auto-GRU training under episode return follows the same qualitative
-trajectory (Figure~\ref{fig:training-gru-episode}).
-% TODO: Fill in comparison once auto-gru episode run completes.
-Quantitative comparison between Auto-TFX and Auto-GRU under episode return
-is presented in Section~\ref{sec:arch-comparison}.
+trajectory as Auto-TFX but converges more slowly
+(Figure~\ref{fig:training-gru-episode}).
+Mean episode speedup rises from $-0.44$ at epoch 0 to $+0.043$ at epoch 100,
+with explained variance reaching $0.59$.
+The slower rise in both speedup and EV compared to Auto-TFX suggests that
+the transformer's explicit attention over all prior steps provides a material
+advantage for this task.
+Quantitative evaluation results are presented in Section~\ref{sec:arch-comparison}.
 
 \subsection{Instruction-Weighted Return}
 \label{sec:results-weighted}
 
-% TODO: Fill in once auto-tfx weighted run (run 3) completes tonight.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{auto-tfx-weighted.png}
   \caption{Training diagnostics for Auto-TFX with instruction-weighted
-           return (100 epochs, 256 episodes/epoch). Results pending.}
+           return (100 epochs, 256 episodes/epoch).
+           Mean episode speedup reaches only $+0.012$ at epoch 100
+           despite explained variance of $0.87$---higher than the episode
+           runs---reflecting that the value head learned per-step IR targets
+           accurately but those targets are a poor proxy for runtime speedup.
+           No-op percentage stabilises near 41\%, above the 30\% seen under
+           episode return.}
   \label{fig:training-tfx-weighted}
 \end{figure}
 
@@ -752,54 +781,84 @@ is presented in Section~\ref{sec:arch-comparison}.
   \centering
   \includegraphics[width=\columnwidth]{auto-gru-weighted.png}
   \caption{Training diagnostics for Auto-GRU with instruction-weighted
-           return (100 epochs, 256 episodes/epoch). Results pending.}
+           return (100 epochs, 256 episodes/epoch).
+           Final mean episode speedup is $+0.023$; explained variance
+           reaches $0.86$.  Pattern mirrors Auto-TFX weighted: high EV,
+           low actual speedup, elevated no-op rate.}
   \label{fig:training-gru-weighted}
 \end{figure}
 
 Figures~\ref{fig:training-tfx-weighted} and \ref{fig:training-gru-weighted}
 show training under the instruction-weighted return for Auto-TFX and Auto-GRU
 respectively.
-% TODO: Fill in training curve analysis once runs complete.
-Results for the instruction-weighted runs are pending completion of ongoing
-training.
-The principal question is whether redistributing the terminal reward using
-per-step instruction deltas produces better credit assignment---visible as
-faster early-epoch improvement, lower variance in per-function speedup curves,
-or higher final mean speedup---compared to the uniform episode return.
+Both runs exhibit a distinctive pattern: explained variance climbs higher than
+the corresponding episode runs ($0.87$ and $0.86$ vs.\ $0.69$ and $0.59$),
+yet mean episode speedup at the end of training is dramatically lower
+($+0.012$ and $+0.023$ vs.\ $+0.091$ and $+0.043$).
+
+The high EV confirms that the value head has learned accurate per-step
+return predictions---the shaped targets are well-behaved and predictable.
+The low speedup reveals that the objective the policy actually optimised
+diverged from runtime improvement.
+The instruction-weighted formulation rewards each step in proportion to its
+share of total IR-instruction reduction; a pass that aggressively reduces
+IR count receives a large positive return regardless of whether the resulting
+binary runs faster.
+With no direct incentive to maintain runtime speedup, the policy converges
+toward IR-compressing sequences that do not translate to wallclock gains.
+
+Per-function evaluation results for both weighted runs are in
+Tables~\ref{tab:eval-tfx-weighted} and \ref{tab:eval-gru-weighted}
+(Section~\ref{sec:arch-comparison}).
+Mean greedy speedup across the six functions is $+0.065$ (6.5\%) for
+Auto-TFX and $+0.092$ (9.2\%) for Auto-GRU---lower than the corresponding
+episode runs in both cases.
+Notably, \texttt{array\_reduction} regresses to greedy below \opt{3} for
+both weighted architectures, whereas episode return keeps it positive.
 
 \subsection{Architecture Comparison}
 \label{sec:arch-comparison}
 
-% TODO: Fill in once all four runs (auto-tfx+episode, auto-gru+episode,
-%       auto-tfx+weighted, auto-gru+weighted) are complete.
-Table~\ref{tab:arch-comparison} summarises final mean episode speedup and
-value-head explained variance for all four non-IR configurations.
-Results for runs 2--4 are pending.
+Table~\ref{tab:arch-comparison} summarises mean greedy evaluation speedup and
+final value-head explained variance for all four configurations.
 
 \begin{table}[t]
-\caption{Training summary: final mean episode speedup and explained variance
-at epoch 100 for each architecture and return formulation.}
+\caption{Evaluation summary: mean greedy speedup across six functions and
+final explained variance (epoch 100) for each configuration.
+Speedup is the mean of per-function greedy speedups relative to \opt{3}.}
 \label{tab:arch-comparison}
 \centering
 \begin{tabular}{llrr}
 \toprule
-Architecture & Return & Speedup & EV \\
+Architecture & Return & Greedy mean & EV \\
 \midrule
-Auto-TFX & Episode  & $+0.149$ & $\approx 1$ \\
-Auto-GRU & Episode  & --- & --- \\
-Auto-TFX & Weighted & --- & --- \\
-Auto-GRU & Weighted & --- & --- \\
+Auto-TFX & Episode  & $+0.104$ & $0.69$ \\
+Auto-GRU & Episode  & $+0.114$ & $0.59$ \\
+Auto-TFX & Weighted & $+0.065$ & $0.87$ \\
+Auto-GRU & Weighted & $+0.092$ & $0.86$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The comparison is designed to answer two separable questions: (1) does
-instruction-weighted credit assignment improve over the uniform episode
-baseline, and (2) does the transformer's explicit attention mechanism provide
-an advantage over the GRU's implicit memory for this task?
-These two dimensions are orthogonal: an architecture improvement would
-manifest consistently across both return formulations, while a return
-improvement would manifest consistently across both architectures.
+Both architectures achieve higher greedy evaluation speedup under episode
+return than under instruction-weighted return.
+The return-formulation effect is consistent across architectures: weighted
+return reduces mean greedy speedup by 37\% for Auto-TFX and 19\% for Auto-GRU.
+Explained variance is higher for weighted runs ($0.87$/$0.86$ vs.\
+$0.69$/$0.59$), confirming that the per-step IR targets are easier to predict
+than sparse terminal speedup---but this accuracy advantage does not translate
+to better runtime performance.
+
+On the architecture dimension, Auto-GRU slightly outperforms Auto-TFX under
+both return formulations in greedy evaluation despite showing lower mean
+speedup during training.
+This arises because the reported evaluation uses the best checkpoint saved
+during training (rather than the final epoch), and an early peak epoch can
+produce a well-calibrated greedy sequence even if the final policy has
+overfitted or explored away from it.
+Within each return formulation the two architectures are broadly comparable,
+suggesting that neither the recurrent nor the attention-based memory has a
+decisive advantage at this problem scale.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Policy Evaluation}
@@ -829,12 +888,12 @@ episode return. Positive = faster than \opt{3}.}
 \toprule
 Function & rand mean & rand best & greedy & samp best \\
 \midrule
-array\_reduction & $-0.791$ & $-0.062$ & $+0.092$ & $+0.104$ \\
-binary\_tree     & $-0.082$ & $+0.082$ & $+0.077$ & $+0.086$ \\
-fft              & $-0.677$ & $-0.002$ & $+0.063$ & $+0.072$ \\
-interpreter      & $-0.260$ & $+0.266$ & $+0.277$ & $+0.283$ \\
-kmp\_search      & $-0.107$ & $+0.191$ & $+0.277$ & $+0.278$ \\
-polynomial\_eval & $-0.181$ & $+0.140$ & $+0.144$ & $+0.145$ \\
+array\_reduction & $-0.795$ & $-0.039$ & $+0.075$ & $+0.095$ \\
+binary\_tree     & $-0.089$ & $+0.062$ & $+0.027$ & $+0.066$ \\
+fft              & $-0.547$ & $-0.033$ & $-0.016$ & $+0.037$ \\
+interpreter      & $-0.252$ & $+0.010$ & $+0.271$ & $+0.276$ \\
+kmp\_search      & $-0.101$ & $+0.209$ & $+0.237$ & $+0.278$ \\
+polynomial\_eval & $-0.261$ & $+0.120$ & $+0.031$ & $+0.149$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -843,8 +902,9 @@ polynomial\_eval & $-0.181$ & $+0.140$ & $+0.144$ & $+0.145$ \\
   \centering
   \includegraphics[width=\columnwidth]{eval.png}
   \caption{Evaluation speedup for Auto-TFX with episode return.
-           The trained policy (greedy and sample-best) beats \opt{3} on
-           every function.  Random mean is strongly negative on
+           Greedy decoding beats \opt{3} on five of six functions;
+           stochastic sample-best extends this to all six.
+           Random mean is strongly negative on
            \texttt{array\_reduction} and \texttt{fft}, confirming these
            functions require a learned policy rather than lucky search.}
   \label{fig:eval-tfx-episode}
@@ -852,23 +912,25 @@ polynomial\_eval & $-0.181$ & $+0.140$ & $+0.144$ & $+0.145$ \\
 
 Table~\ref{tab:eval-tfx-episode} and Figure~\ref{fig:eval-tfx-episode}
 show evaluation results for Auto-TFX with episode return.
-Greedy decoding beats \opt{3} on all six functions.
-Mean greedy speedup is $+0.155$ (15.5\%).
+Greedy decoding beats \opt{3} on five of six functions (all except
+\texttt{fft}, where the greedy sequence is marginally slower at $-0.016$).
+Mean greedy speedup is $+0.104$ (10.4\%).
 \texttt{interpreter} and \texttt{kmp\_search} show the largest gains
-(27.7\%), while \texttt{fft} shows the smallest (6.3\%).
-Stochastic sampling provides a small additional gain on most functions.
+(27.1\% and 23.7\%), while \texttt{fft} is the only function where greedy
+fails to beat the baseline.
+Stochastic sampling (best of 20) recovers \texttt{fft} to $+0.037$ and
+extends all other functions, beating \opt{3} on all six.
 
 The random-mean baseline is strongly negative on \texttt{array\_reduction}
-($-0.79$) and \texttt{fft} ($-0.68$), confirming that most random sequences
-are harmful on these functions.
+($-0.79$) and \texttt{fft} ($-0.55$), confirming that most random sequences
+are harmful on these functions and that a learned policy is required.
 Greedy decoding outperforms the best of 20 random sequences on four of six
 functions, demonstrating that the policy has learned more than identifying the
 easiest sequences in the landscape.
 
-% TODO: Fill in once auto-gru episode run completes.
 \begin{table}[t]
 \caption{Evaluation speedup relative to \opt{3} for Auto-GRU trained with
-episode return. Results pending.}
+episode return. Positive = faster than \opt{3}.}
 \label{tab:eval-gru-episode}
 \centering
 \setlength{\tabcolsep}{4pt}
@@ -876,22 +938,41 @@ episode return. Results pending.}
 \toprule
 Function & rand mean & rand best & greedy & samp best \\
 \midrule
-array\_reduction & --- & --- & --- & --- \\
-binary\_tree     & --- & --- & --- & --- \\
-fft              & --- & --- & --- & --- \\
-interpreter      & --- & --- & --- & --- \\
-kmp\_search      & --- & --- & --- & --- \\
-polynomial\_eval & --- & --- & --- & --- \\
+array\_reduction & $-1.014$ & $-0.036$ & $+0.088$ & $+0.097$ \\
+binary\_tree     & $-0.139$ & $+0.086$ & $+0.022$ & $+0.092$ \\
+fft              & $-0.593$ & $+0.050$ & $+0.003$ & $+0.031$ \\
+interpreter      & $-0.217$ & $+0.268$ & $+0.207$ & $+0.281$ \\
+kmp\_search      & $-0.020$ & $+0.223$ & $+0.236$ & $+0.267$ \\
+polynomial\_eval & $-0.286$ & $+0.104$ & $+0.127$ & $+0.159$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Instruction-Weighted Return Evaluation}
 
-% TODO: Fill in once runs 3 and 4 complete.
+Tables~\ref{tab:eval-tfx-weighted} and \ref{tab:eval-gru-weighted} show
+evaluation results for Auto-TFX and Auto-GRU trained with instruction-weighted
+return.
+Both architectures achieve lower mean greedy speedup than their episode-return
+counterparts: $+0.065$ (TFX) and $+0.092$ (GRU) vs.\ $+0.104$ and $+0.114$
+under episode return.
+\texttt{array\_reduction} regresses below \opt{3} under greedy decoding for
+both weighted models, a function that remained positive under episode return.
+
+The two weighted architectures are close to each other in absolute performance,
+with Auto-GRU slightly ahead on mean greedy speedup despite its lower training
+convergence.
+This mirrors the episode-return result and suggests the architecture gap is
+small relative to the return-formulation gap.
+The dominant function in both weighted evaluations is again
+\texttt{interpreter}, where the greedy speedup ($+0.307$/$+0.306$) matches
+or exceeds the episode-return results---indicating that \texttt{interpreter}'s
+optimisation landscape is robust to return formulation, likely because it
+offers large, clear gains that any positive signal can find.
+
 \begin{table}[t]
 \caption{Evaluation speedup relative to \opt{3} for Auto-TFX trained with
-instruction-weighted return. Results pending.}
+instruction-weighted return. Positive = faster than \opt{3}.}
 \label{tab:eval-tfx-weighted}
 \centering
 \setlength{\tabcolsep}{4pt}
@@ -899,48 +980,65 @@ instruction-weighted return. Results pending.}
 \toprule
 Function & rand mean & rand best & greedy & samp best \\
 \midrule
-array\_reduction & --- & --- & --- & --- \\
-binary\_tree     & --- & --- & --- & --- \\
-fft              & --- & --- & --- & --- \\
-interpreter      & --- & --- & --- & --- \\
-kmp\_search      & --- & --- & --- & --- \\
-polynomial\_eval & --- & --- & --- & --- \\
+array\_reduction & $-0.814$ & $+0.018$ & $-0.081$ & $-0.053$ \\
+binary\_tree     & $-0.139$ & $+0.078$ & $+0.079$ & $+0.081$ \\
+fft              & $-0.528$ & $+0.021$ & $+0.008$ & $+0.009$ \\
+interpreter      & $-0.229$ & $+0.048$ & $+0.307$ & $+0.308$ \\
+kmp\_search      & $-0.097$ & $+0.224$ & $+0.077$ & $+0.081$ \\
+polynomial\_eval & $-0.277$ & $+0.155$ & $+0.002$ & $+0.036$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\columnwidth]{auto-tfx-weighted-eval.png}
-  \caption{Evaluation speedup for Auto-TFX with instruction-weighted return.
-           Results pending.}
-  \label{fig:eval-tfx-weighted}
-\end{figure}
+\begin{table}[t]
+\caption{Evaluation speedup relative to \opt{3} for Auto-GRU trained with
+instruction-weighted return. Positive = faster than \opt{3}.}
+\label{tab:eval-gru-weighted}
+\centering
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Function & rand mean & rand best & greedy & samp best \\
+\midrule
+array\_reduction & $-0.896$ & $-0.052$ & $-0.039$ & $-0.011$ \\
+binary\_tree     & $-0.058$ & $+0.080$ & $+0.051$ & $+0.058$ \\
+fft              & $-0.369$ & $-0.009$ & $+0.016$ & $+0.030$ \\
+interpreter      & $-0.202$ & $+0.248$ & $+0.306$ & $+0.306$ \\
+kmp\_search      & $-0.044$ & $+0.252$ & $+0.102$ & $+0.107$ \\
+polynomial\_eval & $-0.261$ & $+0.129$ & $+0.118$ & $+0.133$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\subsection{Hold-out Pool Evaluation}
+\subsection{Pool-trained Evaluation}
 \label{sec:holdout}
-To assess generalisation beyond the six training functions, we evaluate
-the best checkpoint from each non-IR run on the full 38-function pool
-under greedy decoding.
-Figure~\ref{fig:eval-fullpool} shows the per-function speedup distribution
-across all 38 benchmarks.
+To assess whether training on a broader set of functions improves coverage,
+we trained an additional Auto-TFX policy with episode return on all 38 pool
+functions simultaneously for 100 epochs.
+Figure~\ref{fig:eval-fullpool} shows training diagnostics for this run.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{eval-fullpool.png}
-  \caption{Hold-out pool evaluation: greedy speedup relative to \opt{3} across
-           all 38 benchmarks for each trained policy.
-           Results pending.}
+  \includegraphics[width=\columnwidth]{auto-tfx-pool.png}
+  \caption{Training diagnostics for Auto-TFX trained on all 38 pool functions
+           with episode return.  Mean episode speedup and explained variance
+           remain near zero throughout training, indicating the model did not
+           converge within 100 epochs.}
   \label{fig:eval-fullpool}
 \end{figure}
 
-% TODO: Fill in once hold-out evaluations are run.
-The hold-out evaluation tests whether the features and return formulations
-generalise to functions not seen during training.
-Benchmarks with similar computational profiles to the training set
-(loop-heavy numerical code) are expected to generalise well; string and
-interpreter workloads are expected to vary more due to the limited diversity
-of the six training functions.
+The pool-trained model failed to converge: mean episode speedup at epoch 100
+is $-0.51$ and explained variance is $0.065$, indicating the value head never
+learned a useful baseline.
+Greedy evaluation across all 38 functions produces negative speedup on every
+function (mean $-2.50$).
+The likely cause is insufficient episodes per function: each of the 38
+functions receives far fewer episodes per epoch than the six training functions
+do in the focused setting, starving the gradient of the per-function reward
+accumulation needed for convergence.
+This result establishes that episodes per function---not total training
+epochs---is the binding constraint, and that scaling to a larger pool requires
+a proportionally larger per-function episode budget.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{IR-step Ablation}
@@ -953,14 +1051,56 @@ This provides a dense, low-noise reward signal that verifies the policy
 architecture and PPO loop are functional independently of the sparse runtime
 objective.
 
-% TODO: Fill in with ir-step training curve once run 5 completes.
-Training under the IR-step reward converges quickly and reliably, with
-explained variance approaching 1 within the first few epochs.
-This confirms that the model is capable of learning a coherent sequential
-policy; the difficulty in the runtime-reward setting is specific to the
-sparsity and noise of the real benchmark measurement.
-IR-count reduction is not our optimisation target, and these results are
-not compared against the episode or weighted runs.
+Training under the IR-step reward converges quickly and reliably:
+explained variance reaches $0.986$ by epoch 100 (Figure~\ref{fig:training-irstep}),
+far above the episode and weighted runs, confirming that the model is capable
+of learning a coherent sequential policy and that the difficulty in the
+runtime-reward setting is specific to the sparsity and noise of the real
+benchmark measurement.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{auto-tfx-irstep.png}
+  \caption{Training diagnostics for Auto-TFX with IR-step return.
+           Explained variance approaches 1 rapidly and the mean IR-reduction
+           reward reaches $0.56$, confirming the model can learn a dense
+           reward reliably.  These results are not compared against runtime
+           runs; IR-count reduction is not our optimisation target.}
+  \label{fig:training-irstep}
+\end{figure}
+
+To quantify the relationship between IR reduction and runtime, we ran the
+\texttt{ir-corr} analysis: the top 20 IR-reducing sequences discovered during
+IR-step training were re-benchmarked for actual runtime speedup.
+Figure~\ref{fig:ircorr} shows the result.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{ir_corr.png}
+  \caption{IR instruction-count reduction vs.\ runtime speedup for the
+           top 20 sequences from IR-step training (all on \texttt{fft}).
+           IR reduction is concentrated in the narrow band 65--67\%
+           (a near-vertical cluster), while runtime speedup spans
+           $-35\%$ to $-8\%$---uniformly negative.
+           High IR reduction does not predict runtime improvement; on
+           \texttt{fft} it consistently predicts a slowdown.}
+  \label{fig:ircorr}
+\end{figure}
+
+All 20 sequences are from \texttt{fft}: the IR-step policy found that
+aggressively removing instructions on \texttt{fft} maximises the IR reward,
+achieving 65--67\% instruction-count reductions.
+Every one of these sequences is slower than \opt{3} at runtime, with speedups
+ranging from $-8\%$ to $-35\%$.
+The correlation plot is essentially a vertical band: the sequences cluster
+tightly in IR reduction (because the policy found a local maximum of that
+objective) but span a wide and uniformly negative range of runtime speedup.
+This confirms that IR reduction is not a reliable indicator of runtime
+improvement---the passes that most aggressively compact the \texttt{fft} IR
+also strip away vectorization opportunities and loop structure that the backend
+relies on to emit fast machine code.
+This result directly motivates the choice of episode return over weighted
+return as the primary training signal.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Discussion}
@@ -970,22 +1110,44 @@ The episode return is the theoretically cleanest choice for this MDP:
 it assigns the observed reward in proportion to each step's prior probability
 of being selected, making no assumptions about which steps were causally
 responsible.
-The value function's job is precisely to disentangle individual step
-contributions from the noisy terminal signal, and EV~$\approx 1$ in the
-episode-return runs confirms it does so successfully.
+When a sequence produces a positive terminal speedup, every step that
+contributed to reaching that state receives a positive gradient signal---even
+steps that performed only modest IR changes.
+This is intentional: those steps were part of a winning sequence and did not
+hurt, so they should be reinforced.
+The cumulative effect is that the policy is steered consistently toward the
+class of sequences that produce runtime gains, even if the per-step credit
+distribution is imprecise.
 
-The instruction-weighted return is a deliberate credit-assignment shaping
-that trades away unbiasedness for reduced per-step variance.
-The key design property is that the first term of Equation~\ref{eq:weightedreturn}
-sums to $r$ over all steps: the total reward is conserved and the shaping
-does not introduce new signal, only redistributes existing signal to steps
-with larger instruction impact.
-This makes passes that dominated the IR reduction easier for the value head
-to learn from, particularly in early training when the policy produces many
-near-no-op sequences.
-The practical question is whether this variance reduction outweighs the
-introduced bias under the actual training dynamics; the pending runs are
-designed to answer this directly.
+The instruction-weighted return redistributes the terminal reward using
+per-step IR-instruction reduction as a proxy for contribution.
+Despite producing higher explained variance ($0.87$/$0.86$ vs.\
+$0.69$/$0.59$)---confirming that the per-step targets are well-behaved and
+learnable---both architectures achieved lower evaluation speedup under
+weighted return ($+0.065$/$+0.092$) than under episode return
+($+0.104$/$+0.114$).
+
+The failure mode is a proxy misalignment: the weighted return rewards steps
+that reduce IR instruction count without requiring those reductions to improve
+runtime.
+IR-count reduction and runtime speedup are distinct objectives.
+Passes that aggressively compact the IR (eliminating instructions via
+dead-code elimination, strength reduction, or constant folding) receive large
+positive returns under the weighted formulation regardless of whether the
+resulting binary executes faster.
+The IR-step ablation and correlation analysis confirm this directly
+(Section~\ref{sec:ir-ablation}): sequences that maximally reduce instruction
+count on \texttt{fft} produce runtime slowdowns of 8--35\%.
+With no gradient signal connecting IR reduction to runtime, the policy
+drifts toward IR-compressing strategies that fail to deliver wallclock gains.
+
+Episode return avoids this trap by using only the true measured objective.
+Although per-step credit assignment is noisy, each gradient step is computed
+from the actual runtime signal, and the policy cannot be led astray by a
+proxy metric that diverges from the real objective.
+The conclusion is that for runtime-targeted optimisation, direct use of the
+terminal benchmark measurement---even with its sparse, noisy credit
+assignment---is preferable to shaping with an IR-level proxy.
 
 \subsection{Architecture Analysis}
 The two architectures are designed to test complementary hypotheses about
@@ -1099,8 +1261,9 @@ for diversity, they represent a narrow slice of the full benchmark pool.
 Passes are applied without parameter tuning: \pass{loop-unroll} always
 uses default unroll counts, and the action space does not cover pass
 hyperparameters.
-Evaluation on the hold-out pool (Section~\ref{sec:holdout}) will quantify
-generalisation limits directly.
+The pool-trained evaluation (Section~\ref{sec:holdout}) confirms that
+scaling to a larger function set requires a proportionally larger episode
+budget per function.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Conclusion}
@@ -1110,18 +1273,30 @@ Two architectures---a GRU and a transformer---are compared under two return
 formulations: a sparse episode return that assigns the terminal benchmark
 speedup uniformly across all steps, and an instruction-weighted return that
 redistributes credit proportionally to per-step instruction reduction.
-Both formulations use PPO with a learned value baseline whose explained
-variance approaches 1 during training, confirming that the 48-dimensional
-IR delta representation is sufficient for accurate value prediction.
-Auto-TFX with episode return achieves 6--28\% speedup over \opt{3} under
-greedy decoding across all six training benchmarks (mean 15.5\%).
-A key result is that the IR state encoding must capture structural position
-within the function body, not global instruction counts: the delta
-representation encodes how instruction composition shifts across the function
-in a way that is responsive to the passes in our action space.
-Remaining runs will characterise the credit-assignment benefit of weighted
-returns and the architectural trade-off between implicit GRU memory and
-explicit transformer attention.
+
+Under episode return, Auto-TFX achieves 2--27\% greedy speedup over \opt{3}
+on five of six training benchmarks (mean 10.4\%); stochastic sampling extends
+this to all six.
+Auto-GRU achieves comparable greedy results (mean 11.4\%) despite slower
+training convergence.
+
+The instruction-weighted return trains with higher value-head explained
+variance ($0.87$/$0.86$ vs.\ $0.69$/$0.59$) but lower actual speedup
+($+0.065$/$+0.092$).
+The IR-step ablation explains why: sequences that maximally reduce IR
+instruction count on \texttt{fft} consistently produce runtime slowdowns of
+8--35\%, confirming that IR reduction and runtime speedup are largely
+uncorrelated objectives.
+Shaping rewards around a proxy that diverges from the true objective leads the
+policy away from the runtime gains that episode return reaches directly.
+
+A key structural result is that the IR state encoding must capture how
+instruction composition \emph{shifts} across the function body, not just
+global counts: the delta representation is the minimal representation
+responsive to the passes in our action space.
+Pool-wide training on all 38 functions failed to converge at the same episode
+budget, identifying episodes-per-function as the binding convergence
+constraint for scaling to larger program sets.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

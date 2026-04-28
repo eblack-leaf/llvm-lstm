@@ -2,7 +2,7 @@
 set -e
 
 EPISODES=128
-MINI_BATCH=128
+MINI_BATCH=512
 
 # ── 1. Auto-TFX + episode + baseline  (primary result) ─────────── [x] done ────
 #cargo run --release --features wgpu -- train \
@@ -76,34 +76,34 @@ MINI_BATCH=128
 #    --results checkpoints/auto-gru-weighted-diagnose.json
 
 # ── 5. Auto-TFX + ir-step  (return ablation, separate cache) ─────── [ ] todo ────
-cargo run --release --features wgpu -- train \
-    --returns ir-step \
-    --episodes $EPISODES --mini-batch-size $MINI_BATCH \
-    --cache-file checkpoints/ir-ablation.cache \
-    --sequences-file checkpoints/auto-tfx-irstep-top.bin \
-    --checkpoint-dir checkpoints/auto-tfx-irstep
-cargo run --release --features wgpu -- plot-train \
-    --dir checkpoints/auto-tfx-irstep
-cp checkpoints/auto-tfx-irstep/train_plots.png checkpoints/auto-tfx-irstep.png
-cargo run --release --features wgpu -- diagnose \
-    --sequences checkpoints/auto-tfx-irstep-top.bin \
-    --output checkpoints/auto-tfx-irstep-diagnose.json
-cargo run --release --features wgpu -- plot-diagnose \
-    --results checkpoints/auto-tfx-irstep-diagnose.json
-cargo run --release --features wgpu -- ir-corr \
-    --sequences checkpoints/auto-tfx-irstep-top.bin \
-    --output checkpoints/ir_corr.json
-cargo run --release --features wgpu -- plot-ir-corr \
-    --results checkpoints/ir_corr.json
+#cargo run --release --features wgpu -- train \
+#    --returns ir-step \
+#    --episodes $EPISODES --mini-batch-size $MINI_BATCH \
+#    --cache-file checkpoints/ir-ablation.cache \
+#    --sequences-file checkpoints/auto-tfx-irstep-top.bin \
+#    --checkpoint-dir checkpoints/auto-tfx-irstep
+#cargo run --release --features wgpu -- plot-train \
+#    --dir checkpoints/auto-tfx-irstep
+#cp checkpoints/auto-tfx-irstep/train_plots.png checkpoints/auto-tfx-irstep.png
+#cargo run --release --features wgpu -- diagnose \
+#    --sequences checkpoints/auto-tfx-irstep-top.bin \
+#    --output checkpoints/auto-tfx-irstep-diagnose.json
+#cargo run --release --features wgpu -- plot-diagnose \
+#    --results checkpoints/auto-tfx-irstep-diagnose.json
+#cargo run --release --features wgpu -- ir-corr \
+#    --sequences checkpoints/auto-tfx-irstep-top.bin \
+#    --output checkpoints/ir_corr.json
+#cargo run --release --features wgpu -- plot-ir-corr \
+#    --results checkpoints/ir_corr.json
 
 # ── 6. Auto-TFX + episode + full pool  (generalisation train) ────── [ ] todo ────
-cargo run --release --features wgpu -- train \
-    --returns episode \
-    --directory pool \
-    --episodes 32 --mini-batch-size 256 \
-    --cache-file checkpoints/pool.cache \
-    --sequences-file checkpoints/auto-tfx-pool-top.bin \
-    --checkpoint-dir checkpoints/auto-tfx-pool
+#cargo run --release --features wgpu -- train \
+#    --returns episode \
+#    --directory pool \
+#    --episodes $EPISODES --mini-batch-size $MINI_BATCH \
+#    --cache-file checkpoints/pool.cache \
+#    --sequences-file checkpoints/auto-tfx-pool-top.bin \
+#    --checkpoint-dir checkpoints/auto-tfx-pool
 cargo run --release --features wgpu -- plot-train \
     --dir checkpoints/auto-tfx-pool
 cp checkpoints/auto-tfx-pool/train_plots.png checkpoints/auto-tfx-pool.png

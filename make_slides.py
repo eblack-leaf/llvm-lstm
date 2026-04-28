@@ -403,17 +403,12 @@ def _s6(sl):
         rect(sl, 0.45, y, 4.1, 0.56, BG if i%2==0 else RGBColor(0x12,0x1D,0x35))
         box(sl, 0.55, y+0.09, 2.1, 0.38, k,  size=12, color=LGRAY)
         box(sl, 2.65, y+0.09, 1.8, 0.38, v,  size=12, bold=True, color=YELLOW)
-    box(sl, 0.45, 6.62, 4.1, 0.38,
-        "★ placeholder — update once dataset.jsonl regenerated",
-        size=10, color=RGBColor(0x55,0x55,0x77), italic=True)
-    ds_img = os.path.join(BASE, "dataset.png")
-    if os.path.exists(ds_img):
-        img(sl, ds_img, 4.8, 1.2, 8.2)
-    else:
-        rect(sl, 4.8, 1.2, 8.2, 5.95, RGBColor(0x0A,0x10,0x1C))
-        box(sl, 4.8, 3.5, 8.2, 0.8,
-            "dataset.png\n(cargo run -- plot-dataset --data dataset.jsonl)",
-            size=13, color=RGBColor(0x55,0x55,0x77), align=PP_ALIGN.CENTER, italic=True)
+    cg = os.path.join(CKPT, "ceiling_gaps.png")
+    sl_img = os.path.join(CKPT, "seq_length_by_tier.png")
+    if os.path.exists(cg):
+        img(sl, cg,    4.75, 1.2,  4.3)
+    if os.path.exists(sl_img):
+        img(sl, sl_img, 9.15, 1.2, 4.0)
 content_slide(sl, "Training Landscape — Bench-Cache Overview", _s6)
 
 
@@ -658,8 +653,8 @@ def _s12_walk(sl):
     rect(sl, 0.35, 1.20, 12.6, 0.68, PANEL)
     rect(sl, 0.35, 1.20, 12.6, 0.07, YELLOW)
     box(sl, 0.45, 1.32, 12.4, 0.44,
-        "Example: interpreter  ·  -O3 baseline = 37,918 ns  ·  "
-        "Greedy policy result: ~27,138 ns  →  +27.7% speedup",
+        "Example: interpreter  ·  -O3 baseline = 37,275 ns  ·  "
+        "Greedy policy result: ~27,183 ns  →  +27.1% speedup",
         size=14, bold=True, color=YELLOW, align=PP_ALIGN.CENTER)
     steps = [
         ("Step 0",  "fₜ: mem↑\ncall↑\nctrl↑",   "inline",            "remove call\noverhead",          ACCENT),
@@ -686,8 +681,8 @@ def _s12_walk(sl):
     rect(sl,0.35,ty+2.87,12.6,0.54,RGBColor(0x0A,0x22,0x14))
     rect(sl,0.35,ty+2.87,12.6,0.06,ACCENT2)
     box(sl,0.45,ty+2.96,12.4,0.38,
-        "Compile → benchmark  ·  measured = 27,138 ns  ·  "
-        "r = (37,918 − 27,138) / 37,918 = +27.7%  ✓",
+        "Compile → benchmark  ·  measured = 27,183 ns  ·  "
+        "r = (37,275 − 27,183) / 37,275 = +27.1%  ✓",
         size=14,bold=True,color=ACCENT2,align=PP_ALIGN.CENTER)
     rect(sl,0.35,ty+3.54,12.6,1.06,PANEL)
     box(sl,0.45,ty+3.60,5.9,0.32,"Why repeat instcombine?",size=13,bold=True,color=YELLOW)
@@ -752,8 +747,8 @@ def _s13(sl):
            "value head prediction (token 0 in TFX, hidden state hₜ in GRU)"),
           ("Rₜ",
            "per-step return (episode or instruction-weighted formulation)"),
-          ("EV → 1",
-           "explained variance convergence confirms tight, calibrated baseline")]),
+          ("EV → 0.69/0.59",
+           "TFX/GRU episode EV at epoch 100; weighted runs reach 0.87/0.86")]),
         (ACCENT2,
          "Entropy Bonus  —  c_e = 0.03",
          "L_entropy = H( π_θ(·|sₜ) )   [Shannon entropy]",
@@ -829,17 +824,16 @@ section_header(sl, "Results", "Auto-TFX + Episode Return")
 # ═══════════════════════════════════════════════════════════════════════════════
 sl = prs.slides.add_slide(BLANK)
 def _s16(sl):
-    ti = os.path.join(CKPT,"auto-tfx-episode-256ep","train_plots.png")
-    if not os.path.exists(ti): ti = os.path.join(CKPT,"auto-tfx-episode-256ep.png")
+    ti = os.path.join(CKPT,"auto-tfx-episode.png")
     if os.path.exists(ti): img(sl,ti,0.45,1.2,7.8)
     bullet_box(sl,8.4,1.25,4.7,5.7,[
-        (0,"Mean speedup: −0.40 → +0.149"),
-        (0,"Explained Variance → ≈ 1"),
+        (0,"Mean speedup: −0.40 → +0.091  (EMA +0.080)"),
+        (0,"Explained Variance reaches 0.69"),
         (1,"Value head learns accurate return predictions"),
         (1,"48-dim delta features sufficient for value function"),
         (0,"Entropy: max → ~30% of max"),
         (1,"Progressive concentration, no collapse"),
-        (0,"No-op % falls across training"),
+        (0,"No-op % stabilises ~30%"),
         (1,"Policy learns to prefer impactful passes"),
         (0,"interpreter and kmp_search lead per-function"),
         (1,"Consistent with high random-search ceiling"),
@@ -852,17 +846,16 @@ content_slide(sl,"Auto-TFX + Episode Return — Training Curves",_s16)
 # ═══════════════════════════════════════════════════════════════════════════════
 sl = prs.slides.add_slide(BLANK)
 def _s17(sl):
-    ei = os.path.join(CKPT,"auto-tfx-episode-256ep","eval.png")
-    if not os.path.exists(ei): ei = os.path.join(BASE,"eval.png")
+    ei = os.path.join(BASE,"eval.png")
     if os.path.exists(ei): img(sl,ei,0.45,1.2,7.5)
     rows=[
         ("Function",      "rand mean","rand best","greedy", "samp best"),
-        ("array_red.",    "−0.791",   "−0.062",   "+0.092", "+0.104"),
-        ("binary_tree",   "−0.082",   "+0.082",   "+0.077", "+0.086"),
-        ("fft",           "−0.677",   "−0.002",   "+0.063", "+0.072"),
-        ("interpreter",   "−0.260",   "+0.266",   "+0.277", "+0.283"),
-        ("kmp_search",    "−0.107",   "+0.191",   "+0.277", "+0.278"),
-        ("poly_eval",     "−0.181",   "+0.140",   "+0.144", "+0.145"),
+        ("array_red.",    "−0.795",   "−0.039",   "+0.075", "+0.095"),
+        ("binary_tree",   "−0.089",   "+0.062",   "+0.027", "+0.066"),
+        ("fft",           "−0.547",   "−0.033",   "−0.016", "+0.037"),
+        ("interpreter",   "−0.252",   "+0.010",   "+0.271", "+0.276"),
+        ("kmp_search",    "−0.101",   "+0.209",   "+0.237", "+0.278"),
+        ("poly_eval",     "−0.261",   "+0.120",   "+0.031", "+0.149"),
     ]
     col_x=[8.10,9.65,10.65,11.50,12.30]; col_w=[1.50,0.95,0.85,0.78,0.90]
     for ri,row in enumerate(rows):
@@ -871,20 +864,165 @@ def _s17(sl):
         for ci,(cell,cx,cw) in enumerate(zip(row,col_x,col_w)):
             if ri==0: fc=BG
             elif ci in(3,4): fc=ACCENT2 if cell.startswith("+") else RED
-            elif ci==1 and any(cell.startswith(p) for p in("−0.6","−0.7","−0.8")): fc=RED
+            elif ci==1 and any(cell.startswith(p) for p in("−0.5","−0.6","−0.7","−0.8","−0.9","−1.")): fc=RED
             else: fc=LGRAY
             box(sl,cx,y+0.07,cw,0.56,cell,size=12,
                 bold=(ri==0 or(ri>0 and ci in(3,4))),
                 color=fc,align=PP_ALIGN.LEFT if ci==0 else PP_ALIGN.CENTER)
     rect(sl,8.05,6.45,5.10,0.72,RGBColor(0x0A,0x22,0x14))
     box(sl,8.10,6.52,5.00,0.38,
-        "Greedy beats -O3 on all 6 functions  ·  mean +15.5%",
+        "Greedy: 5/6 beat -O3 · mean +10.4% · sample-best all 6",
         size=14,bold=True,color=ACCENT2,align=PP_ALIGN.CENTER)
 content_slide(sl,"Auto-TFX + Episode Return — Evaluation vs -O3",_s17)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 18 — Benchmarking Harness Rigor
+# 18 — GRU Episode Training + Weighted Returns Overview
+# ═══════════════════════════════════════════════════════════════════════════════
+sl = prs.slides.add_slide(BLANK)
+def _s18_gru_wt(sl):
+    # Left panel: Auto-GRU episode training plot
+    rect(sl,0.30,1.20,6.10,0.40,ACCENT2)
+    box(sl,0.34,1.24,6.02,0.30,"Auto-GRU  +  Episode Return — Training",
+        size=13,bold=True,color=BG,align=PP_ALIGN.CENTER)
+    gi = os.path.join(CKPT,"auto-gru-episode.png")
+    if os.path.exists(gi): img(sl,gi,0.30,1.64,6.10)
+    bullet_box(sl,0.35,5.55,6.05,1.55,[
+        (0,"Mean speedup −0.44 → +0.043  (EMA +0.031)"),
+        (0,"EV reaches 0.59  (slower than TFX, same qualitative trajectory)"),
+        (0,"No-op rate ~31% — consistent with episode-return behaviour"),
+        (0,"Greedy eval mean: +11.4% — comparable to Auto-TFX (+10.4%)"),
+    ],size=12,color=LGRAY,rich=True)
+
+    # Right panel: Weighted returns both worse
+    rect(sl,6.70,1.20,6.38,0.40,YELLOW)
+    box(sl,6.74,1.24,6.30,0.30,"Instruction-Weighted Return — Both Architectures",
+        size=13,bold=True,color=BG,align=PP_ALIGN.CENTER)
+    wi = os.path.join(CKPT,"auto-tfx-weighted.png")
+    if os.path.exists(wi): img(sl,wi,6.70,1.64,6.38)
+    bullet_box(sl,6.75,5.55,6.28,1.55,[
+        (0,"TFX weighted: speedup → +0.012 (vs +0.091 episode);  EV = 0.87"),
+        (0,"GRU weighted: speedup → +0.023 (vs +0.043 episode);  EV = 0.86"),
+        (0,"Higher EV but lower speedup — proxy misalignment (IR ≠ runtime)"),
+        (0,"No-op rate ~40–41% — elevated vs episode runs"),
+    ],size=12,color=LGRAY,rich=True)
+content_slide(sl,"Training Results — GRU Episode & Weighted Returns",_s18_gru_wt)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 19 — Weighted Return Evaluation Tables + IR-step / ir_corr
+# ═══════════════════════════════════════════════════════════════════════════════
+sl = prs.slides.add_slide(BLANK)
+def _s19_wt_ir(sl):
+    # Left: weighted eval tables (TFX + GRU side-by-side)
+    def small_table(l, t, w, title, col, rows_data):
+        rect(sl,l,t,w,0.35,col)
+        box(sl,l+0.04,t+0.04,w-0.08,0.26,title,size=12,bold=True,color=BG,align=PP_ALIGN.CENTER)
+        hdrs=("Function","greedy","samp best")
+        col_x=[l+0.05, l+1.60, l+2.65]; col_w=[1.50,1.00,1.00]
+        for ri,(row) in enumerate([hdrs]+rows_data):
+            y=t+0.38+ri*0.50
+            rect(sl,l,y,w,0.47,ACCENT if ri==0 else (PANEL if ri%2 else BG))
+            for ci,(cell,cx,cw) in enumerate(zip(row,col_x,col_w)):
+                if ri==0: fc=BG
+                elif ci>0: fc=ACCENT2 if cell.startswith("+") else RED
+                else: fc=LGRAY
+                box(sl,cx,y+0.05,cw,0.37,cell,size=11,bold=(ri==0 or ci>0),
+                    color=fc,align=PP_ALIGN.CENTER if ci>0 else PP_ALIGN.LEFT)
+
+    tfx_wt=[
+        ("array_red.","−0.081","−0.053"),
+        ("binary_tree","+0.079","+0.081"),
+        ("fft",       "+0.008","+0.009"),
+        ("interpreter","+0.307","+0.308"),
+        ("kmp_search","+0.077","+0.081"),
+        ("poly_eval", "+0.002","+0.036"),
+    ]
+    gru_wt=[
+        ("array_red.","−0.039","−0.011"),
+        ("binary_tree","+0.051","+0.058"),
+        ("fft",       "+0.016","+0.030"),
+        ("interpreter","+0.306","+0.306"),
+        ("kmp_search","+0.102","+0.107"),
+        ("poly_eval", "+0.118","+0.133"),
+    ]
+    small_table(0.30,1.20,3.85,"Auto-TFX  Weighted  (mean greedy +6.5%)",ORANGE,tfx_wt)
+    small_table(4.30,1.20,3.85,"Auto-GRU  Weighted  (mean greedy +9.2%)",ORANGE,gru_wt)
+
+    # Right: ir_corr plot + explanation
+    rect(sl,8.35,1.20,4.75,0.40,RED)
+    box(sl,8.39,1.24,4.67,0.30,"IR Reduction vs Runtime Speedup (ir_corr)",
+        size=13,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+    ir = os.path.join(CKPT,"ir_corr.png")
+    if os.path.exists(ir): img(sl,ir,8.35,1.64,4.75)
+    bullet_box(sl,8.35,5.38,4.75,1.80,[
+        (0,"Top 20 IR-step sequences all from fft"),
+        (0,"IR reduction: 65–67%  (near-vertical cluster)"),
+        (0,"Runtime speedup: −8% to −35%  — all negative"),
+        (0,"Conclusion: IR reduction ≠ runtime improvement"),
+        (1,"Stripping fft IR removes vectorization opportunities"),
+        (0,"Explains why weighted return underperforms episode"),
+    ],size=12,color=LGRAY,rich=True)
+content_slide(sl,"Weighted Evaluation & IR-Reduction Correlation",_s19_wt_ir)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 20 — Architecture × Return Comparison Summary + Pool Result
+# ═══════════════════════════════════════════════════════════════════════════════
+sl = prs.slides.add_slide(BLANK)
+def _s20_summary(sl):
+    # Comparison table (all 4 configs)
+    box(sl,0.35,1.22,8.10,0.38,"Architecture × Return Summary",
+        size=17,bold=True,color=WHITE)
+    hdrs=("Architecture","Return","Greedy mean","Train EV")
+    data=[
+        ("Auto-TFX","Episode",  "+10.4%","0.69"),
+        ("Auto-GRU","Episode",  "+11.4%","0.59"),
+        ("Auto-TFX","Weighted", "+6.5%", "0.87"),
+        ("Auto-GRU","Weighted", "+9.2%", "0.86"),
+    ]
+    col_x=[0.35,2.70,5.10,7.05]; col_w=[2.30,2.35,1.90,1.35]
+    for ri,row in enumerate([hdrs]+data):
+        y=1.68+ri*0.55
+        episode = ri>0 and row[1]=="Episode"
+        weighted= ri>0 and row[1]=="Weighted"
+        bg_c = ACCENT if ri==0 else (RGBColor(0x0A,0x22,0x14) if episode else RGBColor(0x22,0x14,0x0A))
+        rect(sl,0.35,y,8.10,0.52,bg_c)
+        for ci,(cell,cx,cw) in enumerate(zip(row,col_x,col_w)):
+            if ri==0: fc=BG
+            elif ci==2: fc=ACCENT2 if episode else ORANGE
+            elif ci==3: fc=YELLOW
+            else: fc=WHITE
+            box(sl,cx+0.05,y+0.06,cw-0.10,0.40,cell,size=14,
+                bold=(ri==0 or ci==2),color=fc,
+                align=PP_ALIGN.CENTER if ci>0 else PP_ALIGN.LEFT)
+
+    bullet_box(sl,0.35,4.50,8.10,2.10,[
+        (0,"Episode return outperforms weighted for both architectures"),
+        (1,"Weighted EV higher but speedup lower — value head learns IR targets, not speedup"),
+        (0,"GRU slightly ahead of TFX in greedy eval despite lower training mean"),
+        (1,"Best-checkpoint selection can capture an early peak epoch"),
+        (0,"Architecture gap < return-formulation gap — both arches broadly comparable"),
+    ],size=14,rich=True)
+
+    # Pool result (right panel)
+    rect(sl,8.65,1.22,4.40,0.38,RED)
+    box(sl,8.69,1.26,4.32,0.28,"Pool Training (38 functions) — Failed",
+        size=13,bold=True,color=WHITE,align=PP_ALIGN.CENTER)
+    pi = os.path.join(CKPT,"auto-tfx-pool.png")
+    if os.path.exists(pi): img(sl,pi,8.65,1.64,4.40)
+    bullet_box(sl,8.65,5.38,4.40,1.80,[
+        (0,"Trained on all 38 functions simultaneously"),
+        (0,"EV = 0.065 at epoch 100 — value head never converged"),
+        (0,"Greedy eval: all 38 functions negative (mean −2.50)"),
+        (0,"Cause: too few episodes per function to build reward signal"),
+        (0,"Key constraint: episodes per function, not total epochs"),
+    ],size=12,color=LGRAY,rich=True)
+content_slide(sl,"Results Summary & Pool-Training Outcome",_s20_summary)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 21 — Benchmarking Harness Rigor
 # ═══════════════════════════════════════════════════════════════════════════════
 sl = prs.slides.add_slide(BLANK)
 def _s18(sl):
@@ -937,18 +1075,18 @@ content_slide(sl,"Benchmarking Harness Rigor",_s18)
 sl = prs.slides.add_slide(BLANK)
 def _s19(sl):
     bullet_box(sl,0.45,1.25,5.90,5.80,[
-        (0,"Value head (EV ≈ 1) validates feature representation"),
-        (1,"48-dim delta features + action history sufficient to predict speedup"),
-        (1,"Batch-normalised advantages → ~50% reinforce / ~50% penalise"),
-        (0,"Episode return is theoretically clean:"),
-        (1,"Only externally measured quantity is r; uniform is unbiased"),
-        (1,"Value function disentangles per-step credit"),
-        (0,"Instruction-weighted shaping trades bias for lower variance"),
-        (1,"Total reward conserved; only redistribution changes"),
-        (1,"Helps value head early when policy makes many no-ops"),
-        (0,"Transformer vs GRU: complementary memory hypotheses"),
-        (1,"GRU: recency bias — free inductive prior, low parameter cost"),
-        (1,"TFX: non-local attention — learns which step-pairs matter"),
+        (0,"Episode return uses the true runtime signal directly"),
+        (1,"Every step in a winning sequence reinforced, even modest ones"),
+        (1,"No proxy metric — policy cannot be misled by IR statistics"),
+        (1,"Consistently steers toward faster binaries"),
+        (0,"Weighted return: proxy misalignment kills runtime gains"),
+        (1,"IR reduction rewarded; no gradient signal for actual speedup"),
+        (1,"Higher EV (0.87/0.86) but lower speedup (+6.5%/+9.2%) vs episode"),
+        (1,"ir_corr confirms: top IR-reducing fft sequences all −8% to −35% runtime"),
+        (0,"Transformer vs GRU: both architectures comparable"),
+        (1,"GRU: recency bias — free inductive prior, lower training convergence"),
+        (1,"TFX: non-local attention — slower training but similar final eval"),
+        (1,"Architecture gap < return-formulation gap"),
     ],size=15,rich=True)
     rect(sl,6.50,1.25,6.45,5.80,PANEL)
     box(sl,6.60,1.30,6.25,0.40,"Stop-Token Behaviour",size=17,bold=True,color=YELLOW)
@@ -983,10 +1121,10 @@ def _s20(sl):
         (1,"Effective horizon = K; Stop token unused"),
     ],size=16,rich=True)
     bullet_box(sl,0.45,4.30,5.90,2.80,[
-        (0,"Ongoing Work"),
-        (1,"Architecture comparison: Auto-GRU vs Auto-TFX"),
-        (1,"Return comparison: episode vs instruction-weighted"),
-        (1,"Hold-out pool evaluation on all 38 functions"),
+        (0,"Key Findings"),
+        (1,"Episode return > weighted: IR reduction is a poor runtime proxy"),
+        (1,"Pool (38 fn) failed to converge — episodes per function is the constraint"),
+        (1,"Architecture gap smaller than return-formulation gap"),
     ],size=16,rich=True)
     bullet_box(sl,6.50,1.25,6.45,5.70,[
         (0,"Future Directions"),
@@ -1009,17 +1147,17 @@ rect(sl,0,0,0.10,7.5,ACCENT)
 box(sl,0.6,0.5,12.1,0.7,"Conclusion",size=34,bold=True,color=WHITE)
 hline(sl,1.35,ACCENT,Pt(1))
 bullet_box(sl,0.6,1.52,12.0,5.10,[
-    (0,"Autoregressive RL policies learn to beat -O3 on every training benchmark"),
-    (1,"Auto-TFX + episode return: 6–28% speedup, mean 15.5% across 6 functions"),
-    (0,"Explained Variance ≈ 1 confirms the IR delta representation and learned value baseline"),
-    (1,"48-dim delta features + action history are sufficient to predict terminal speedup per-step"),
-    (0,"Two architectures (Auto-GRU, Auto-TFX) × two return formulations provide systematic comparison"),
-    (0,"Stop-token analysis reveals a structural incentive to exhaust the horizon"),
-    (1,"Rational response to terminal reward + unbounded expected future gain"),
-    (1,"Design fix: per-step length cost or Stop bonus calibrated to marginal return"),
-    (0,"Key insight: IR state must capture structural position within the function body"),
-    (1,"Delta representation encodes how instruction composition shifts across positional chunks"),
-    (1,"Structural changes like loop-rotate and licm are invisible to global count vectors"),
+    (0,"Episode return beats instruction-weighted for both architectures"),
+    (1,"TFX episode: greedy mean +10.4%, 5/6 functions · sample-best all 6 (2–27%)"),
+    (1,"GRU episode: greedy mean +11.4% — comparable to TFX despite slower training"),
+    (1,"Weighted: +6.5% (TFX) / +9.2% (GRU) — IR-reduction proxy diverges from speedup"),
+    (0,"ir_corr confirms IR reduction is not a reliable speedup predictor"),
+    (1,"Top IR-reducing fft sequences achieve −8% to −35% runtime — all slower than -O3"),
+    (0,"Stop-token analysis: policy always exhausts horizon K=20"),
+    (1,"Rational under terminal reward; fix requires per-step length cost or Stop bonus"),
+    (0,"Pool-wide training (38 fn) failed to converge — episodes/function is the binding constraint"),
+    (0,"Key insight: IR delta features must capture structural position, not global counts"),
+    (1,"loop-rotate, licm, sroa shifts invisible to global count vectors; visible to deltas"),
 ],size=17,color=WHITE,rich=True)
 box(sl,0.6,6.6,12.1,0.55,
     "Learning LLVM Pass Sequences via Reinforcement Learning with Autoregressive Policies"
